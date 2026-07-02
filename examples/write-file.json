@@ -1,0 +1,15 @@
+{
+  "name": "write file",
+  "steps": [
+    {
+      "id": "write",
+      "mode": "build",
+      "instruction": "write:tmp/harness-demo.txt\nhello from harness\n"
+    },
+    {
+      "id": "verify",
+      "mode": "build",
+      "instruction": "bash:test -f tmp/harness-demo.txt && cat tmp/harness-demo.txt"
+    }
+  ]
+}

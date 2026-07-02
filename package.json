@@ -1,0 +1,44 @@
+{
+  "name": "hyper-agent-harness",
+  "version": "0.1.0",
+  "description": "Terminal-first agent harness for local coding workflows",
+  "type": "module",
+  "bin": {
+    "harness": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "agent",
+    "harness",
+    "coding-agent",
+    "tui"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ai-sdk/tui": "^1.0.11",
+    "better-sqlite3": "^12.11.1",
+    "commander": "^14.0.2",
+    "diff": "^8.0.2",
+    "dotenv": "^17.2.3",
+    "execa": "^9.6.0",
+    "fast-glob": "^3.3.3",
+    "ignore": "^7.0.5",
+    "nanoid": "^5.1.6",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

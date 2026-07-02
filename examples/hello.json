@@ -3,7 +3,8 @@
   "steps": [
     {
       "id": "greet",
-      "instruction": "Say hello from the harness."
+      "mode": "build",
+      "instruction": "bash:echo hello from harness"
     }
   ]
 }
