@@ -1,0 +1,9 @@
+{
+  "name": "hello",
+  "steps": [
+    {
+      "id": "greet",
+      "instruction": "Say hello from the harness."
+    }
+  ]
+}
