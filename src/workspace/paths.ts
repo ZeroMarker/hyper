@@ -20,9 +20,10 @@ export interface RunPaths {
 }
 
 export function resolveWorkspace(root = process.cwd()): WorkspacePaths {
-  const dir = path.join(root, WORKSPACE_DIR);
+  const resolvedRoot = path.resolve(root);
+  const dir = path.join(resolvedRoot, WORKSPACE_DIR);
   return {
-    root,
+    root: resolvedRoot,
     dir,
     db: path.join(dir, 'harness.db'),
     runsDir: path.join(dir, 'runs'),
@@ -43,8 +44,14 @@ export function resolveRunPaths(workspace: WorkspacePaths, runId: string): RunPa
 }
 
 export function assertInsideRoot(root: string, target: string): void {
-  const relative = path.relative(root, target);
+  const relative = path.relative(path.resolve(root), path.resolve(target));
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(`path escapes workspace root: ${target}`);
   }
+}
+
+export function resolveWorkspacePath(root: string, targetPath: string): string {
+  const absolute = path.resolve(root, targetPath);
+  assertInsideRoot(root, absolute);
+  return absolute;
 }

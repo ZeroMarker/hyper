@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { nanoid } from 'nanoid';
-import { assertInsideRoot } from './paths.js';
+import { resolveWorkspacePath } from './paths.js';
 
 export interface Checkpoint {
   id: string;
@@ -16,8 +16,7 @@ export async function createCheckpoint(
   checkpointsDir: string,
   targetPath: string
 ): Promise<Checkpoint> {
-  const absoluteTarget = path.resolve(root, targetPath);
-  assertInsideRoot(root, absoluteTarget);
+  const absoluteTarget = resolveWorkspacePath(root, targetPath);
 
   await fs.mkdir(checkpointsDir, { recursive: true });
   const id = nanoid();
@@ -50,8 +49,7 @@ export async function createCheckpoint(
 }
 
 export async function restoreCheckpoint(root: string, checkpoint: Checkpoint): Promise<void> {
-  const absoluteTarget = path.resolve(root, checkpoint.targetPath);
-  assertInsideRoot(root, absoluteTarget);
+  const absoluteTarget = resolveWorkspacePath(root, checkpoint.targetPath);
 
   if (!checkpoint.existed) {
     await fs.rm(absoluteTarget, { force: true });

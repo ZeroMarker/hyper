@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import path from 'node:path';
+import { resolveWorkspacePath } from '../workspace/paths.js';
 import type { ToolContext, ToolOutput } from './types.js';
 
 export interface ReadInput {
@@ -11,7 +11,7 @@ export async function readTool(input: ReadInput, context: ToolContext): Promise<
   context.policy.assertAllowed({ mode: context.mode, action: 'read', target: input.path });
   await context.events.write('tool.started', { tool: 'read', input }, context.stepId ?? null, context.stepIndex ?? null);
 
-  const absolute = path.resolve(context.workspace.root, input.path);
+  const absolute = resolveWorkspacePath(context.workspace.root, input.path);
   const maxBytes = input.maxBytes ?? 64_000;
   const buffer = await fs.readFile(absolute);
   const truncated = buffer.byteLength > maxBytes;

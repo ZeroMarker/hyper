@@ -1,6 +1,5 @@
-import path from 'node:path';
 import type { AgentMode } from '../schemas/task.js';
-import { assertInsideRoot } from '../workspace/paths.js';
+import { resolveWorkspacePath } from '../workspace/paths.js';
 
 export type PolicyDecision = 'allow' | 'confirm' | 'deny';
 
@@ -30,8 +29,7 @@ export class PolicyEngine {
 
   evaluate(request: PolicyRequest): PolicyResult {
     if (request.target) {
-      const absolute = path.resolve(this.root, request.target);
-      assertInsideRoot(this.root, absolute);
+      resolveWorkspacePath(this.root, request.target);
     }
 
     if (request.action === 'read') {

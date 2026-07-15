@@ -36,6 +36,31 @@ describe('runTask', () => {
     expect(result.summary.failure?.message).toMatch(/read-only/);
   });
 
+  it('fails the run when a shell step exits non-zero', async () => {
+    const root = await tempRoot();
+    const result = await runTask({
+      name: 'fail-shell',
+      steps: [{ id: 'shell', mode: 'build', instruction: 'bash:exit 7', metadata: {} }],
+      metadata: {}
+    }, { root });
+
+    expect(result.summary.status).toBe('failed');
+    expect(result.summary.stepsSucceeded).toBe(0);
+    expect(result.summary.failure?.message).toContain('exit code 7');
+  });
+
+  it('rejects file access outside the workspace root', async () => {
+    const root = await tempRoot();
+    const result = await runTask({
+      name: 'escape',
+      steps: [{ id: 'read', mode: 'build', instruction: 'read:../outside.txt', metadata: {} }],
+      metadata: {}
+    }, { root });
+
+    expect(result.summary.status).toBe('failed');
+    expect(result.summary.failure?.message).toMatch(/escapes workspace root/);
+  });
+
   it('writes a file and can restore its checkpoint', async () => {
     const root = await tempRoot();
     await fs.writeFile(path.join(root, 'demo.txt'), 'before', 'utf8');

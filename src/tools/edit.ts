@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { createCheckpoint } from '../workspace/checkpoints.js';
+import { resolveWorkspacePath } from '../workspace/paths.js';
 import type { ToolContext, ToolOutput } from './types.js';
 
 export interface EditInput {
@@ -14,7 +14,7 @@ export async function editTool(input: EditInput, context: ToolContext): Promise<
   context.policy.assertAllowed({ mode: context.mode, action: 'write', target: input.path });
   await context.events.write('tool.started', { tool: 'edit', path: input.path }, context.stepId ?? null, context.stepIndex ?? null);
 
-  const absolute = path.resolve(context.workspace.root, input.path);
+  const absolute = resolveWorkspacePath(context.workspace.root, input.path);
   const before = await fs.readFile(absolute, 'utf8');
   if (!before.includes(input.search)) {
     throw new Error(`search text not found in ${input.path}`);

@@ -68,6 +68,9 @@ export async function runTask(task: TaskSpec, options: RunOptions = {}): Promise
 
       try {
         const output = await executeInstruction(step, context);
+        if (!output.ok) {
+          throw new Error(`tool reported failure: ${summarizeToolFailure(output.payload)}`);
+        }
         await events.write('step.finished', { output: output.payload }, step.id, index);
         addSessionMessage(session, 'assistant', `Step ${step.id} completed`, output.payload);
         stepsSucceeded += 1;
@@ -135,6 +138,20 @@ async function executeInstruction(step: StepSpec, context: ToolContext): Promise
   }
 
   return bashTool({ command: instruction, timeoutMs: step.timeoutMs }, context);
+}
+
+function summarizeToolFailure(payload: Record<string, unknown>): string {
+  const command = typeof payload.command === 'string' ? payload.command : undefined;
+  const exitCode = typeof payload.exitCode === 'number' ? payload.exitCode : undefined;
+  const stderr = typeof payload.stderr === 'string' && payload.stderr.trim()
+    ? payload.stderr.trim()
+    : undefined;
+
+  return [
+    command ? `command "${command}"` : undefined,
+    exitCode !== undefined ? `exit code ${exitCode}` : undefined,
+    stderr
+  ].filter(Boolean).join(', ') || 'unknown tool error';
 }
 
 export async function listRuns(root = process.cwd()) {

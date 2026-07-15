@@ -15,9 +15,10 @@ export async function searchTool(input: SearchInput, context: ToolContext): Prom
     reject: false,
     timeout: 30_000
   });
+  const exitCode = result.exitCode ?? 1;
   const lines = result.stdout.split('\n').filter(Boolean).slice(0, input.limit ?? 100);
-  const payload = { query: input.query, lines, exitCode: result.exitCode };
+  const payload = { query: input.query, lines, exitCode };
 
   await context.events.write('tool.finished', { tool: 'search', ...payload }, context.stepId ?? null, context.stepIndex ?? null);
-  return { ok: true, payload };
+  return { ok: exitCode <= 1, payload };
 }
