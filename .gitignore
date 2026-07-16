@@ -1,13 +1,5 @@
-.venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+target/
 node_modules/
-coverage/
 dist/
-build/
 .harness/
 .DS_Store

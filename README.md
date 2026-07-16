@@ -1,63 +1,84 @@
 # hyper
 
-Terminal-first agent harness for local coding workflows.
+Rust-native, terminal-first agent harness for local coding workflows.
 
-This MVP is a local product, not a general-purpose SDK. It provides a CLI and a minimal interactive TUI for running structured agent tasks, recording JSONL events, indexing runs in SQLite, and preserving artifacts/checkpoints under a project workspace.
+The CLI, task runner, policy engine, tools, workspace storage, SQLite index,
+checkpoints, sessions, and full-screen TUI are implemented in Rust. There is no
+Node.js runtime dependency.
 
-## Quick Start
+DeepSeek is the default model provider for natural-language tasks. The default
+model is `deepseek-v4-flash` and the default endpoint is
+`https://api.deepseek.com`.
 
-```bash
-npm install
-npm run build
-node dist/cli/index.js init
-node dist/cli/index.js run examples/hello.json
-node dist/cli/index.js runs
-```
+## Build
 
-During development:
+Rust 1.94 is selected by `rust-toolchain.toml`.
 
 ```bash
-npm run dev -- run examples/hello.json
-npm run dev -- tui
+cargo build --release
+cargo test
 ```
 
-## Workspace
+The release binaries are `target/release/hyper` and its short alias
+`target/release/hy`.
 
-`harness init` creates a local `.harness/` directory:
+## Quick start
 
-```text
-.harness/
-  harness.db
-  runs/
-    <run-id>/
-      events.jsonl
-      task.json
-      summary.json
-      artifacts/
-      checkpoints/
-  sessions/
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+cargo run -- init
+cargo run -- run examples/hello.json
+cargo run -- runs
+cargo run -- tui
 ```
 
-`events.jsonl` is the source of truth. SQLite is used only for local indexing and queries.
+After installing or copying either binary, the shortest workflow is:
+
+```bash
+hy                       # open TUI
+hy "implement login"     # build mode
+hy -p "analyze the bug"  # plan mode
+```
+
+On the first `hy` launch, Hyper securely prompts for the DeepSeek API key and
+stores it in the user configuration directory with owner-only permissions.
+Run `hy config` to replace it. `DEEPSEEK_API_KEY` remains the highest-priority
+override and is recommended for CI.
+
+Optional overrides:
+
+```bash
+export DEEPSEEK_MODEL="deepseek-v4-pro"
+export DEEPSEEK_BASE_URL="https://api.deepseek.com"
+```
+
+Natural-language `plan`, `build`, and TUI prompts use DeepSeek. Explicit
+instruction prefixes continue to use local deterministic tools and do not
+require an API key.
 
 ## Commands
 
-```bash
-harness init
-harness validate <task.json>
-harness run <task.json>
-harness plan "<query>"
-harness build "<command>"
-harness runs
-harness show <run-id>
-harness artifacts <run-id>
-harness undo <run-id>
-harness tui
+```text
+hyper init
+hyper validate <task.json>
+hyper run <task.json>
+hyper plan <prompt>
+hyper build <prompt>
+hyper runs [-n <limit>]
+hyper show <run-id>
+hyper artifacts <run-id>
+hyper undo <run-id>
+hyper tui
 ```
 
-When running from source, replace `harness` with `node dist/cli/index.js` or `npm run dev --`.
+Every command can use `hy` instead, for example `hy tui`.
+Common aliases remain available: `hy b`, `hy p`, `hy r`, `hy ls`, and `hy s`.
 
-## Task Format
+The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
+`Enter` to submit, arrow keys to select runs, and `Esc` to exit. Slash commands:
+`/help`, `/runs`, `/mode plan|build`, `/new`, and `/quit`.
+
+## Task format
 
 ```json
 {
@@ -72,20 +93,23 @@ When running from source, replace `harness` with `node dist/cli/index.js` or `np
 }
 ```
 
-Supported instruction prefixes:
+Supported instructions: `bash:`, `read:`, `search:`, `write:`, and `edit:`.
+Plan mode is read-only.
 
-- `bash:<command>`
-- `read:<path>`
-- `search:<text>`
-- `write:<path>\n<content>`
-- `edit:<path>\n<search>\n<replace>`
+## Workspace
 
-`plan` mode is read-only and denies file writes.
+Runs are stored beneath `.harness/` using the existing compatible layout:
 
-## Verification
-
-```bash
-npm run typecheck
-npm test
-npm run build
+```text
+.harness/
+  harness.db
+  runs/<run-id>/
+    events.jsonl
+    task.json
+    summary.json
+    artifacts/
+    checkpoints/
+  sessions/
 ```
+
+JSONL remains the audit log; SQLite provides the local run/event index.
