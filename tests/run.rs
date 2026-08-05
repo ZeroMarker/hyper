@@ -67,6 +67,65 @@ fn path_escape_is_rejected() {
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_read_escape_is_rejected() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+    symlink(outside.path(), dir.path().join("link")).unwrap();
+    let summary = run_task(
+        &task("escape", AgentMode::Build, "read:link/secret.txt"),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(
+        summary
+            .failure
+            .unwrap()
+            .message
+            .contains("escapes workspace root")
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_write_escape_is_rejected() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    symlink(outside.path(), dir.path().join("link")).unwrap();
+    let summary = run_task(
+        &task("escape", AgentMode::Build, "write:link/evil.txt\npwned"),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(
+        summary
+            .failure
+            .unwrap()
+            .message
+            .contains("escapes workspace root")
+    );
+    assert!(!outside.path().join("evil.txt").exists());
+}
+
+#[test]
+fn write_creates_nested_directories() {
+    let dir = tempdir().unwrap();
+    let summary = run_task(
+        &task("write", AgentMode::Build, "write:a/b/c.txt\nhello"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
+        "hello"
+    );
+}
+
 #[test]
 fn write_can_be_restored() {
     let dir = tempdir().unwrap();

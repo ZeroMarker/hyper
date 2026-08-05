@@ -157,13 +157,16 @@ fn read_task(path: &PathBuf) -> Result<TaskSpec> {
 
 fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
     let dir = root.join(".harness/runs").join(run_id).join("checkpoints");
-    let mut files = fs::read_dir(&dir)?
+    let mut files = fs::read_dir(&dir)
+        .with_context(|| format!("run {run_id} has no checkpoint directory"))?
         .filter_map(Result::ok)
         .map(|x| x.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect::<Vec<_>>();
     files.sort();
-    let path = files.last().context("no checkpoints for run")?;
+    let path = files
+        .last()
+        .with_context(|| format!("run {run_id} has no checkpoints"))?;
     let cp: Checkpoint = serde_json::from_slice(&fs::read(path)?)?;
     restore_checkpoint(root, &cp)?;
     println!("restored {} from checkpoint {}", cp.target_path, cp.id);

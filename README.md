@@ -1,5 +1,7 @@
 # hyper
 
+[![CI](https://github.com/ZeroMarker/hyper/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeroMarker/hyper/actions/workflows/ci.yml)
+
 Rust-native, terminal-first agent harness for local coding workflows.
 
 The CLI, task runner, policy engine, tools, workspace storage, SQLite index,

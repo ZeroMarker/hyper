@@ -33,4 +33,6 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败、路径隔离以及 checkpoint 恢复。
+Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败、路径隔离（含符号链接越界防护）以及 checkpoint 恢复。
+
+GitHub Actions 在 `main` 分支和 Pull Request 上自动运行 fmt/clippy/test/release 构建（`.github/workflows/ci.yml`）。

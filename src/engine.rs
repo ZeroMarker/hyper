@@ -60,17 +60,16 @@ fn assert_allowed(
     target: Option<&str>,
     command: Option<&str>,
 ) -> Result<()> {
+    // Read-only guard first so plan mode always gets the accurate diagnostic,
+    // regardless of the target path or shell command supplied.
+    if mode == AgentMode::Plan && (action == "write" || action == "bash") {
+        bail!("plan mode is read-only")
+    }
     if let Some(target) = target {
         resolve_path(root, target)?;
     }
-    if action == "write" && mode == AgentMode::Plan {
-        bail!("plan mode is read-only")
-    }
     if action == "bash" {
         let cmd = command.unwrap_or_default();
-        if mode == AgentMode::Plan {
-            bail!("bash requires confirmation in plan mode")
-        };
         for dangerous in ["rm -rf", "sudo", "chmod -R", "chown -R", "/dev/sd", "dd "] {
             if cmd.contains(dangerous) {
                 bail!("command matches dangerous pattern")
@@ -524,16 +523,15 @@ pub fn latest_model_reply(root: impl AsRef<Path>, run_id: &str) -> Result<Option
     let workspace = Workspace::open(root)?;
     let events = workspace.events(run_id)?;
     Ok(events.iter().rev().find_map(|event| {
-        (event.event_type == "model.finished")
-            .then(|| {
-                event
-                    .payload
-                    .get("response")?
-                    .get("content")?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .flatten()
+        if event.event_type != "model.finished" {
+            return None;
+        }
+        event
+            .payload
+            .get("response")?
+            .get("content")?
+            .as_str()
+            .map(str::to_owned)
     }))
 }
 

@@ -131,17 +131,20 @@ impl Workspace {
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRow>> {
         let mut stmt = self.db.prepare("SELECT run_id,task_id,task_name,status,started_at,finished_at FROM runs WHERE run_id=?1")?;
         let mut rows = stmt.query([run_id])?;
-        Ok(rows.next()?.map(|r| RunRow {
-            run_id: r.get(0).unwrap(),
-            task_id: r.get(1).unwrap(),
-            task_name: r.get(2).unwrap(),
-            status: r.get(3).unwrap(),
-            started_at: r.get(4).unwrap(),
-            finished_at: r.get(5).unwrap(),
-        }))
+        Ok(match rows.next()? {
+            None => None,
+            Some(r) => Some(RunRow {
+                run_id: r.get(0)?,
+                task_id: r.get(1)?,
+                task_name: r.get(2)?,
+                status: r.get(3)?,
+                started_at: r.get(4)?,
+                finished_at: r.get(5)?,
+            }),
+        })
     }
     pub fn events(&self, run_id: &str) -> Result<Vec<HarnessEvent>> {
-        let mut stmt=self.db.prepare("SELECT event_id,run_id,task_id,type,timestamp,step_id,step_index,payload_json FROM events WHERE run_id=?1 ORDER BY timestamp")?;
+        let mut stmt=self.db.prepare("SELECT event_id,run_id,task_id,type,timestamp,step_id,step_index,payload_json FROM events WHERE run_id=?1 ORDER BY timestamp,rowid")?;
         Ok(stmt
             .query_map([run_id], |r| {
                 let payload: String = r.get(7)?;
@@ -175,7 +178,31 @@ pub fn resolve_path(root: &Path, target: &str) -> Result<PathBuf> {
     if !normalized.starts_with(root) {
         bail!("path escapes workspace root: {target}")
     }
-    Ok(normalized)
+    // Follow symlinks in the existing portion of the path so a link inside the
+    // workspace cannot smuggle reads or writes outside of it. Fail closed when
+    // the prefix cannot be resolved (e.g. a dangling symlink).
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut existing = normalized.clone();
+    let mut tail = Vec::new();
+    while fs::symlink_metadata(&existing).is_err() {
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                existing.pop();
+            }
+            None => return Ok(normalized),
+        }
+    }
+    let canonical = fs::canonicalize(&existing)
+        .with_context(|| format!("cannot resolve symlink path: {target}"))?;
+    if !canonical.starts_with(&root) {
+        bail!("path escapes workspace root: {target}")
+    }
+    let mut resolved = canonical;
+    for name in tail.iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
