@@ -48,23 +48,27 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binaries
+      - name: Package binaries (unix)
+        if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            cp target/${{ matrix.target }}/release/hyper.exe dist/
-            cp target/${{ matrix.target }}/release/hy.exe dist/
-            (cd dist && zip -r ../hyper-${{ matrix.suffix }}.zip .)
-          else
-            cp target/${{ matrix.target }}/release/hyper dist/
-            cp target/${{ matrix.target }}/release/hy dist/
-            tar -czf hyper-${{ matrix.suffix }}.tar.gz -C dist .
-          fi
+          cp target/${{ matrix.target }}/release/hyper dist/
+          cp target/${{ matrix.target }}/release/hy dist/
+          tar -czf hyper-${{ matrix.suffix }}.tar.gz -C dist .
+
+      - name: Package binaries (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/hyper.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/hy.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath hyper-${{ matrix.suffix }}.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: hyper-${{ matrix.suffix }}
           path: hyper-${{ matrix.suffix }}.${{ matrix.archive }}
@@ -75,7 +79,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
