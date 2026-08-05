@@ -379,16 +379,16 @@ fn bash(
     command: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "bash", None, Some(command))?;
-    if let Some(gate) = &events.gate {
-        if !gate.request("bash", command) {
-            events.write(
-                "tool.denied",
-                json!({"tool":"bash","command":command}),
-                Some(&step.id),
-                Some(index),
-            )?;
-            bail!("user denied bash command")
-        }
+    if let Some(gate) = &events.gate
+        && !gate.request("bash", command)
+    {
+        events.write(
+            "tool.denied",
+            json!({"tool":"bash","command":command}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        bail!("user denied bash command")
     }
     events.write(
         "tool.started",
@@ -516,16 +516,16 @@ fn write_file(
     content: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "write", Some(path), None)?;
-    if let Some(gate) = &events.gate {
-        if !gate.request("write", path) {
-            events.write(
-                "tool.denied",
-                json!({"tool":"write","path":path}),
-                Some(&step.id),
-                Some(index),
-            )?;
-            bail!("user denied write to {path}")
-        }
+    if let Some(gate) = &events.gate
+        && !gate.request("write", path)
+    {
+        events.write(
+            "tool.denied",
+            json!({"tool":"write","path":path}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        bail!("user denied write to {path}")
     }
     events.write(
         "tool.started",
@@ -568,16 +568,16 @@ fn edit_file(
     replace: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "write", Some(path), None)?;
-    if let Some(gate) = &events.gate {
-        if !gate.request("edit", path) {
-            events.write(
-                "tool.denied",
-                json!({"tool":"edit","path":path}),
-                Some(&step.id),
-                Some(index),
-            )?;
-            bail!("user denied edit to {path}")
-        }
+    if let Some(gate) = &events.gate
+        && !gate.request("edit", path)
+    {
+        events.write(
+            "tool.denied",
+            json!({"tool":"edit","path":path}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        bail!("user denied edit to {path}")
     }
     events.write(
         "tool.started",
