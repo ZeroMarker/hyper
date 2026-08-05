@@ -78,7 +78,8 @@ Common aliases remain available: `hy b`, `hy p`, `hy r`, `hy ls`, and `hy s`.
 
 The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
 `Enter` to submit, arrow keys to select runs, and `Esc` to exit. Slash commands:
-`/help`, `/runs`, `/mode plan|build`, `/new`, and `/quit`.
+`/help`, `/runs`, `/mode plan|build`, `/new`, and `/quit`. `/runs` lists recent
+runs inline.
 
 ## Task format
 
@@ -97,6 +98,13 @@ The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
 
 Supported instructions: `bash:`, `read:`, `search:`, `write:`, and `edit:`.
 Plan mode is read-only.
+
+A step whose instruction has no tool prefix runs the **tool-calling agent**:
+the model inspects the workspace context, calls tools (`read`, `search`,
+`bash`, `write`, `edit`) in a loop, and feeds each result back until it
+produces a final answer (capped at 12 turns). In plan mode the model only sees
+the read-only tools. The optional per-step `tools` field acts as an allowlist:
+`"tools": ["read", "search"]` restricts that step to the listed tools.
 
 ## Workspace
 

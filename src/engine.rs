@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use wait_timeout::ChildExt;
 
 use crate::{
-    deepseek::{DeepSeekConfig, chat},
+    deepseek::{DeepSeekConfig, ToolSpec, chat_messages, system_prompt},
     model::*,
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
 };
@@ -87,6 +87,15 @@ fn tool(
     index: usize,
 ) -> Result<(bool, Value)> {
     let instruction = step.instruction.trim();
+    const TOOLS: [&str; 5] = ["bash", "read", "search", "write", "edit"];
+    if let Some(name) = TOOLS
+        .iter()
+        .find(|t| instruction.starts_with(&format!("{t}:")))
+    {
+        if !tool_allowed(step, name) {
+            bail!("tool '{name}' is not allowed for step '{}'", step.id)
+        }
+    }
     if let Some(command) = instruction.strip_prefix("bash:") {
         return bash(events, root, step, index, command.trim());
     }
@@ -104,36 +113,202 @@ fn tool(
         let mut lines = body.splitn(3, '\n');
         let path = lines.next().unwrap_or("").trim();
         let search = lines.next().unwrap_or("");
-        let replace = lines.next().unwrap_or("");
+        let replace = match lines.next() {
+            Some(replace) => replace,
+            None => bail!("edit: expected format 'path\\nsearch\\nreplace'"),
+        };
+        if search.trim().is_empty() {
+            bail!("edit: search text must not be empty")
+        }
         return edit_file(events, run, root, step, index, path, search, replace);
     }
-    model(events, root, step, index, instruction)
+    agent(events, run, root, step, index, instruction)
 }
 
-fn model(
+fn tool_allowed(step: &StepSpec, name: &str) -> bool {
+    step.tools
+        .as_ref()
+        .is_none_or(|tools| tools.iter().any(|allowed| allowed == name))
+}
+
+/// The tool-calling agent loop: the model chooses tools to call, each call is
+/// executed and its result fed back as an observation, until the model replies
+/// without tool calls or the turn budget is exhausted.
+fn agent(
     events: &EventWriter<'_>,
+    run: &RunPaths,
     root: &Path,
     step: &StepSpec,
     index: usize,
     prompt: &str,
 ) -> Result<(bool, Value)> {
+    const MAX_TURNS: usize = 12;
     let config = DeepSeekConfig::from_env()?;
     events.write(
         "model.started",
-        json!({"provider":"deepseek","model":config.model}),
+        json!({"provider":"deepseek","model":config.model,"agent":true,"maxTurns":MAX_TURNS}),
         Some(&step.id),
         Some(index),
     )?;
     let context = workspace_context(root)?;
-    let reply = chat(&config, prompt, step.mode, &context)?;
-    let payload = serde_json::to_value(&reply)?;
-    events.write(
-        "model.finished",
-        json!({"provider":"deepseek","response":payload}),
-        Some(&step.id),
-        Some(index),
-    )?;
-    Ok((true, payload))
+    let mut messages = vec![
+        json!({ "role": "system", "content": system_prompt(step.mode) }),
+        json!({ "role": "user", "content": format!(
+            "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
+        ) }),
+    ];
+    let specs = tool_specs_for(step);
+    for turn in 0..MAX_TURNS {
+        let reply = chat_messages(&config, &messages, Some(&specs))?;
+        events.write(
+            "model.iteration",
+            json!({"turn":turn,"model":reply.model,"usage":reply.usage}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        if reply.tool_calls.is_empty() {
+            let payload = serde_json::to_value(&reply)?;
+            events.write(
+                "model.finished",
+                json!({"provider":"deepseek","response":payload}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            return Ok((true, payload));
+        }
+        events.write(
+            "model.tool_calls",
+            json!({"turn":turn,"calls":reply.tool_calls.iter().map(|call| json!({
+                "id":call.id,"name":call.function.name,"arguments":call.function.arguments
+            })).collect::<Vec<_>>()}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        messages.push(json!({
+            "role":"assistant",
+            "content": if reply.content.is_empty() { Value::Null } else { json!(reply.content) },
+            "tool_calls": reply.tool_calls.iter().map(|call| json!({
+                "id":call.id,"type":"function",
+                "function":{"name":call.function.name,"arguments":call.function.arguments}
+            })).collect::<Vec<_>>(),
+        }));
+        for call in &reply.tool_calls {
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                step,
+                index,
+                &call.function.name,
+                &call.function.arguments,
+            );
+            messages.push(json!({
+                "role":"tool",
+                "tool_call_id":call.id,
+                "content": observation,
+            }));
+        }
+    }
+    bail!("agent exceeded {MAX_TURNS} tool-calling turns")
+}
+
+fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
+    let all = vec![
+        ToolSpec {
+            name: "read",
+            description: "Read a text file inside the workspace (up to 64 KB).",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "search",
+            description: "Search for a fixed string across the workspace using rg.",
+            parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+        },
+        ToolSpec {
+            name: "bash",
+            description: "Run a shell command in the workspace root and capture stdout and stderr.",
+            parameters: json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+        },
+        ToolSpec {
+            name: "write",
+            description: "Create or overwrite a file inside the workspace with the given content.",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
+        },
+        ToolSpec {
+            name: "edit",
+            description: "Replace the first occurrence of a search string in a file with a replacement.",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"}},"required":["path","search","replace"]}),
+        },
+    ];
+    let mut specs = all;
+    if step.mode == AgentMode::Plan {
+        specs.retain(|spec| matches!(spec.name, "read" | "search"));
+    }
+    if let Some(allow) = &step.tools {
+        specs.retain(|spec| allow.iter().any(|name| name == spec.name));
+    }
+    specs
+}
+
+fn arg_str(args: &Value, key: &str) -> &str {
+    args.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+fn run_agent_tool(
+    events: &EventWriter<'_>,
+    run: &RunPaths,
+    root: &Path,
+    step: &StepSpec,
+    index: usize,
+    name: &str,
+    arguments: &str,
+) -> String {
+    const MAX_OBSERVATION: usize = 4_000;
+    let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    let result = match name {
+        "bash" => bash(events, root, step, index, arg_str(&args, "command")),
+        "read" => read(events, root, step, index, arg_str(&args, "path")),
+        "search" => search(events, root, step, index, arg_str(&args, "query"), 100),
+        "write" => write_file(
+            events,
+            run,
+            root,
+            step,
+            index,
+            arg_str(&args, "path"),
+            arg_str(&args, "content"),
+        ),
+        "edit" => edit_file(
+            events,
+            run,
+            root,
+            step,
+            index,
+            arg_str(&args, "path"),
+            arg_str(&args, "search"),
+            arg_str(&args, "replace"),
+        ),
+        other => Err(anyhow::anyhow!("unknown tool: {other}")),
+    };
+    let text = match result {
+        Ok((true, payload)) => serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("serialize error: {error}")),
+        Ok((false, payload)) => {
+            let code = payload
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            let stderr = payload.get("stderr").and_then(Value::as_str).unwrap_or("");
+            if stderr.trim().is_empty() {
+                serde_json::to_string(&payload)
+                    .unwrap_or_else(|error| format!("serialize error: {error}"))
+            } else {
+                format!("tool failed (exit {code}): {}", stderr.trim())
+            }
+        }
+        Err(error) => format!("tool error: {error}"),
+    };
+    truncate_utf8(&text, MAX_OBSERVATION).to_owned()
 }
 
 fn workspace_context(root: &Path) -> Result<String> {
@@ -456,7 +631,7 @@ fn fail(
     message: String,
 ) -> Result<Failure> {
     let failure = Failure {
-        error_type: "Error".into(),
+        error_type: classify_error(&message).into(),
         message,
         retryable: false,
         step_id: Some(step.id.clone()),
@@ -478,6 +653,22 @@ fn fail(
     events.write("run.failed", json!({"failure":failure}), None, None)?;
     Ok(failure)
 }
+fn classify_error(message: &str) -> &'static str {
+    if message.contains("plan mode is read-only")
+        || message.contains("dangerous pattern")
+        || message.contains("escapes workspace root")
+        || message.contains("not allowed for step")
+    {
+        "PolicyError"
+    } else if message.contains("DeepSeek") || message.contains("agent exceeded") {
+        "ModelError"
+    } else if message.contains("not found in") || message.contains("expected format") {
+        "ToolError"
+    } else {
+        "Error"
+    }
+}
+
 fn save_session(workspace: &Workspace, summary: &RunSummary) -> Result<()> {
     let id = workspace::id();
     let messages = [

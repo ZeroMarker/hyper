@@ -1,6 +1,8 @@
 mod ui;
 
-use crate::{AgentMode, latest_display_output, prompt_to_task, run_task};
+use crate::{
+    AgentMode, deepseek::DEFAULT_MODEL, latest_display_output, list_runs, prompt_to_task, run_task,
+};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -19,6 +21,7 @@ pub struct App {
     pub root: PathBuf,
     pub input: String,
     pub mode: AgentMode,
+    pub model: String,
     pub output: Vec<String>,
     pub busy: bool,
     pub quit: bool,
@@ -35,10 +38,15 @@ enum Message {
 impl App {
     fn new(root: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
+        let model = std::env::var("DEEPSEEK_MODEL")
+            .ok()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.into());
         Self {
             root,
             input: String::new(),
             mode: AgentMode::Build,
+            model,
             output: vec!["Hyper\n你好，需要我帮你做什么？".into()],
             busy: false,
             quit: false,
@@ -59,9 +67,32 @@ impl App {
         match value.as_str() {
             "/quit" | "/exit" => self.quit = true,
             "/new" => self.output.clear(),
-            "/runs" => self
-                .output
-                .push("Hyper\n请使用 `hy ls` 查看运行历史。".into()),
+            "/runs" => match list_runs(&self.root, 8) {
+                Ok(runs) if runs.is_empty() => self
+                    .output
+                    .push("Hyper\n暂无运行记录。运行一个任务后会显示在这里。".into()),
+                Ok(runs) => {
+                    let lines = runs
+                        .iter()
+                        .map(|run| {
+                            format!(
+                                "{}  {}  {}  {}",
+                                &run.run_id[..run.run_id.len().min(8)],
+                                run.status,
+                                run.task_name,
+                                run.started_at
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.output.push(format!(
+                        "Hyper\n最近运行（`hy show <run-id>` 查看详情）：\n{lines}"
+                    ));
+                }
+                Err(error) => self
+                    .output
+                    .push(format!("Hyper\n无法读取运行记录：{error}")),
+            },
             "/config" => self
                 .output
                 .push("Hyper\n退出后运行 `hy config` 可重新配置 API Key。".into()),

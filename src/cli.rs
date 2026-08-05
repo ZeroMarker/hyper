@@ -157,17 +157,40 @@ fn read_task(path: &PathBuf) -> Result<TaskSpec> {
 
 fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
     let dir = root.join(".harness/runs").join(run_id).join("checkpoints");
-    let mut files = fs::read_dir(&dir)
+    let files = fs::read_dir(&dir)
         .with_context(|| format!("run {run_id} has no checkpoint directory"))?
         .filter_map(Result::ok)
-        .map(|x| x.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
         .collect::<Vec<_>>();
-    files.sort();
-    let path = files
+    let mut checkpoints = Vec::new();
+    for file in &files {
+        if let Ok(checkpoint) = serde_json::from_slice::<Checkpoint>(&fs::read(file)?) {
+            checkpoints.push((file.clone(), checkpoint));
+        }
+    }
+    if checkpoints.is_empty() {
+        bail!("run {run_id} has no checkpoints")
+    }
+    // Checkpoint file names are random ids, so the latest checkpoint must be
+    // picked by creation time, not by filename sort.
+    checkpoints.sort_by(|(a_path, a), (b_path, b)| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| {
+                let modified = |path: &std::path::Path| {
+                    fs::metadata(path)
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH)
+                };
+                modified(a_path).cmp(&modified(b_path))
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let cp = checkpoints
         .last()
-        .with_context(|| format!("run {run_id} has no checkpoints"))?;
-    let cp: Checkpoint = serde_json::from_slice(&fs::read(path)?)?;
+        .map(|(_, checkpoint)| checkpoint.clone())
+        .expect("checkpoint list is non-empty after the empty check above");
     restore_checkpoint(root, &cp)?;
     println!("restored {} from checkpoint {}", cp.target_path, cp.id);
     Ok(())
@@ -176,6 +199,41 @@ fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::HashMap, fs, thread, time::Duration};
+    use tempfile::tempdir;
+
+    fn task(name: &str, instruction: &str) -> TaskSpec {
+        TaskSpec {
+            id: None,
+            name: name.into(),
+            steps: vec![StepSpec {
+                id: "step".into(),
+                mode: AgentMode::Build,
+                instruction: instruction.into(),
+                tools: None,
+                timeout_ms: None,
+                metadata: HashMap::new(),
+            }],
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn undo_restores_most_recent_checkpoint() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("demo.txt");
+        // First write creates a checkpoint of the empty state, then the file is "A".
+        run_task(&task("first", "write:demo.txt\nA"), dir.path()).unwrap();
+        thread::sleep(Duration::from_millis(10));
+        // Second write creates a checkpoint of "A", then the file becomes "B".
+        let summary = run_task(&task("second", "write:demo.txt\nB"), dir.path()).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "B");
+
+        undo(dir.path(), &summary.run_id).unwrap();
+        // Undo must restore the newest checkpoint (the pre-second-write state "A"),
+        // regardless of random checkpoint file names.
+        assert_eq!(fs::read_to_string(&file).unwrap(), "A");
+    }
 
     #[test]
     fn direct_prompt_defaults_to_build() {

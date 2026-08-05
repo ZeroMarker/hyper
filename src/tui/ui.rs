@@ -28,7 +28,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     };
     let header = Line::from(vec![
         Span::styled(" Hyper ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("DeepSeek V4 Flash", Style::default().fg(Color::Magenta)),
+        Span::styled(app.model.as_str(), Style::default().fg(Color::Magenta)),
         Span::raw("  •  "),
         Span::styled(app.mode.as_str(), Style::default().fg(mode_color)),
     ]);

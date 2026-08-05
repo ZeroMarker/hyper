@@ -10,6 +10,17 @@ use crate::AgentMode;
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
+pub fn system_prompt(mode: AgentMode) -> &'static str {
+    match mode {
+        AgentMode::Plan => {
+            "You are the planning agent for Hyper, a local coding agent. The current project's context is provided in the user message, and you can call the read-only tools `read` and `search` to inspect files. Analyze the project directly and return a concise, read-only implementation plan. Never ask for a project path when context is present, never invent tool syntax, and never claim to have modified files."
+        }
+        AgentMode::Build => {
+            "You are the coding agent for Hyper, a local Rust coding agent. The current project's context is provided in the user message, and you can call tools to accomplish the task: `read`, `search`, `bash`, `write`, `edit`. Inspect files before editing, prefer `edit` for small changes, and verify your work when possible. When the task is complete, reply with a concise summary of what you did. Never ask for a project path when context is present, and never invent tool syntax."
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct StoredConfig {
     deepseek_api_key: String,
@@ -95,11 +106,36 @@ fn save_key(key: &str) -> Result<()> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ToolFunction,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Schema description of a callable tool, sent to the model as an
+/// OpenAI-compatible `tools` entry.
+#[derive(Clone, Debug)]
+pub struct ToolSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelReply {
     pub content: String,
     pub reasoning_content: Option<String>,
     pub model: String,
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -125,40 +161,40 @@ struct Choice {
 struct Message {
     content: Option<String>,
     reasoning_content: Option<String>,
+    tool_calls: Option<Vec<ToolCall>>,
 }
 
-pub fn chat(
+/// Send a chat request with an arbitrary message history. When `tools` is
+/// provided, the request advertises OpenAI-compatible function calling and
+/// the reply may carry `tool_calls` for the caller to execute.
+pub fn chat_messages(
     config: &DeepSeekConfig,
-    prompt: &str,
-    mode: AgentMode,
-    workspace_context: &str,
+    messages: &[serde_json::Value],
+    tools: Option<&[ToolSpec]>,
 ) -> Result<ModelReply> {
-    let system = match mode {
-        AgentMode::Plan => {
-            "You are the planning model for Hyper, a local coding agent. The current project's context is provided in the user message. Analyze that project directly and return a concise, read-only implementation plan. Never ask for a project path when context is present. Do not invent tool prefixes or claim to have modified files."
-        }
-        AgentMode::Build => {
-            "You are the default coding model for Hyper, a local Rust coding agent. The current project's context is provided in the user message. Use it directly when answering. Never ask for a project path when context is present, and never invent unsupported tool syntax. Be concrete and concise."
-        }
-    };
     let endpoint = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let mut body = json!({ "model": config.model, "messages": messages, "stream": false });
+    if let Some(tools) = tools {
+        body["tools"] = json!(
+            tools
+                .iter()
+                .map(|tool| json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
     let response = Client::builder()
         .timeout(config.timeout)
         .build()?
         .post(endpoint)
         .bearer_auth(&config.api_key)
-        .json(&json!({
-            "model": config.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": format!(
-                    "<workspace_context>\n{}\n</workspace_context>\n\n<request>\n{}\n</request>",
-                    workspace_context,
-                    prompt
-                )}
-            ],
-            "stream": false
-        }))
+        .json(&body)
         .send()
         .context("failed to call DeepSeek API")?;
     let status = response.status();
@@ -179,7 +215,24 @@ pub fn chat(
         reasoning_content: message.reasoning_content,
         model: parsed.model,
         usage: parsed.usage,
+        tool_calls: message.tool_calls.unwrap_or_default(),
     })
+}
+
+/// One-shot chat request without tool calling (kept for simple prompts).
+pub fn chat(
+    config: &DeepSeekConfig,
+    prompt: &str,
+    mode: AgentMode,
+    workspace_context: &str,
+) -> Result<ModelReply> {
+    let messages = vec![
+        json!({ "role": "system", "content": system_prompt(mode) }),
+        json!({ "role": "user", "content": format!(
+            "<workspace_context>\n{workspace_context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
+        ) }),
+    ];
+    chat_messages(config, &messages, None)
 }
 
 #[cfg(test)]

@@ -20,6 +20,22 @@ fn task(name: &str, mode: AgentMode, instruction: &str) -> TaskSpec {
     }
 }
 
+fn task_with_tools(name: &str, tools: Vec<String>, instruction: &str) -> TaskSpec {
+    TaskSpec {
+        id: None,
+        name: name.into(),
+        steps: vec![StepSpec {
+            id: "step".into(),
+            mode: AgentMode::Build,
+            instruction: instruction.into(),
+            tools: Some(tools),
+            timeout_ms: None,
+            metadata: HashMap::new(),
+        }],
+        metadata: HashMap::new(),
+    }
+}
+
 #[test]
 fn shell_run_records_events() {
     let dir = tempdir().unwrap();
@@ -124,6 +140,73 @@ fn write_creates_nested_directories() {
         fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
         "hello"
     );
+}
+
+#[test]
+fn edit_requires_search_and_replace_lines() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.txt"), "before after").unwrap();
+    // Missing replace line would silently delete the search text; it must be rejected.
+    let summary = run_task(
+        &task("edit", AgentMode::Build, "edit:demo.txt\nbefore"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "failed");
+    assert!(summary.failure.unwrap().message.contains("expected format"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("demo.txt")).unwrap(),
+        "before after"
+    );
+}
+
+#[test]
+fn edit_replaces_first_occurrence() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.txt"), "a b a").unwrap();
+    let summary = run_task(
+        &task("edit", AgentMode::Build, "edit:demo.txt\na\nX"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("demo.txt")).unwrap(),
+        "X b a"
+    );
+}
+
+#[test]
+fn step_tools_allowlist_is_enforced() {
+    let dir = tempdir().unwrap();
+    let summary = run_task(
+        &task_with_tools(
+            "restricted",
+            vec!["read".into()],
+            "bash:echo should-not-run",
+        ),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "failed");
+    assert!(
+        summary
+            .failure
+            .unwrap()
+            .message
+            .contains("not allowed for step")
+    );
+}
+
+#[test]
+fn step_tools_allowlist_allows_configured_tools() {
+    let dir = tempdir().unwrap();
+    let summary = run_task(
+        &task_with_tools("allowed", vec!["bash".into()], "bash:echo ok"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
 }
 
 #[test]

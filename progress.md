@@ -11,9 +11,11 @@
 - [x] JSONL 事件事实日志和 Rusqlite 本地索引。
 - [x] `.harness` workspace、run artifacts、sessions 和 checkpoint/undo。
 - [x] `read`、`write`、`edit`、`bash`、`search` 工具。
-- [x] plan/build 策略、路径越界防护和危险 shell 命令拦截。
+- [x] plan/build 策略、路径越界防护（含符号链接逃逸防护）和危险 shell 命令拦截。
 - [x] Ratatui + Crossterm 全屏 TUI，直接调用 Rust 核心，无子进程桥接。
 - [x] 默认接入 DeepSeek OpenAI-compatible API；默认模型 `deepseek-v4-flash`，支持环境变量覆盖。
+- [x] tool-calling agent loop：模型在 loop 中自主调用 `read`/`search`/`bash`/`write`/`edit`，观测结果回传直至产出最终答复（上限 12 轮）；plan 模式只暴露只读工具；`tools` 字段作为白名单。
+- [x] 跨平台发布流水线（Windows/macOS/Linux，tag `v*` 触发，自动上传 GitHub Release）。
 - [x] 兼容原有 task JSON、workspace 目录和 SQLite schema。
 - [x] 删除 TypeScript 源码、npm manifest、Vitest 和 Node 构建产物。
 
@@ -33,6 +35,6 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败、路径隔离（含符号链接越界防护）以及 checkpoint 恢复。
+Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败、路径隔离（含符号链接越界防护）、edit 指令校验、tools 白名单、checkpoint 恢复以及 undo 恢复最新 checkpoint。
 
 GitHub Actions 在 `main` 分支和 Pull Request 上自动运行 fmt/clippy/test/release 构建（`.github/workflows/ci.yml`）。
