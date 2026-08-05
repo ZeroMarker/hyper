@@ -91,10 +91,9 @@ fn tool(
     if let Some(name) = TOOLS
         .iter()
         .find(|t| instruction.starts_with(&format!("{t}:")))
+        && !tool_allowed(step, name)
     {
-        if !tool_allowed(step, name) {
-            bail!("tool '{name}' is not allowed for step '{}'", step.id)
-        }
+        bail!("tool '{name}' is not allowed for step '{}'", step.id)
     }
     if let Some(command) = instruction.strip_prefix("bash:") {
         return bash(events, root, step, index, command.trim());
