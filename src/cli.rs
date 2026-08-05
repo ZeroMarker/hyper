@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 
 use crate::{
     AgentMode, Checkpoint, TaskSpec, Workspace, deepseek::ensure_api_key, get_run_details,
@@ -56,8 +57,18 @@ enum Commands {
         run_id: String,
     },
     Tui,
+    Diff {
+        run_id: String,
+    },
     Artifacts {
         run_id: String,
+    },
+    Checkpoints {
+        run_id: String,
+    },
+    Restore {
+        run_id: String,
+        checkpoint_id: String,
     },
     Undo {
         run_id: String,
@@ -125,14 +136,84 @@ pub fn run() -> Result<()> {
             ensure_api_key(false)?;
             tui::run(root)?
         }
-        Commands::Artifacts { run_id } => println!(
-            "{}",
-            root.join(".harness/runs")
-                .join(run_id)
-                .join("artifacts")
-                .display()
-        ),
+        Commands::Diff { run_id } => diff(&root, &run_id)?,
+        Commands::Artifacts { run_id } => artifacts(&root, &run_id)?,
+        Commands::Checkpoints { run_id } => {
+            let workspace = Workspace::open(&root)?;
+            let checkpoints = workspace.list_checkpoints(&run_id)?;
+            if checkpoints.is_empty() {
+                bail!("run {run_id} has no checkpoints")
+            }
+            for checkpoint in checkpoints {
+                println!(
+                    "{}\t{}\t{}",
+                    checkpoint.id, checkpoint.target_path, checkpoint.created_at
+                )
+            }
+        }
+        Commands::Restore {
+            run_id,
+            checkpoint_id,
+        } => {
+            let workspace = Workspace::open(&root)?;
+            let checkpoints = workspace.list_checkpoints(&run_id)?;
+            let checkpoint = checkpoints
+                .into_iter()
+                .find(|checkpoint| checkpoint.id == checkpoint_id)
+                .with_context(|| format!("no checkpoint {checkpoint_id} for run {run_id}"))?;
+            restore_checkpoint(&root, &checkpoint)?;
+            println!(
+                "restored {} from checkpoint {}",
+                checkpoint.target_path, checkpoint.id
+            );
+        }
         Commands::Undo { run_id } => undo(&root, &run_id)?,
+    }
+    Ok(())
+}
+
+fn diff(root: &std::path::Path, run_id: &str) -> Result<()> {
+    let (run, events) = get_run_details(root, run_id)?;
+    if run.is_none() {
+        bail!("run not found: {run_id}")
+    }
+    let mut printed = 0;
+    for event in &events {
+        if event.event_type != "tool.finished" {
+            continue;
+        }
+        let Some(diff) = event.payload.get("diff").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = event
+            .payload
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        println!("--- {path} ---");
+        println!("{diff}");
+        printed += 1;
+    }
+    if printed == 0 {
+        println!("(no file diffs recorded for run {run_id})");
+    }
+    Ok(())
+}
+
+fn artifacts(root: &std::path::Path, run_id: &str) -> Result<()> {
+    let dir = root.join(".harness/runs").join(run_id).join("artifacts");
+    let entries = fs::read_dir(&dir)
+        .with_context(|| format!("run {run_id} has no artifacts directory"))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        println!("(no artifacts for run {run_id})");
+        return Ok(());
+    }
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        println!("{name}\t{size}");
     }
     Ok(())
 }

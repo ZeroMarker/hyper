@@ -15,6 +15,9 @@
 - [x] Ratatui + Crossterm 全屏 TUI，直接调用 Rust 核心，无子进程桥接。
 - [x] 默认接入 DeepSeek OpenAI-compatible API；默认模型 `deepseek-v4-flash`，支持环境变量覆盖。
 - [x] tool-calling agent loop：模型在 loop 中自主调用 `read`/`search`/`bash`/`write`/`edit`，观测结果回传直至产出最终答复（上限 12 轮）；plan 模式只暴露只读工具；`tools` 字段作为白名单。
+- [x] TUI 交互审批：`bash`/`write`/`edit` 执行前弹窗确认（`y`/`n`），agent loop 内同样生效。
+- [x] shell 进程组终止：超时杀死整个进程组，避免残留子进程（Unix/Windows 双平台实现）。
+- [x] 快照/diff 命令：`hy diff`、`hy artifacts`、`hy checkpoints`、`hy restore <run> <checkpoint-id>`。
 - [x] 跨平台发布流水线（Windows/macOS/Linux，tag `v*` 触发，自动上传 GitHub Release）。
 - [x] 兼容原有 task JSON、workspace 目录和 SQLite schema。
 - [x] 删除 TypeScript 源码、npm manifest、Vitest 和 Node 构建产物。

@@ -31,5 +31,8 @@ unicode-width = "0.2"
 tui-markdown = { version = "0.3", default-features = false }
 wait-timeout = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

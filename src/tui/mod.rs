@@ -1,7 +1,8 @@
 mod ui;
 
 use crate::{
-    AgentMode, deepseek::DEFAULT_MODEL, latest_display_output, list_runs, prompt_to_task, run_task,
+    AgentMode, ApprovalGate, ApprovalRequest, deepseek::DEFAULT_MODEL, latest_display_output,
+    list_runs, prompt_to_task, run_task_with_approval,
 };
 use anyhow::Result;
 use crossterm::{
@@ -12,6 +13,7 @@ use crossterm::{
     execute,
 };
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -29,6 +31,8 @@ pub struct App {
     pub follow_tail: bool,
     pub tick: usize,
     pub command_index: usize,
+    pub approvals: VecDeque<ApprovalRequest>,
+    gate: Option<ApprovalGate>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
@@ -54,6 +58,8 @@ impl App {
             follow_tail: true,
             tick: 0,
             command_index: 0,
+            approvals: VecDeque::new(),
+            gate: None,
             tx,
             rx,
         }
@@ -115,11 +121,14 @@ impl App {
                 self.follow_tail = true;
                 self.scroll = 0;
                 self.output.push(format!("You\n{value}"));
+                self.approvals.clear();
+                let gate = ApprovalGate::new();
+                self.gate = Some(gate.clone());
                 let root = self.root.clone();
                 let mode = self.mode;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let result = run_task(&prompt_to_task(&value, mode), &root)
+                    let result = run_task_with_approval(&prompt_to_task(&value, mode), &root, gate)
                         .and_then(|summary| {
                             Ok(latest_display_output(&root, &summary.run_id)?
                                 .unwrap_or_else(|| format!("任务已{}。", summary.status)))
@@ -128,6 +137,24 @@ impl App {
                     let _ = tx.send(Message::Task(result));
                 });
             }
+        }
+    }
+
+    fn approve_first(&mut self) {
+        if let Some(request) = self.approvals.pop_front() {
+            let _ = request.response.send(true);
+        }
+    }
+
+    fn deny_first(&mut self) {
+        if let Some(request) = self.approvals.pop_front() {
+            let _ = request.response.send(false);
+        }
+    }
+
+    fn deny_all(&mut self) {
+        while let Some(request) = self.approvals.pop_front() {
+            let _ = request.response.send(false);
         }
     }
 
@@ -176,10 +203,17 @@ impl App {
         true
     }
     fn poll(&mut self) {
+        // Surface new approval requests from the running task thread.
+        if let Some(gate) = &self.gate {
+            for request in gate.drain() {
+                self.approvals.push_back(request);
+            }
+        }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Message::Task(r) => {
                     self.busy = false;
+                    self.approvals.clear();
                     self.follow_tail = true;
                     self.scroll = 0;
                     self.output.push(format!(
@@ -226,8 +260,21 @@ pub fn run(root: PathBuf) -> Result<()> {
             if k.kind != KeyEventKind::Press {
                 continue;
             }
+            // While an approval is pending, all keys answer the modal.
+            if !app.approvals.is_empty() {
+                match k.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.approve_first(),
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.deny_first(),
+                    _ => {}
+                }
+                continue;
+            }
             match (k.code, k.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => app.quit = true,
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    app.deny_all();
+                    app.quit = true;
+                }
+                (KeyCode::Esc, _) => app.quit = true,
                 (KeyCode::Tab, _) => {
                     if !app.complete_command() {
                         app.mode = if app.mode == AgentMode::Build {
@@ -276,6 +323,8 @@ pub fn run(root: PathBuf) -> Result<()> {
                 _ => {}
             }
         }
+        // Unblock any tool waiting on an approval when we are quitting.
+        app.deny_all();
         Ok(())
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);

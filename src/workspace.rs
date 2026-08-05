@@ -161,6 +161,28 @@ impl Workspace {
             })?
             .collect::<Result<Vec<_>, _>>()?)
     }
+    pub fn list_checkpoints(&self, run_id: &str) -> Result<Vec<Checkpoint>> {
+        let dir = self.paths.runs.join(run_id).join("checkpoints");
+        let mut checkpoints = Vec::new();
+        if !dir.exists() {
+            return Ok(checkpoints);
+        }
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(checkpoint) = serde_json::from_slice::<Checkpoint>(&fs::read(&path)?)
+            {
+                checkpoints.push(checkpoint);
+            }
+        }
+        // File names are random ids; order by creation time instead.
+        checkpoints.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(checkpoints)
+    }
 }
 
 pub fn resolve_path(root: &Path, target: &str) -> Result<PathBuf> {

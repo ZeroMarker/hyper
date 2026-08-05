@@ -68,18 +68,28 @@ hyper plan <prompt>
 hyper build <prompt>
 hyper runs [-n <limit>]
 hyper show <run-id>
+hyper diff <run-id>
 hyper artifacts <run-id>
+hyper checkpoints <run-id>
+hyper restore <run-id> <checkpoint-id>
 hyper undo <run-id>
 hyper tui
 ```
 
 Every command can use `hy` instead, for example `hy tui`.
 Common aliases remain available: `hy b`, `hy p`, `hy r`, `hy ls`, and `hy s`.
+`hy diff` prints the file diffs recorded by `write`/`edit` tools, `hy artifacts`
+lists the run's artifact files, `hy checkpoints` lists snapshots and
+`hy restore <run> <checkpoint-id>` rewinds one file to a specific snapshot.
 
 The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
 `Enter` to submit, arrow keys to select runs, and `Esc` to exit. Slash commands:
 `/help`, `/runs`, `/mode plan|build`, `/new`, and `/quit`. `/runs` lists recent
 runs inline.
+
+In the TUI, `bash`, `write` and `edit` actions ask for **interactive
+approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
+loop waits for the answer). Command-line runs do not prompt.
 
 ## Task format
 

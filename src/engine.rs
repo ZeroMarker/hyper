@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use wait_timeout::ChildExt;
 
 use crate::{
+    approval::ApprovalGate,
     deepseek::{DeepSeekConfig, ToolSpec, chat_messages, system_prompt},
     model::*,
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
@@ -23,6 +24,7 @@ struct EventWriter<'a> {
     task: &'a TaskSpec,
     path: &'a Path,
     workspace: &'a Workspace,
+    gate: Option<ApprovalGate>,
 }
 impl EventWriter<'_> {
     fn write(
@@ -377,6 +379,17 @@ fn bash(
     command: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "bash", None, Some(command))?;
+    if let Some(gate) = &events.gate {
+        if !gate.request("bash", command) {
+            events.write(
+                "tool.denied",
+                json!({"tool":"bash","command":command}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            bail!("user denied bash command")
+        }
+    }
     events.write(
         "tool.started",
         json!({"tool":"bash","command":command}),
@@ -384,16 +397,30 @@ fn bash(
         Some(index),
     )?;
     let started = Instant::now();
-    let mut child = Command::new("sh")
+    let mut builder = Command::new("sh");
+    builder
         .args(["-c", command])
         .current_dir(root)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // Run the shell in its own process group so a timeout can kill the whole
+    // tree (shell plus any background children) instead of leaving orphans.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        builder.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+    let mut child = builder.spawn()?;
     let timeout = Duration::from_millis(step.timeout_ms.unwrap_or(120_000));
     let status = child.wait_timeout(timeout)?;
     if status.is_none() {
-        child.kill()?;
+        kill_process_tree(&mut child)?;
     }
     let output = child.wait_with_output()?;
     let code = output.status.code().unwrap_or(-1);
@@ -404,6 +431,26 @@ fn bash(
     events.write("tool.finished",json!({"tool":"bash", "command":command,"cwd":root,"exitCode":code,"stdout":stdout,"stderr":stderr,"all":all,"durationMs":started.elapsed().as_millis()}),Some(&step.id),Some(index))?;
     Ok((code == 0, payload))
 }
+fn kill_process_tree(child: &mut std::process::Child) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // The shell was spawned as a new process-group leader, so the negative
+        // pid targets the entire tree (shell + children).
+        let group = -(child.id() as libc::pid_t);
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .status();
+    }
+    child.kill()?;
+    Ok(())
+}
+
 fn read(
     events: &EventWriter<'_>,
     root: &Path,
@@ -469,6 +516,17 @@ fn write_file(
     content: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "write", Some(path), None)?;
+    if let Some(gate) = &events.gate {
+        if !gate.request("write", path) {
+            events.write(
+                "tool.denied",
+                json!({"tool":"write","path":path}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            bail!("user denied write to {path}")
+        }
+    }
     events.write(
         "tool.started",
         json!({"tool":"write","path":path}),
@@ -510,6 +568,17 @@ fn edit_file(
     replace: &str,
 ) -> Result<(bool, Value)> {
     assert_allowed(root, step.mode, "write", Some(path), None)?;
+    if let Some(gate) = &events.gate {
+        if !gate.request("edit", path) {
+            events.write(
+                "tool.denied",
+                json!({"tool":"edit","path":path}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            bail!("user denied edit to {path}")
+        }
+    }
     events.write(
         "tool.started",
         json!({"tool":"edit","path":path}),
@@ -542,6 +611,24 @@ fn edit_file(
 }
 
 pub fn run_task(task: &TaskSpec, root: impl AsRef<Path>) -> Result<RunSummary> {
+    run_task_inner(task, root, None)
+}
+
+/// Run a task with an interactive approval gate: `bash`, `write` and `edit`
+/// tools pause and ask the gate for permission before executing.
+pub fn run_task_with_approval(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    gate: ApprovalGate,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, Some(gate))
+}
+
+fn run_task_inner(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    gate: Option<ApprovalGate>,
+) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
     let run_id = workspace::id();
@@ -554,6 +641,7 @@ pub fn run_task(task: &TaskSpec, root: impl AsRef<Path>) -> Result<RunSummary> {
         task,
         path: &run.events,
         workspace: &workspace,
+        gate,
     };
     events.write("run.started", json!({"taskName":task.name}), None, None)?;
     let mut succeeded = 0;
@@ -657,6 +745,7 @@ fn classify_error(message: &str) -> &'static str {
         || message.contains("dangerous pattern")
         || message.contains("escapes workspace root")
         || message.contains("not allowed for step")
+        || message.contains("user denied")
     {
         "PolicyError"
     } else if message.contains("DeepSeek") || message.contains("agent exceeded") {

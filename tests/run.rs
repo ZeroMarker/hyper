@@ -1,5 +1,6 @@
 use harness::{
-    AgentMode, Checkpoint, StepSpec, TaskSpec, get_run_details, restore_checkpoint, run_task,
+    AgentMode, ApprovalGate, Checkpoint, StepSpec, TaskSpec, get_run_details, restore_checkpoint,
+    run_task, run_task_with_approval,
 };
 use std::{collections::HashMap, fs};
 use tempfile::tempdir;
@@ -234,4 +235,107 @@ fn write_can_be_restored() {
     let cp: Checkpoint = serde_json::from_slice(&fs::read(cp_file).unwrap()).unwrap();
     restore_checkpoint(dir.path(), &cp).unwrap();
     assert_eq!(fs::read_to_string(file).unwrap(), "before")
+}
+
+#[test]
+fn checkpoints_list_in_order_and_restore_individually() {
+    let dir = tempdir().unwrap();
+    let workspace = harness::Workspace::open(dir.path()).unwrap();
+    let file = dir.path().join("demo.txt");
+    fs::write(&file, "original").unwrap();
+    let first = run_task(
+        &task("first", AgentMode::Build, "write:demo.txt\nA"),
+        dir.path(),
+    )
+    .unwrap();
+    let second = run_task(
+        &task("second", AgentMode::Build, "write:demo.txt\nB"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "B");
+
+    let cps = workspace.list_checkpoints(&second.run_id).unwrap();
+    assert_eq!(cps.len(), 1);
+    restore_checkpoint(dir.path(), &cps[0]).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "A");
+
+    let cps = workspace.list_checkpoints(&first.run_id).unwrap();
+    assert_eq!(cps.len(), 1);
+    restore_checkpoint(dir.path(), &cps[0]).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "original");
+}
+
+#[test]
+fn approval_gate_allows_the_tool() {
+    let dir = tempdir().unwrap();
+    let gate = ApprovalGate::new();
+    let worker = gate.clone();
+    let handle = std::thread::spawn(move || {
+        run_task_with_approval(
+            &task("gated", AgentMode::Build, "bash:echo ok"),
+            dir.path(),
+            worker,
+        )
+        .unwrap()
+    });
+    let request = wait_for_request(&gate);
+    assert_eq!(request.tool, "bash");
+    request.response.send(true).unwrap();
+    let summary = handle.join().unwrap();
+    assert_eq!(summary.status, "finished");
+}
+
+#[test]
+fn approval_gate_denial_fails_the_step() {
+    let dir = tempdir().unwrap();
+    let gate = ApprovalGate::new();
+    let worker = gate.clone();
+    let handle = std::thread::spawn(move || {
+        run_task_with_approval(
+            &task("gated", AgentMode::Build, "bash:echo should-not-run"),
+            dir.path(),
+            worker,
+        )
+        .unwrap()
+    });
+    let request = wait_for_request(&gate);
+    request.response.send(false).unwrap();
+    let summary = handle.join().unwrap();
+    assert_eq!(summary.status, "failed");
+    assert!(summary.failure.unwrap().message.contains("denied"));
+}
+
+fn wait_for_request(gate: &ApprovalGate) -> harness::ApprovalRequest {
+    loop {
+        if let Some(request) = gate.drain().into_iter().next() {
+            return request;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bash_timeout_kills_entire_process_group() {
+    use std::process::Command;
+    let dir = tempdir().unwrap();
+    let mut task = task("timeout", AgentMode::Build, "bash:sleep 60");
+    task.steps[0].timeout_ms = Some(300);
+    let summary = run_task(&task, dir.path()).unwrap();
+    assert_eq!(summary.status, "failed");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut survivors = 1;
+    while std::time::Instant::now() < deadline {
+        let out = Command::new("pgrep")
+            .args(["-f", "^sleep 60$"])
+            .output()
+            .unwrap();
+        survivors = String::from_utf8_lossy(&out.stdout).trim().lines().count();
+        if survivors == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(survivors, 0, "sleep 60 survived the timeout");
 }

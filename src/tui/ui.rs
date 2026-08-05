@@ -58,6 +58,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.busy {
         const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let status = if app.approvals.is_empty() {
+            format!("{} 正在思考", SPINNER[app.tick % SPINNER.len()])
+        } else {
+            format!("{} 等待确认", SPINNER[app.tick % SPINNER.len()])
+        };
         chat.push(Line::from(vec![
             Span::styled(
                 "Hyper ",
@@ -65,10 +70,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{} 正在思考", SPINNER[app.tick % SPINNER.len()]),
-                Style::default().fg(Color::Magenta),
-            ),
+            Span::styled(status, Style::default().fg(Color::Magenta)),
         ]));
     }
     let visible_height = areas[1].height.saturating_sub(2) as usize;
@@ -105,6 +107,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         areas[2].y + 1,
     ));
 
+    render_approval(frame, app, areas[2]);
     render_command_palette(frame, app, areas[2]);
 
     frame.render_widget(
@@ -115,7 +118,64 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
 }
 
+fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
+    let Some(request) = app.approvals.front() else {
+        return;
+    };
+    let area = Rect::new(
+        input_area.x,
+        input_area.y.saturating_sub(7),
+        input_area.width,
+        7,
+    );
+    let max_width = area.width.saturating_sub(4) as usize;
+    let detail = truncate_width(&request.detail.replace('\n', " "), max_width);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" 需要确认：{}", request.tool),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(detail, Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(Span::styled(
+            " y 允许    n / Esc 拒绝",
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Approval ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
+fn truncate_width(text: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect) {
+    if !app.approvals.is_empty() {
+        return;
+    }
     let suggestions = app.command_suggestions();
     if suggestions.is_empty() {
         return;
