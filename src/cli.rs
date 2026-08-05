@@ -199,6 +199,7 @@ fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StepSpec;
     use std::{collections::HashMap, fs, thread, time::Duration};
     use tempfile::tempdir;
 

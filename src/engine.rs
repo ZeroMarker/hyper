@@ -250,7 +250,7 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
     specs
 }
 
-fn arg_str(args: &Value, key: &str) -> &str {
+fn arg_str<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
