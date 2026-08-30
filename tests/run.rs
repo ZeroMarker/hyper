@@ -178,6 +178,20 @@ fn edit_replaces_first_occurrence() {
 }
 
 #[test]
+fn search_treats_dash_prefix_query_literally() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.txt"), "the --pre flag is text here").unwrap();
+    // Before the `--` separator, rg parsed `--pre` as a flag (its `--pre`
+    // option executes a program) instead of matching the literal string.
+    let summary = run_task(
+        &task("search", AgentMode::Build, "search:--pre"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
+}
+
+#[test]
 fn step_tools_allowlist_is_enforced() {
     let dir = tempdir().unwrap();
     let summary = run_task(

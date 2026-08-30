@@ -266,30 +266,39 @@ fn run_agent_tool(
 ) -> String {
     const MAX_OBSERVATION: usize = 4_000;
     let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-    let result = match name {
-        "bash" => bash(events, root, step, index, arg_str(&args, "command")),
-        "read" => read(events, root, step, index, arg_str(&args, "path")),
-        "search" => search(events, root, step, index, arg_str(&args, "query"), 100),
-        "write" => write_file(
-            events,
-            run,
-            root,
-            step,
-            index,
-            arg_str(&args, "path"),
-            arg_str(&args, "content"),
-        ),
-        "edit" => edit_file(
-            events,
-            run,
-            root,
-            step,
-            index,
-            arg_str(&args, "path"),
-            arg_str(&args, "search"),
-            arg_str(&args, "replace"),
-        ),
-        other => Err(anyhow::anyhow!("unknown tool: {other}")),
+    // The allowlist must also bind model-initiated calls: the model can emit a
+    // tool call for a tool that was never advertised in `tools`.
+    let result = if !tool_allowed(step, name) {
+        Err(anyhow::anyhow!(
+            "tool '{name}' is not allowed for step '{}'",
+            step.id
+        ))
+    } else {
+        match name {
+            "bash" => bash(events, root, step, index, arg_str(&args, "command")),
+            "read" => read(events, root, step, index, arg_str(&args, "path")),
+            "search" => search(events, root, step, index, arg_str(&args, "query"), 100),
+            "write" => write_file(
+                events,
+                run,
+                root,
+                step,
+                index,
+                arg_str(&args, "path"),
+                arg_str(&args, "content"),
+            ),
+            "edit" => edit_file(
+                events,
+                run,
+                root,
+                step,
+                index,
+                arg_str(&args, "path"),
+                arg_str(&args, "search"),
+                arg_str(&args, "replace"),
+            ),
+            other => Err(anyhow::anyhow!("unknown tool: {other}")),
+        }
     };
     let text = match result {
         Ok((true, payload)) => serde_json::to_string(&payload)
@@ -487,7 +496,9 @@ fn search(
         Some(index),
     )?;
     let out = Command::new("rg")
-        .args(["--line-number", "--fixed-strings", query, "."])
+        // `--` ends flag parsing so a query beginning with `-` (e.g. `--pre=...`)
+        // is matched literally instead of being parsed as an rg option.
+        .args(["--line-number", "--fixed-strings", "--", query, "."])
         .current_dir(root)
         .output()
         .context("failed to run rg")?;
@@ -754,6 +765,64 @@ fn classify_error(message: &str) -> &'static str {
         "ToolError"
     } else {
         "Error"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentMode;
+    use std::collections::HashMap;
+
+    fn gated_step(tools: Vec<&str>) -> StepSpec {
+        StepSpec {
+            id: "step".into(),
+            mode: AgentMode::Build,
+            instruction: "test".into(),
+            tools: Some(tools.into_iter().map(str::to_owned).collect()),
+            timeout_ms: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn agent_tool_calls_respect_step_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(dir.path()).unwrap();
+        let run_id = workspace::id();
+        let run = workspace.prepare_run(&run_id).unwrap();
+        let task = prompt_to_task("test", AgentMode::Build);
+        let events = EventWriter {
+            run_id,
+            task: &task,
+            path: &run.events,
+            workspace: &workspace,
+            gate: None,
+        };
+        // `bash` is not in the allowlist and must be rejected even though the
+        // model emitted the call itself.
+        let step = gated_step(vec!["read"]);
+        let observation = run_agent_tool(
+            &events,
+            &run,
+            dir.path(),
+            &step,
+            0,
+            "bash",
+            r#"{"command":"echo hi"}"#,
+        );
+        assert!(observation.contains("not allowed"), "{observation}");
+        // An allowed tool still goes through.
+        let observation = run_agent_tool(
+            &events,
+            &run,
+            dir.path(),
+            &step,
+            0,
+            "read",
+            r#"{"path":"some-file.txt"}"#,
+        );
+        assert!(!observation.contains("not allowed"), "{observation}");
     }
 }
 
