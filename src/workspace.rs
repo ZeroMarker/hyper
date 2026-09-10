@@ -1,5 +1,7 @@
 use std::{
-    fs,
+    collections::HashMap,
+    fs::{self, File, OpenOptions},
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -8,8 +10,9 @@ use chrono::Utc;
 use rand::{Rng, distr::Alphanumeric};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use crate::model::{HarnessEvent, RunRow, TaskSpec};
+use crate::model::{Failure, HarnessEvent, RunRow, RunSummary, TaskSpec};
 
 pub fn id() -> String {
     rand::rng()
@@ -45,6 +48,16 @@ pub struct Workspace {
     pub db: Connection,
 }
 
+/// Advisory lock held for the lifetime of a run.
+///
+/// The lock lives in `runs/<run-id>/lock` and is released by the OS when the
+/// owning process exits, including on `SIGKILL`. Another process can therefore
+/// tell a live run from a run whose harness died: the lock stays held for the
+/// former and becomes acquirable again for the latter.
+pub struct RunLock {
+    _file: File,
+}
+
 impl Workspace {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root
@@ -63,7 +76,162 @@ impl Workspace {
         fs::create_dir_all(&paths.sessions)?;
         let db = Connection::open(&paths.db)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);")?;
-        Ok(Self { paths, db })
+        let workspace = Self { paths, db };
+        // The previous harness may have been killed mid-run; repair those rows
+        // so a crashed run does not linger as `running` forever.
+        workspace.reconcile_stale_runs()?;
+        Ok(workspace)
+    }
+
+    /// Take the run lock. Must be acquired *before* the run is announced to the
+    /// database, otherwise a concurrent process could observe a `running` row
+    /// whose lock is not held yet and wrongly declare it dead.
+    pub fn lock_run(&self, run_id: &str) -> Result<RunLock> {
+        let dir = self.paths.runs.join(run_id);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open run lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(RunLock { _file: file }),
+            // A single message covers both "held by someone else" and any other
+            // locking error; the run must not start if we cannot own the lock.
+            Err(error) => bail!("could not lock run {run_id}: {error}"),
+        }
+    }
+
+    /// Mark every run whose owning process is gone as `interrupted`.
+    ///
+    /// Returns the repaired run ids. Runs that are still executing (their lock
+    /// is held) are left untouched.
+    pub fn reconcile_stale_runs(&self) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT run_id,task_id,task_name,started_at FROM runs WHERE status='running'",
+        )?;
+        let stale = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut repaired = Vec::new();
+        for (run_id, task_id, task_name, started_at) in stale {
+            if !self.run_is_stale(&run_id)? {
+                continue;
+            }
+            self.mark_run_interrupted(&run_id, &task_id, &task_name, &started_at)?;
+            repaired.push(run_id);
+        }
+        Ok(repaired)
+    }
+
+    /// A run is stale when its lock can be acquired, i.e. nobody owns it.
+    /// Errors are treated as "still alive" so a live run is never repaired by
+    /// accident.
+    fn run_is_stale(&self, run_id: &str) -> Result<bool> {
+        let dir = self.paths.runs.join(run_id);
+        if !dir.is_dir() {
+            return Ok(true);
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("lock"))?;
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn mark_run_interrupted(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        task_name: &str,
+        started_at: &str,
+    ) -> Result<()> {
+        let total = self.count_events(run_id, "step.started")?;
+        let succeeded = self.count_events(run_id, "step.finished")?;
+        let step_id = self.last_started_step(run_id)?;
+        let summary = RunSummary {
+            run_id: run_id.to_owned(),
+            task_name: task_name.to_owned(),
+            status: "interrupted".into(),
+            steps_total: total,
+            steps_succeeded: succeeded,
+            // No step failed on its own: the harness was killed while one was
+            // in flight, which the `interrupted` status records instead.
+            steps_failed: 0,
+            started_at: started_at.to_owned(),
+            finished_at: now(),
+            failure: Some(Failure {
+                error_type: "Interrupted".into(),
+                message: "run was interrupted: the harness exited before the task finished".into(),
+                retryable: true,
+                step_id,
+                details: HashMap::new(),
+                cause: None,
+            }),
+        };
+        let event = HarnessEvent {
+            event_id: id(),
+            run_id: run_id.to_owned(),
+            task_id: task_id.to_owned(),
+            event_type: "run.interrupted".into(),
+            timestamp: summary.finished_at.clone(),
+            step_id: None,
+            step_index: None,
+            payload: json!({"summary": summary}),
+        };
+        let events_path = self.paths.runs.join(run_id).join("events.jsonl");
+        let mut line = serde_json::to_vec(&event)?;
+        line.push(b'\n');
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_path)?
+            .write_all(&line)?;
+        self.insert_event(&event)?;
+        fs::write(
+            self.paths.runs.join(run_id).join("summary.json"),
+            serde_json::to_vec_pretty(&summary)?,
+        )?;
+        Ok(())
+    }
+
+    fn count_events(&self, run_id: &str, event_type: &str) -> Result<usize> {
+        let count: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id=?1 AND type=?2",
+            params![run_id, event_type],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    fn last_started_step(&self, run_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT step_id FROM events WHERE run_id=?1 AND type='step.started' ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([run_id])?;
+        Ok(match rows.next()? {
+            Some(row) => row.get(0)?,
+            None => None,
+        })
     }
     pub fn prepare_run(&self, run_id: &str) -> Result<RunPaths> {
         let dir = self.paths.runs.join(run_id);
@@ -103,6 +271,7 @@ impl Workspace {
         let status = match event.event_type.as_str() {
             "run.finished" => Some("finished"),
             "run.failed" => Some("failed"),
+            "run.interrupted" => Some("interrupted"),
             _ => None,
         };
         if let Some(status) = status {

@@ -32,6 +32,9 @@ pub struct DeepSeekConfig {
     pub base_url: String,
     pub model: String,
     pub timeout: Duration,
+    /// Reused across the turns of an agent loop so the TLS handshake and the
+    /// connection pool are paid for once per step instead of once per turn.
+    client: Client,
 }
 
 impl DeepSeekConfig {
@@ -44,13 +47,20 @@ impl DeepSeekConfig {
         if api_key.trim().is_empty() {
             bail!("DEEPSEEK_API_KEY must not be empty")
         }
+        let timeout = Duration::from_secs(120);
         Ok(Self {
             api_key,
             base_url: env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into()),
             model: env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
-            timeout: Duration::from_secs(120),
+            timeout,
+            client: Client::builder().timeout(timeout).build()?,
         })
     }
+}
+
+/// Build the chat-completions URL for a base URL, tolerating a trailing slash.
+pub fn endpoint(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
 }
 
 pub fn ensure_api_key(force: bool) -> Result<()> {
@@ -172,7 +182,7 @@ pub fn chat_messages(
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
 ) -> Result<ModelReply> {
-    let endpoint = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let url = endpoint(&config.base_url);
     let mut body = json!({ "model": config.model, "messages": messages, "stream": false });
     if let Some(tools) = tools {
         body["tools"] = json!(
@@ -189,10 +199,9 @@ pub fn chat_messages(
                 .collect::<Vec<_>>()
         );
     }
-    let response = Client::builder()
-        .timeout(config.timeout)
-        .build()?
-        .post(endpoint)
+    let response = config
+        .client
+        .post(url)
         .bearer_auth(&config.api_key)
         .json(&body)
         .send()
@@ -243,5 +252,24 @@ mod tests {
     fn defaults_match_current_deepseek_api() {
         assert_eq!(DEFAULT_BASE_URL, "https://api.deepseek.com");
         assert_eq!(DEFAULT_MODEL, "deepseek-v4-flash");
+    }
+
+    /// Asserting the constants against themselves would prove nothing: check the
+    /// URL the client actually builds, including the trailing-slash override
+    /// users are told to set through `DEEPSEEK_BASE_URL`.
+    #[test]
+    fn chat_completions_url_is_built_from_the_base_url() {
+        assert_eq!(
+            endpoint(DEFAULT_BASE_URL),
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(
+            endpoint("https://api.deepseek.com/"),
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
     }
 }

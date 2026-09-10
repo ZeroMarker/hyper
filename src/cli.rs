@@ -5,8 +5,9 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
-    AgentMode, Checkpoint, TaskSpec, Workspace, deepseek::ensure_api_key, get_run_details,
-    latest_model_reply, list_runs, prompt_to_task, restore_checkpoint, run_task, tui,
+    AgentMode, Checkpoint, RunSummary, TaskSpec, Workspace, deepseek::ensure_api_key,
+    get_run_details, latest_model_reply, list_runs, prompt_to_task, restore_checkpoint, run_task,
+    tui,
 };
 
 #[derive(Parser)]
@@ -41,11 +42,14 @@ enum Commands {
     },
     #[command(visible_alias = "p")]
     Plan {
-        prompt: String,
+        /// Prompt words; unquoted multi-word prompts are joined with spaces
+        #[arg(required = true, num_args = 1..)]
+        prompt: Vec<String>,
     },
     #[command(visible_alias = "b")]
     Build {
-        prompt: String,
+        #[arg(required = true, num_args = 1..)]
+        prompt: Vec<String>,
     },
     #[command(visible_alias = "ls")]
     Runs {
@@ -102,17 +106,18 @@ pub fn run() -> Result<()> {
             let task = read_task(&task)?;
             println!("valid task: {} ({} steps)", task.name, task.steps.len())
         }
-        Commands::Run { task } => println!(
-            "{}",
-            serde_json::to_string_pretty(&run_task(&read_task(&task)?, &root)?)?
-        ),
+        Commands::Run { task } => {
+            let summary = run_task(&read_task(&task)?, &root)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+            ensure_success(&summary)?;
+        }
         Commands::Plan { prompt } => {
             ensure_api_key(false)?;
-            print_prompt_result(&root, &prompt, AgentMode::Plan)?
+            print_prompt_result(&root, &prompt.join(" "), AgentMode::Plan)?
         }
         Commands::Build { prompt } => {
             ensure_api_key(false)?;
-            print_prompt_result(&root, &prompt, AgentMode::Build)?
+            print_prompt_result(&root, &prompt.join(" "), AgentMode::Build)?
         }
         Commands::Runs { limit } => {
             for run in list_runs(&root, limit)? {
@@ -225,7 +230,25 @@ fn print_prompt_result(root: &std::path::Path, prompt: &str, mode: AgentMode) ->
     } else {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     }
-    Ok(())
+    ensure_success(&summary)
+}
+
+/// Fail the process when a run did not finish, so scripts and CI can rely on the
+/// exit status instead of parsing stdout.
+fn ensure_success(summary: &RunSummary) -> Result<()> {
+    if summary.status == "finished" {
+        return Ok(());
+    }
+    bail!(
+        "run {} {}: {}",
+        summary.run_id,
+        summary.status,
+        summary
+            .failure
+            .as_ref()
+            .map(|failure| failure.message.as_str())
+            .unwrap_or("no failure was recorded")
+    )
 }
 
 fn read_task(path: &PathBuf) -> Result<TaskSpec> {
@@ -337,5 +360,26 @@ mod tests {
     fn legacy_subcommands_and_aliases_still_parse() {
         let cli = Cli::try_parse_from(["hy", "b", "explain this"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Build { .. })));
+    }
+
+    #[test]
+    fn multiword_subcommand_prompts_are_accepted_unquoted() {
+        let cli = Cli::try_parse_from(["hy", "plan", "fix", "the", "bug"]).unwrap();
+        match cli.command {
+            Some(Commands::Plan { prompt }) => assert_eq!(prompt.join(" "), "fix the bug"),
+            _ => panic!("expected the plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn failed_runs_are_reported_as_process_failures() {
+        let dir = tempdir().unwrap();
+        let summary = run_task(&task("bad", "bash:exit 3"), dir.path()).unwrap();
+        assert_eq!(summary.status, "failed");
+        assert!(ensure_success(&summary).is_err());
+
+        let summary = run_task(&task("good", "bash:echo ok"), dir.path()).unwrap();
+        assert_eq!(summary.status, "finished");
+        assert!(ensure_success(&summary).is_ok());
     }
 }

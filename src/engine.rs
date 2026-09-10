@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -97,6 +98,10 @@ fn tool(
     {
         bail!("tool '{name}' is not allowed for step '{}'", step.id)
     }
+    // `write:` and `edit:` bodies are read from the raw instruction: a trailing
+    // newline is meaningful there (`write:path\n` means "empty content"), and
+    // trimming it away would silently change what gets written.
+    let body_source = step.instruction.trim_start();
     if let Some(command) = instruction.strip_prefix("bash:") {
         return bash(events, root, step, index, command.trim());
     }
@@ -106,11 +111,15 @@ fn tool(
     if let Some(query) = instruction.strip_prefix("search:") {
         return search(events, root, step, index, query.trim(), 100);
     }
-    if let Some(body) = instruction.strip_prefix("write:") {
-        let (path, content) = body.split_once('\n').unwrap_or((body, ""));
+    if let Some(body) = body_source.strip_prefix("write:") {
+        // An instruction with no newline is almost always a truncated prompt;
+        // defaulting the content to "" would silently empty an existing file.
+        let Some((path, content)) = body.split_once('\n') else {
+            bail!("write: expected format 'path\\ncontent' (missing content line)")
+        };
         return write_file(events, run, root, step, index, path.trim(), content);
     }
-    if let Some(body) = instruction.strip_prefix("edit:") {
+    if let Some(body) = body_source.strip_prefix("edit:") {
         let mut lines = body.splitn(3, '\n');
         let path = lines.next().unwrap_or("").trim();
         let search = lines.next().unwrap_or("");
@@ -380,6 +389,14 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
+/// Default wall-clock budget for a `bash` step.
+const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
+/// Bytes kept per stream before the rest is discarded. The reader keeps
+/// draining regardless, so the cap never re-introduces a pipe stall.
+const MAX_CAPTURED_OUTPUT: usize = 256 * 1024;
+/// How long to wait for a timed-out shell to actually die before giving up.
+const KILL_GRACE: Duration = Duration::from_secs(5);
+
 fn bash(
     events: &EventWriter<'_>,
     root: &Path,
@@ -425,39 +442,161 @@ fn bash(
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
-    let mut child = builder.spawn()?;
-    let timeout = Duration::from_millis(step.timeout_ms.unwrap_or(120_000));
-    let status = child.wait_timeout(timeout)?;
-    if status.is_none() {
-        kill_process_tree(&mut child)?;
+    // On Linux, ask the kernel to kill the shell when the harness dies, so a
+    // crashed or `kill -9`ed harness cannot leave running commands behind.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // Safety: `pre_exec` runs between fork and exec, where only
+        // async-signal-safe calls are allowed. `prctl`, `getppid` and `_exit`
+        // all qualify.
+        unsafe {
+            builder.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Guard the fork/prctl race: if the harness already died, the
+                // signal would never arrive, so exit instead of running on.
+                if libc::getppid() == 1 {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
     }
-    let output = child.wait_with_output()?;
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut child = builder.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("bash child stdout was not piped")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("bash child stderr was not piped")?;
+    // Drain both pipes while the child runs. Waiting first and reading after
+    // deadlocks as soon as the command writes more than the pipe capacity
+    // (~64 KB), which would hang every non-trivial build or test command until
+    // the timeout and then report it as a failure.
+    let stdout_reader = capture(stdout, MAX_CAPTURED_OUTPUT);
+    let stderr_reader = capture(stderr, MAX_CAPTURED_OUTPUT);
+    let mut guard = ProcessGroupGuard::new(child.id());
+    let timeout = Duration::from_millis(step.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS));
+    let timed_out = child.wait_timeout(timeout)?.is_none();
+    if timed_out {
+        kill_process_tree(&mut child);
+    }
+    let status = match child.wait_timeout(KILL_GRACE)? {
+        Some(status) => status,
+        None => bail!("bash command could not be terminated after {timeout:?}"),
+    };
+    guard.disarm();
+    // The child is gone, so both pipes are closed and the readers can finish.
+    let (stdout_bytes, stdout_total) = join_capture(stdout_reader, "stdout");
+    let (stderr_bytes, stderr_total) = join_capture(stderr_reader, "stderr");
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let truncated = stdout_total > stdout_bytes.len() || stderr_total > stderr_bytes.len();
     let all = format!("{stdout}{stderr}");
-    let payload = json!({"command":command,"cwd":root,"exitCode":code,"stdout":stdout,"stderr":stderr,"all":all,"durationMs":started.elapsed().as_millis()});
-    events.write("tool.finished",json!({"tool":"bash", "command":command,"cwd":root,"exitCode":code,"stdout":stdout,"stderr":stderr,"all":all,"durationMs":started.elapsed().as_millis()}),Some(&step.id),Some(index))?;
+    let code = status.code().unwrap_or(-1);
+    let duration_ms = started.elapsed().as_millis();
+    let payload = json!({
+        "command": command,
+        "cwd": root,
+        "exitCode": code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "all": all,
+        "timedOut": timed_out,
+        "truncated": truncated,
+        "stdoutBytes": stdout_total,
+        "stderrBytes": stderr_total,
+        "durationMs": duration_ms,
+    });
+    let mut event_payload = payload.clone();
+    event_payload["tool"] = json!("bash");
+    events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
     Ok((code == 0, payload))
 }
-fn kill_process_tree(child: &mut std::process::Child) -> Result<()> {
+
+/// Read a child pipe to EOF on its own thread, keeping at most `cap` bytes.
+///
+/// Draining past the cap is mandatory: a reader that stops early fills the pipe
+/// buffer and blocks the child exactly like not reading at all.
+fn capture<R: Read + Send + 'static>(mut reader: R, cap: usize) -> JoinHandle<(Vec<u8>, usize)> {
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut total = 0usize;
+        let mut buffer = vec![0u8; 16 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    total += read;
+                    if kept.len() < cap {
+                        let room = cap - kept.len();
+                        kept.extend_from_slice(&buffer[..room.min(read)]);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        (kept, total)
+    })
+}
+
+fn join_capture(handle: JoinHandle<(Vec<u8>, usize)>, stream: &str) -> (Vec<u8>, usize) {
+    handle.join().unwrap_or_else(|_| {
+        eprintln!("warning: the {stream} reader thread panicked; output was lost");
+        (Vec::new(), 0)
+    })
+}
+
+/// Kill a whole process group (or process tree on Windows).
+fn kill_group(pid: u32) {
     #[cfg(unix)]
-    {
+    unsafe {
         // The shell was spawned as a new process-group leader, so the negative
         // pid targets the entire tree (shell + children).
-        let group = -(child.id() as libc::pid_t);
-        unsafe {
-            libc::kill(group, libc::SIGKILL);
-        }
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
     }
     #[cfg(windows)]
     {
         let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
     }
-    child.kill()?;
-    Ok(())
+}
+
+fn kill_process_tree(child: &mut Child) {
+    kill_group(child.id());
+    // The group kill may already have reaped the child; a failure here only
+    // means there is nothing left to kill.
+    let _ = child.kill();
+}
+
+/// Kills the process group if it was not disarmed, so an early return or a
+/// panic inside the harness cannot leak a running command.
+struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    fn new(pid: u32) -> Self {
+        Self { pid: Some(pid) }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            kill_group(pid);
+        }
+    }
 }
 
 fn read(
@@ -467,6 +606,9 @@ fn read(
     index: usize,
     path: &str,
 ) -> Result<(bool, Value)> {
+    if path.trim().is_empty() {
+        bail!("read: path must not be empty")
+    }
     assert_allowed(root, step.mode, "read", Some(path), None)?;
     events.write(
         "tool.started",
@@ -526,6 +668,9 @@ fn write_file(
     path: &str,
     content: &str,
 ) -> Result<(bool, Value)> {
+    if path.trim().is_empty() {
+        bail!("write: path must not be empty")
+    }
     assert_allowed(root, step.mode, "write", Some(path), None)?;
     if let Some(gate) = &events.gate
         && !gate.request("write", path)
@@ -578,6 +723,9 @@ fn edit_file(
     search: &str,
     replace: &str,
 ) -> Result<(bool, Value)> {
+    if path.trim().is_empty() {
+        bail!("edit: path must not be empty")
+    }
     assert_allowed(root, step.mode, "write", Some(path), None)?;
     if let Some(gate) = &events.gate
         && !gate.request("edit", path)
@@ -644,6 +792,10 @@ fn run_task_inner(
     let workspace = Workspace::open(root)?;
     let run_id = workspace::id();
     let run = workspace.prepare_run(&run_id)?;
+    // Hold the run lock for the whole run. It is what tells other harnesses
+    // (and the next startup) that this run is still alive, so it must be taken
+    // before the run is announced to the database.
+    let _lock = workspace.lock_run(&run_id)?;
     fs::write(&run.task, serde_json::to_vec_pretty(task)?)?;
     let started = now();
     workspace.create_run(&run_id, task, &started)?;
@@ -675,20 +827,7 @@ fn run_task_inner(
                 succeeded += 1
             }
             Ok((false, payload)) => {
-                let msg = format!(
-                    "tool reported failure: command {:?}, exit code {}{}",
-                    payload.get("command").and_then(Value::as_str).unwrap_or(""),
-                    payload
-                        .get("exitCode")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(-1),
-                    payload
-                        .get("stderr")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| format!(", {}", s.trim()))
-                        .unwrap_or_default()
-                );
+                let msg = failure_message(&payload);
                 failure = Some(fail(&events, step, index, msg)?);
                 break;
             }
@@ -722,16 +861,49 @@ fn run_task_inner(
     save_session(&workspace, &summary)?;
     Ok(summary)
 }
+/// Build the human-readable reason for a tool that reported failure, keeping a
+/// timeout distinguishable from an ordinary non-zero exit.
+fn failure_message(payload: &Value) -> String {
+    let command = payload.get("command").and_then(Value::as_str).unwrap_or("");
+    if payload
+        .get("timedOut")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return format!(
+            "command {command:?} timed out after {}ms and was killed",
+            payload
+                .get("durationMs")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+        );
+    }
+    format!(
+        "tool reported failure: command {command:?}, exit code {}{}",
+        payload
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1),
+        payload
+            .get("stderr")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format!(", {}", s.trim()))
+            .unwrap_or_default()
+    )
+}
+
 fn fail(
     events: &EventWriter<'_>,
     step: &StepSpec,
     index: usize,
     message: String,
 ) -> Result<Failure> {
+    let error_type = classify_error(&message);
     let failure = Failure {
-        error_type: classify_error(&message).into(),
+        error_type: error_type.into(),
         message,
-        retryable: false,
+        retryable: matches!(error_type, "TimeoutError" | "ModelError"),
         step_id: Some(step.id.clone()),
         details: HashMap::new(),
         cause: None,
@@ -759,70 +931,17 @@ fn classify_error(message: &str) -> &'static str {
         || message.contains("user denied")
     {
         "PolicyError"
+    } else if message.contains("timed out") || message.contains("could not be terminated") {
+        "TimeoutError"
     } else if message.contains("DeepSeek") || message.contains("agent exceeded") {
         "ModelError"
-    } else if message.contains("not found in") || message.contains("expected format") {
+    } else if message.contains("not found in")
+        || message.contains("expected format")
+        || message.contains("must not be empty")
+    {
         "ToolError"
     } else {
         "Error"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::AgentMode;
-    use std::collections::HashMap;
-
-    fn gated_step(tools: Vec<&str>) -> StepSpec {
-        StepSpec {
-            id: "step".into(),
-            mode: AgentMode::Build,
-            instruction: "test".into(),
-            tools: Some(tools.into_iter().map(str::to_owned).collect()),
-            timeout_ms: None,
-            metadata: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn agent_tool_calls_respect_step_allowlist() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = Workspace::open(dir.path()).unwrap();
-        let run_id = workspace::id();
-        let run = workspace.prepare_run(&run_id).unwrap();
-        let task = prompt_to_task("test", AgentMode::Build);
-        let events = EventWriter {
-            run_id,
-            task: &task,
-            path: &run.events,
-            workspace: &workspace,
-            gate: None,
-        };
-        // `bash` is not in the allowlist and must be rejected even though the
-        // model emitted the call itself.
-        let step = gated_step(vec!["read"]);
-        let observation = run_agent_tool(
-            &events,
-            &run,
-            dir.path(),
-            &step,
-            0,
-            "bash",
-            r#"{"command":"echo hi"}"#,
-        );
-        assert!(observation.contains("not allowed"), "{observation}");
-        // An allowed tool still goes through.
-        let observation = run_agent_tool(
-            &events,
-            &run,
-            dir.path(),
-            &step,
-            0,
-            "read",
-            r#"{"path":"some-file.txt"}"#,
-        );
-        assert!(!observation.contains("not allowed"), "{observation}");
     }
 }
 
@@ -934,4 +1053,86 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentMode;
+    use std::collections::HashMap;
+
+    fn gated_step(tools: Vec<&str>) -> StepSpec {
+        StepSpec {
+            id: "step".into(),
+            mode: AgentMode::Build,
+            instruction: "test".into(),
+            tools: Some(tools.into_iter().map(str::to_owned).collect()),
+            timeout_ms: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn agent_tool_calls_respect_step_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(dir.path()).unwrap();
+        let run_id = workspace::id();
+        let run = workspace.prepare_run(&run_id).unwrap();
+        let task = prompt_to_task("test", AgentMode::Build);
+        let events = EventWriter {
+            run_id,
+            task: &task,
+            path: &run.events,
+            workspace: &workspace,
+            gate: None,
+        };
+        // `bash` is not in the allowlist and must be rejected even though the
+        // model emitted the call itself.
+        let step = gated_step(vec!["read"]);
+        let observation = run_agent_tool(
+            &events,
+            &run,
+            dir.path(),
+            &step,
+            0,
+            "bash",
+            r#"{"command":"echo hi"}"#,
+        );
+        assert!(observation.contains("not allowed"), "{observation}");
+        // An allowed tool still goes through.
+        let observation = run_agent_tool(
+            &events,
+            &run,
+            dir.path(),
+            &step,
+            0,
+            "read",
+            r#"{"path":"some-file.txt"}"#,
+        );
+        assert!(!observation.contains("not allowed"), "{observation}");
+    }
+
+    /// Stopping at the cap would refill the pipe buffer and deadlock the child,
+    /// so the reader must keep draining and only report how much it dropped.
+    #[test]
+    fn capture_drains_past_the_cap() {
+        let data = vec![b'x'; 1024];
+        let (kept, total) = capture(std::io::Cursor::new(data), 16).join().unwrap();
+        assert_eq!(kept.len(), 16);
+        assert_eq!(total, 1024);
+    }
+
+    #[test]
+    fn failure_message_distinguishes_timeouts() {
+        let timed_out = json!({"command": "cargo test", "timedOut": true, "durationMs": 300});
+        let message = failure_message(&timed_out);
+        assert!(message.contains("timed out"), "{message}");
+        assert_eq!(classify_error(&message), "TimeoutError");
+
+        let failed = json!({"command": "false", "exitCode": 1, "stderr": "boom"});
+        let message = failure_message(&failed);
+        assert!(message.contains("exit code 1"), "{message}");
+        assert!(message.contains("boom"), "{message}");
+        assert_eq!(classify_error(&message), "Error");
+    }
 }
