@@ -125,6 +125,9 @@ function stagePlatform(platform, archive, outDir, version, shared) {
     os: [platform.os],
     cpu: [platform.cpu],
     files: ["bin/"],
+    // Read by npm/bin/hyper.js, which must not hardcode a platform matrix:
+    // the binary is not always named after its platform package.
+    hyper: { binary: `bin/${platform.binary}` },
   });
   return dir;
 }

@@ -40,14 +40,15 @@
 
 ## 发布渠道：npm
 
-- [x] 新增 npm 分发渠道（`npm/`），采用 esbuild/biome 的「主包 + 平台子包」结构：`hyper-agent` 只含一个 Node shim（`npm/bin/hyper.js`，约 3KB 打包体积），各平台二进制放在 `hyper-agent-linux-x64`、`hyper-agent-linux-arm64`、`hyper-agent-darwin-x64`、`hyper-agent-darwin-arm64`、`hyper-agent-win32-x64`，由主包的 `optionalDependencies` 按 `os`/`cpu` 自动择一安装。
+- [x] 新增 npm 分发渠道（`npm/`），采用 esbuild/biome 的「主包 + 平台子包」结构：`hyper-agent` 只含一个 Node shim（`npm/bin/hyper.js`，约 3KB 打包体积），各平台二进制放在 `hyper-agent-linux-x64`、`hyper-agent-linux-arm64`、`hyper-agent-darwin-x64`、`hyper-agent-darwin-arm64`、`hyper-agent-windows-x64`，由主包的 `optionalDependencies` 按 `os`/`cpu` 自动择一安装。shim 不硬编码平台矩阵：它遍历已声明的平台包，用包内 `os`/`cpu` 确认匹配后，从包内 `hyper.binary` 字段取二进制路径。
+- [x] Windows 平台包命名为 `hyper-agent-windows-x64`（不是 `hyper-agent-win32-x64`）：后者被 npm 反垃圾启发式确定性拒绝（`403 Package name triggered spam detection`，疑似与 `@esbuild/win32-x64` 这类平台包命名撞形），实测重试无效、其余 4 个包同一秒内发布成功。
 - [x] shim 只做定位与转发：`stdio: inherit`（TUI 保有真实 TTY）、退出码原样传递、SIGINT/SIGTERM/SIGHUP 转发；缺少平台包时给出可操作的报错而不是堆栈；无生命周期脚本、安装期不下载任何东西；支持 `HYPER_BINARY_PATH` 指向自编译二进制；`hy` 与 `hyper` 链接到同一 shim。
 - [x] `npm/platforms.json` 作为平台矩阵唯一来源（npm 包名、`os`/`cpu`、release artifact 后缀、目标三元组），`npm/scripts/publish.mjs` 据此暂存并发布；平台包先发、主包后发。
 - [x] release 流水线扩展：build 矩阵新增 `linux-arm64`（使用公开仓库免费的 `ubuntu-24.04-arm` 原生 runner，避免交叉编译 bundled SQLite / ring）；新增 `npm` job，在上传前先暂存并 smoke test，已存在的版本自动跳过（可重复执行），手动触发默认只做演练。
 - [x] `npm/scripts/smoke.sh`：打包真实 tarball → 用用户路径安装（`npm pack` + `npm install`）→ 校验 `hyper`/`hy` 可执行、版本正确、失败 run 退出码透传、缺平台包时的报错。
 - [x] 本地已完整验证该链路（aarch64 Linux + 真实 release 二进制）：平台包 3.9MB 压缩 / 9.1MB 解压，主包 3.3KB / 4 个文件，`hyper --version` 经 shim 输出 `hyper 0.1.0`。
 
-发布前置条件：仓库需要配置 `NPMJS_TOKEN` secret（对 `hyper-agent*` 有发布权限的 npm token），workflow 会以 `NODE_AUTH_TOKEN` 传给 npm。
+发布前置条件：仓库需要配置 `NPMJS_TOKEN` secret，workflow 会以 `NODE_AUTH_TOKEN` 传给 npm。必须是 classic **Automation** token（或勾选 Bypass 2FA 的 granular token）：classic *Publish* token 会在 CI 里以 `EOTP`（需要一次性验证码）失败——首次发版即因此失败过一次。
 
 
 ## 模型配置

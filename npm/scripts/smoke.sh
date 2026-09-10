@@ -16,9 +16,22 @@ set -euo pipefail
 
 staging="${1:?usage: smoke.sh <staging-dir>}"
 staging="$(cd "$staging" && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 host="$(node -p 'process.platform + "-" + process.arch')"
 main_dir="$staging/hyper-agent"
-platform_dir="$staging/hyper-agent-$host"
+# Resolve the platform package through platforms.json: the package name is not
+# always derivable from process.platform (the Windows package is named after the
+# OS, see the note in npm/platforms.json).
+platform_name="$(node -e '
+  const { platforms } = require(process.argv[1]);
+  const platform = platforms.find((p) => p.key === process.argv[2]);
+  if (!platform) {
+    console.error("smoke: no platform package declared for " + process.argv[2]);
+    process.exit(1);
+  }
+  console.log(platform.name);
+' "$script_dir/../platforms.json" "$host")"
+platform_dir="$staging/$platform_name"
 
 if [ ! -d "$main_dir" ] || [ ! -d "$platform_dir" ]; then
   echo "smoke: expected $main_dir and $platform_dir to exist" >&2
@@ -29,12 +42,12 @@ version="$(node -e 'console.log(require(process.argv[1]).version)' "$main_dir/pa
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-echo "smoke: hyper-agent@$version on $host"
+echo "smoke: hyper-agent@$version on $host ($platform_name)"
 
 mkdir -p "$work/packed/platform" "$work/packed/main"
 (cd "$work/packed/platform" && npm pack --silent "$platform_dir" >/dev/null)
 (cd "$work/packed/main" && npm pack --silent "$main_dir" >/dev/null)
-platform_tgz="$work/packed/platform/hyper-agent-$host-$version.tgz"
+platform_tgz="$work/packed/platform/$platform_name-$version.tgz"
 main_tgz="$work/packed/main/hyper-agent-$version.tgz"
 for tgz in "$platform_tgz" "$main_tgz"; do
   [ -f "$tgz" ] || { echo "smoke: npm pack did not produce $tgz" >&2; exit 1; }

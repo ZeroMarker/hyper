@@ -36,12 +36,12 @@ Natural-language prompts call the DeepSeek API. Set `DEEPSEEK_API_KEY` (or run
 | Linux (glibc) | arm64 | `hyper-agent-linux-arm64` |
 | macOS | x64 | `hyper-agent-darwin-x64` |
 | macOS | arm64 | `hyper-agent-darwin-arm64` |
-| Windows | x64 | `hyper-agent-win32-x64` |
+| Windows | x64 | `hyper-agent-windows-x64` |
 
 Platform packages are declared as `optionalDependencies`: npm installs only the
-one matching your machine. If your install skipped optional dependencies
-(`--omit=optional`, offline installs), reinstall with
-`npm install --include=optional hyper-agent`.
+one matching your machine, which it enforces through their `os`/`cpu` fields. If
+your install skipped optional dependencies (`--omit=optional`, offline
+installs), reinstall with `npm install --include=optional hyper-agent`.
 
 To use a binary you compiled yourself, point the shim at it:
 

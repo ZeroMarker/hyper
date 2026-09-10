@@ -1,5 +1,5 @@
 {
-  "//": "Single source of truth for the npm distribution. `key` is process.platform-process.arch, `name` is the npm package that carries the binary, `suffix` is the GitHub Release artifact suffix used by .github/workflows/release.yml, and `archive` is how that artifact is packed.",
+  "//": "Single source of truth for the npm distribution. `key` is process.platform-process.arch, `name` is the npm package that carries the binary, `suffix` is the GitHub Release artifact suffix used by .github/workflows/release.yml, and `archive` is how that artifact is packed. Note that npm's spam heuristics reject a package named `hyper-agent-win32-x64` (403, it resembles the `@esbuild/win32-x64` platform-package pattern), which is why the Windows package is named after the OS instead of after process.platform. npm/bin/hyper.js does not care: it discovers the installed platform package and reads the binary path from the `hyper` field below.",
   "platforms": [
     {
       "key": "linux-x64",
@@ -43,7 +43,7 @@
     },
     {
       "key": "win32-x64",
-      "name": "hyper-agent-win32-x64",
+      "name": "hyper-agent-windows-x64",
       "os": "win32",
       "cpu": "x64",
       "target": "x86_64-pc-windows-msvc",
