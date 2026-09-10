@@ -166,6 +166,50 @@ function alreadyPublished(name, version) {
   }
 }
 
+/** How long to wait for npm to finish processing a publish, and how often to ask. */
+const AVAILABILITY_TIMEOUT_MS = 10 * 60 * 1000;
+const AVAILABILITY_POLL_MS = 5000;
+
+/**
+ * Whether the registry already serves this exact version.
+ *
+ * `npm publish` reports success while the upload is still queued ("Your package
+ * is being processed and may take a few minutes to become available"), so a
+ * successful publish is not yet a resolvable package.
+ */
+async function versionIsAvailable(name, version) {
+  try {
+    const encoded = name.replace("/", "%2f");
+    const response = await fetch(
+      `https://registry.npmjs.org/${encoded}/${version}?t=${Date.now()}`,
+      { cache: "no-store" },
+    );
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Poll until every name resolves, returning the ones that never appeared. */
+async function waitForAvailability(names, version) {
+  const pending = new Set(names);
+  const deadline = Date.now() + AVAILABILITY_TIMEOUT_MS;
+  while (pending.size > 0 && Date.now() < deadline) {
+    for (const name of [...pending]) {
+      if (await versionIsAvailable(name, version)) {
+        pending.delete(name);
+      }
+    }
+    if (pending.size === 0) {
+      console.log("  every platform package is live on the registry");
+      return [];
+    }
+    console.log(`  waiting for npm to process: ${[...pending].sort().join(", ")}`);
+    await new Promise((resolve) => setTimeout(resolve, AVAILABILITY_POLL_MS));
+  }
+  return [...pending].sort();
+}
+
 function publish(dir, { publish }) {
   const manifest = readJson(path.join(dir, "package.json"));
   if (!publish) {
@@ -293,9 +337,31 @@ async function main() {
   const mainDir = stageMain(outDir, version, platforms);
   console.log(`  staged ${path.basename(mainDir)}`);
 
-  for (const dir of [...staged, mainDir]) {
+  for (const dir of staged) {
     publish(dir, options);
   }
+
+  // npm reports success while the upload is still queued, and an
+  // optionalDependency that cannot be resolved yet is skipped *silently* by the
+  // installer - which would leave `npm install <main>` with the shim but no
+  // binary. Only publish the main package once every platform package it points
+  // at is actually retrievable.
+  if (options.publish) {
+    const missing = await waitForAvailability(
+      platforms.map((platform) => platform.name),
+      version,
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `npm is still processing ${missing.join(", ")} after ` +
+          `${AVAILABILITY_TIMEOUT_MS / 60000} minutes, so ${committed.name}@${version} was NOT ` +
+          "published and no user can install a version without binaries. Re-run this job: the " +
+          "platform packages that already exist are skipped.",
+      );
+    }
+  }
+
+  publish(mainDir, options);
 
   if (options.publish) {
     console.log(`\nPublished ${committed.name}@${version} and ${platforms.length} platform packages.`);

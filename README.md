@@ -212,6 +212,13 @@ token scoped to `hyper-harness*` cannot be created before those packages exist. 
 classic *Publish* token does not work unattended: npm rejects it with `EOTP`,
 because using it to publish requires a one-time password.
 
+Platform packages are published first, and the main package only once every one
+of them is actually retrievable: npm acknowledges a publish while the upload is
+still queued ("Your package is being processed and may take a few minutes to
+become available"), and an optionalDependency that cannot be resolved yet is
+skipped *silently* — which would leave an installed `hyper-harness` with the
+shim but no binary.
+
 The workflow stages and smoke tests the packages *before* uploading, and skips
 versions that are already on the registry, so a partially failed release can be
 re-run with `gh run rerun <run-id> --failed`. A manual run of the workflow does
