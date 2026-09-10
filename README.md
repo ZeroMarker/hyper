@@ -204,12 +204,19 @@ binaries are byte-identical. The main package lists the platform packages as
 exit status; it runs no lifecycle scripts and downloads nothing at install time.
 `hy` is linked to the same shim.
 
-Publishing needs an `NPMJS_TOKEN` repository secret: an npm token with publish
-rights for the `hyper-agent*` packages, passed to npm as `NODE_AUTH_TOKEN`. The
-workflow stages and smoke tests the packages *before* uploading, and skips
+Publishing needs an `NPMJS_TOKEN` repository secret, passed to npm as
+`NODE_AUTH_TOKEN`. Use a classic **Automation** token (Access Tokens → Generate
+New Token → Classic → Automation), or a granular access token with *Bypass
+two-factor authentication* enabled and read/write access to **all** packages — a
+token scoped to `hyper-agent*` cannot be created before those packages exist. A
+classic *Publish* token does not work unattended: npm rejects it with `EOTP`,
+because using it to publish requires a one-time password.
+
+The workflow stages and smoke tests the packages *before* uploading, and skips
 versions that are already on the registry, so a partially failed release can be
-re-run. A manual run of the workflow does the staging and smoke testing only,
-unless "Publish to npm" is checked — use it to rehearse a release.
+re-run with `gh run rerun <run-id> --failed`. A manual run of the workflow does
+the staging and smoke testing only, unless "Publish to npm" is checked — use it
+to rehearse a release without spending a version number.
 
 Maintainers edit `npm/platforms.json` to add a platform; it is the single source
 of truth for the package names, npm `os`/`cpu` fields, and the release archive

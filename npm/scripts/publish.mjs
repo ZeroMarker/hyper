@@ -172,7 +172,21 @@ function publish(dir, { publish }) {
     return;
   }
   console.log(`\n$ npm publish ${path.relative(process.cwd(), dir) || "."} --access public`);
-  execFileSync("npm", ["publish", dir, "--access", "public"], { stdio: "inherit" });
+  try {
+    execFileSync("npm", ["publish", dir, "--access", "public"], { stdio: "inherit" });
+  } catch (error) {
+    // EOTP is the one failure that is not obvious from npm's own output: the
+    // token itself is fine, it is simply the wrong *type* for unattended CI.
+    console.error(
+      "\nIf npm asked for a one-time password (EOTP), the NPMJS_TOKEN secret is a\n" +
+        "token type that requires 2FA. Regenerate it as a classic Automation token,\n" +
+        "or as a granular access token with \"Bypass two-factor authentication\"\n" +
+        "enabled and read/write access to all packages (a scoped token cannot cover\n" +
+        "packages that do not exist yet). Nothing was published; re-run the failed\n" +
+        "job once the secret is updated.",
+    );
+    throw error;
+  }
 }
 
 function main() {
