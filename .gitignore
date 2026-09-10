@@ -3,3 +3,6 @@ node_modules/
 dist/
 .harness/
 .DS_Store
+# Staging directory for the npm packages built by npm/scripts/publish.mjs
+npm-dist/
+*.tgz

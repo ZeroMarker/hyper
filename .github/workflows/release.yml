@@ -3,6 +3,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual runs are a rehearsal: they stage and smoke test the npm packages but
+  # stop before uploading unless `publish_npm` is checked.
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: Publish to npm (unchecked = stage and smoke test only)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -18,6 +26,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
+            archive: tar.gz
+          # Native arm64 runner, available for public repositories. Building this
+          # target natively avoids cross-compiling the bundled SQLite and ring C
+          # code; if the label is unavailable on your plan, build it on
+          # ubuntu-latest instead with gcc-aarch64-linux-gnu and
+          # CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
             archive: tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -74,9 +91,80 @@ jobs:
           path: hyper-${{ matrix.suffix }}.${{ matrix.archive }}
           if-no-files-found: error
 
+  npm:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download the release binaries
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Resolve the release version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # publish.mjs aborts if this disagrees with Cargo.toml, so a tag that
+            # does not match the crate version stops the release instead of
+            # publishing a mislabelled binary.
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::could not determine the release version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "releasing hyper-agent $version (ref type: $GITHUB_REF_TYPE)"
+
+      - name: Stage the npm packages
+        run: |
+          set -euo pipefail
+          node npm/scripts/publish.mjs \
+            --artifacts artifacts \
+            --out npm-dist \
+            --version "${{ steps.version.outputs.version }}"
+
+      # Validates the exact tarballs that would be uploaded, through the same
+      # install path a user takes. Runs before publishing, so a broken package
+      # never reaches the registry.
+      - name: Smoke test the staged packages
+        env:
+          NPM_CONFIG_OFFLINE: "true"
+        run: bash npm/scripts/smoke.sh npm-dist
+
+      - name: Publish to npm
+        if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+        run: |
+          set -euo pipefail
+          node npm/scripts/publish.mjs \
+            --artifacts artifacts \
+            --out npm-dist \
+            --version "${{ steps.version.outputs.version }}" \
+            --publish
+
   release:
     name: publish GitHub release
     needs: build
+    # Tag pushes only. A manual dispatch runs on a branch ref, and without this
+    # guard action-gh-release would create a release tagged with the branch name.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5

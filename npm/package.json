@@ -1,0 +1,42 @@
+{
+  "//": "Staging source for the published `hyper-agent` package. `private` keeps an accidental `npm publish` in this folder from shipping an unstamped manifest; npm/scripts/publish.mjs strips it when staging. The version and the optionalDependencies below are rewritten from the release version and npm/platforms.json at publish time — edit npm/platforms.json, not this list.",
+  "name": "hyper-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Terminal-first agent harness for local coding workflows (prebuilt binaries)",
+  "license": "MIT",
+  "homepage": "https://github.com/ZeroMarker/hyper#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZeroMarker/hyper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ZeroMarker/hyper/issues"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "harness",
+    "cli",
+    "tui",
+    "deepseek",
+    "rust"
+  ],
+  "bin": {
+    "hyper": "bin/hyper.js",
+    "hy": "bin/hyper.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "hyper-agent-linux-x64": "0.1.0",
+    "hyper-agent-linux-arm64": "0.1.0",
+    "hyper-agent-darwin-x64": "0.1.0",
+    "hyper-agent-darwin-arm64": "0.1.0",
+    "hyper-agent-win32-x64": "0.1.0"
+  }
+}
