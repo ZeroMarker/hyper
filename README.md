@@ -19,7 +19,7 @@ No Rust toolchain required — the npm package carries prebuilt binaries and onl
 resolves the one that matches your platform:
 
 ```bash
-npm install -g hyper-agent
+npm install -g hyper-harness
 ```
 
 Alternatively download the archive for your platform from
@@ -195,7 +195,7 @@ are never touched.
 targets, attaches the archives to a GitHub Release, and publishes the npm
 channel.
 
-The npm channel is `hyper-agent` plus one package per platform
+The npm channel is `hyper-harness` plus one package per platform
 (`hyper-agent-linux-x64`, `hyper-agent-darwin-arm64`, …), each holding the
 `hyper` binary built by the same workflow, so the npm and GitHub Release
 binaries are byte-identical. The main package lists the platform packages as
@@ -208,7 +208,7 @@ Publishing needs an `NPMJS_TOKEN` repository secret, passed to npm as
 `NODE_AUTH_TOKEN`. Use a classic **Automation** token (Access Tokens → Generate
 New Token → Classic → Automation), or a granular access token with *Bypass
 two-factor authentication* enabled and read/write access to **all** packages — a
-token scoped to `hyper-agent*` cannot be created before those packages exist. A
+token scoped to `hyper-harness*` cannot be created before those packages exist. A
 classic *Publish* token does not work unattended: npm rejects it with `EOTP`,
 because using it to publish requires a one-time password.
 

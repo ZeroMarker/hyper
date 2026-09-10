@@ -19,7 +19,7 @@
 - [x] `cargo clippy --all-targets -- -D warnings` 恢复干净（engine test module 移到文件末尾）。
 - [x] agent loop 复用 reqwest client，避免每轮重新握手。
 - [x] `hy plan fix the bug` 等多词 subcommand prompt 可解析。
-- [x] npm 分发渠道：`hyper-agent` 主包 + 5 个平台子包（`optionalDependencies`，按 `os`/`cpu` 自动择一），发布流水线新增 `npm` job，需要仓库 secret `NPMJS_TOKEN`；build 矩阵新增 `linux-arm64`（原生 arm64 runner）。
+- [x] npm 分发渠道：`hyper-harness` 主包 + 5 个平台子包 `hyper-agent-*`（`optionalDependencies`，按 `os`/`cpu` 自动择一），发布流水线新增 `npm` job，需要仓库 secret `NPMJS_TOKEN`（必须是 classic Automation token）；build 矩阵新增 `linux-arm64`（原生 arm64 runner）。
 
 ## 下一步（按优先级）
 

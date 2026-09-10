@@ -48,6 +48,8 @@
 - [x] `npm/scripts/smoke.sh`：打包真实 tarball → 用用户路径安装（`npm pack` + `npm install`）→ 校验 `hyper`/`hy` 可执行、版本正确、失败 run 退出码透传、缺平台包时的报错。
 - [x] 本地已完整验证该链路（aarch64 Linux + 真实 release 二进制）：平台包 3.9MB 压缩 / 9.1MB 解压，主包 3.3KB / 4 个文件，`hyper --version` 经 shim 输出 `hyper 0.1.0`。
 
+npm 包名：主包必须叫 `hyper-harness` —— `hyper-agent` 被 npm 相似度检查永久拒绝（`403 Package name too similar to existing package hyperagent`，后者是 2022 年的无关包），`hyper-coding-agent`/`hyper-agent-cli` 这类变体归一化后仍含 `hyperagent`，风险高；平台子包沿用首发时的 `hyper-agent-*` 前缀不动。
+
 发布前置条件：仓库需要配置 `NPMJS_TOKEN` secret，workflow 会以 `NODE_AUTH_TOKEN` 传给 npm。必须是 classic **Automation** token（或勾选 Bypass 2FA 的 granular token）：classic *Publish* token 会在 CI 里以 `EOTP`（需要一次性验证码）失败——首次发版即因此失败过一次。
 
 

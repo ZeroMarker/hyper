@@ -3,11 +3,13 @@
  * Stage and publish the npm distribution of Hyper.
  *
  * Hyper is a Rust program; the npm channel exists so that `npm install -g
- * hyper-agent` works without a Rust toolchain. The layout is the
+ * hyper-harness` works without a Rust toolchain. The layout is the
  * esbuild/biome pattern:
  *
- *   hyper-agent                main package: a JS shim, no lifecycle scripts
+ *   hyper-harness              main package: a JS shim, no lifecycle scripts
  *   hyper-agent-<os>-<cpu>     one package per platform, holds the binary
+ *                              (the prefix is historical: npm rejects a main
+ *                              package called `hyper-agent`)
  *
  * The main package declares the platform packages as optionalDependencies, so
  * npm downloads and installs exactly the one matching the host. Publishing
@@ -192,7 +194,33 @@ function publish(dir, { publish }) {
   }
 }
 
-function main() {
+/**
+ * npm refuses a name that only differs from an existing package by punctuation
+ * ("hyper-agent" vs the existing "hyperagent"), and it only says so once the
+ * publish is attempted — after the platform packages have already gone out.
+ * Check the normalised form up front so a bad name fails before anything is
+ * uploaded. Returns null when the registry cannot be reached.
+ */
+async function findRejectedNames(names) {
+  const rejected = [];
+  for (const name of names) {
+    const normalized = name.toLowerCase().replace(/[-_.]/g, "");
+    if (normalized === name.toLowerCase()) {
+      continue;
+    }
+    try {
+      const response = await fetch(`https://registry.npmjs.org/${normalized}`, { method: "HEAD" });
+      if (response.ok) {
+        rejected.push(`${name} (npm sees it as the existing package "${normalized}")`);
+      }
+    } catch {
+      return null;
+    }
+  }
+  return rejected;
+}
+
+async function main() {
   const options = parseArgs(process.argv.slice(2));
   const { platforms } = readJson(path.join(npmDir, "platforms.json"));
 
@@ -206,6 +234,16 @@ function main() {
   }
 
   const committed = readJson(path.join(npmDir, "package.json"));
+  const rejected = await findRejectedNames([
+    committed.name,
+    ...platforms.map((platform) => platform.name),
+  ]);
+  if (rejected === null) {
+    console.warn("warning: could not reach the npm registry to pre-check package names");
+  } else if (rejected.length > 0) {
+    throw new Error(`npm will refuse these package names:\n  - ${rejected.join("\n  - ")}`);
+  }
+
   const declared = Object.keys(committed.optionalDependencies ?? {}).sort().join(",");
   const expected = platforms.map((platform) => platform.name).sort().join(",");
   if (declared !== expected) {
@@ -234,7 +272,7 @@ function main() {
   };
 
   console.log(
-    `Staging hyper-agent ${version} for ${platforms.length} platforms ` +
+    `Staging ${committed.name} ${version} for ${platforms.length} platforms ` +
       `(${options.publish ? "publishing" : "dry run"})`,
   );
 
@@ -260,14 +298,14 @@ function main() {
   }
 
   if (options.publish) {
-    console.log(`\nPublished hyper-agent@${version} and ${platforms.length} platform packages.`);
+    console.log(`\nPublished ${committed.name}@${version} and ${platforms.length} platform packages.`);
   } else {
     console.log("\nDry run complete. Re-run with --publish to upload.");
   }
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   console.error(`\nerror: ${error.message}`);
   process.exit(1);

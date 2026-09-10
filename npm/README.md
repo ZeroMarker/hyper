@@ -1,4 +1,4 @@
-# hyper-agent
+# hyper-harness
 
 Prebuilt binaries for [Hyper](https://github.com/ZeroMarker/hyper), a
 terminal-first agent harness for local coding workflows.
@@ -9,9 +9,9 @@ platform package such as `hyper-agent-linux-x64`. Nothing is compiled or
 downloaded during install.
 
 ```bash
-npm install -g hyper-agent
+npm install -g hyper-harness
 # or run it without installing
-npx hyper-agent --help
+npx hyper-harness --help
 ```
 
 Both command names become available:
@@ -41,7 +41,7 @@ Natural-language prompts call the DeepSeek API. Set `DEEPSEEK_API_KEY` (or run
 Platform packages are declared as `optionalDependencies`: npm installs only the
 one matching your machine, which it enforces through their `os`/`cpu` fields. If
 your install skipped optional dependencies (`--omit=optional`, offline
-installs), reinstall with `npm install --include=optional hyper-agent`.
+installs), reinstall with `npm install --include=optional hyper-harness`.
 
 To use a binary you compiled yourself, point the shim at it:
 

@@ -18,7 +18,8 @@ staging="${1:?usage: smoke.sh <staging-dir>}"
 staging="$(cd "$staging" && pwd)"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 host="$(node -p 'process.platform + "-" + process.arch')"
-main_dir="$staging/hyper-agent"
+main_name="$(node -e 'console.log(require(process.argv[1]).name)' "$script_dir/../package.json")"
+main_dir="$staging/$main_name"
 # Resolve the platform package through platforms.json: the package name is not
 # always derivable from process.platform (the Windows package is named after the
 # OS, see the note in npm/platforms.json).
@@ -42,13 +43,13 @@ version="$(node -e 'console.log(require(process.argv[1]).version)' "$main_dir/pa
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-echo "smoke: hyper-agent@$version on $host ($platform_name)"
+echo "smoke: $main_name@$version on $host ($platform_name)"
 
 mkdir -p "$work/packed/platform" "$work/packed/main"
 (cd "$work/packed/platform" && npm pack --silent "$platform_dir" >/dev/null)
 (cd "$work/packed/main" && npm pack --silent "$main_dir" >/dev/null)
 platform_tgz="$work/packed/platform/$platform_name-$version.tgz"
-main_tgz="$work/packed/main/hyper-agent-$version.tgz"
+main_tgz="$work/packed/main/$main_name-$version.tgz"
 for tgz in "$platform_tgz" "$main_tgz"; do
   [ -f "$tgz" ] || { echo "smoke: npm pack did not produce $tgz" >&2; exit 1; }
 done

@@ -129,7 +129,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "releasing hyper-agent $version (ref type: $GITHUB_REF_TYPE)"
+          echo "releasing hyper-harness $version (ref type: $GITHUB_REF_TYPE)"
 
       - name: Stage the npm packages
         run: |

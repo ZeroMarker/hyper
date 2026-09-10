@@ -6,7 +6,7 @@
  *
  * Hyper itself is a Rust program. This shim only forwards to the prebuilt
  * binary shipped in the platform package matching the current
- * `process.platform` / `process.arch`, so `npm install -g hyper-agent` works
+ * `process.platform` / `process.arch`, so `npm install -g hyper-harness` works
  * without a Rust toolchain. It deliberately does no work of its own: stdin,
  * stdout and stderr are inherited so the full-screen TUI keeps a real TTY, and
  * the exit code (or the terminating signal) is passed through unchanged.
@@ -23,7 +23,10 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 
-const PREFIX = "hyper-agent";
+// The name published on npm. `hyper-agent` is not an option: npm refuses it as
+// too similar to the existing package `hyperagent`. The platform packages keep
+// the `hyper-agent-*` prefix they were first published under.
+const PACKAGE = "hyper-harness";
 
 function declaredPackages() {
   try {
@@ -69,10 +72,10 @@ if (!resolved) {
   const declared = declaredPackages();
   process.stderr.write(
     `hyper: no prebuilt binary for ${key}.\n` +
-      `None of the platform packages declared by ${PREFIX} is installed.\n\n` +
+      `None of the platform packages declared by ${PACKAGE} is installed.\n\n` +
       `npm skips optional dependencies when they are omitted (--omit=optional),\n` +
       `when scripts are disabled, or when the install ran offline. Reinstall with:\n\n` +
-      `  npm install --include=optional ${PREFIX}\n\n` +
+      `  npm install --include=optional ${PACKAGE}\n\n` +
       `Prebuilt binaries: ${declared.length > 0 ? declared.join(", ") : "(none declared)"}\n` +
       `To run a binary you built yourself, set HYPER_BINARY_PATH.\n`,
   );
