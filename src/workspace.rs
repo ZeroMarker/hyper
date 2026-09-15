@@ -14,6 +14,8 @@ use serde_json::json;
 
 use crate::model::{Failure, HarnessEvent, RunRow, RunSummary, TaskSpec};
 
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
+
 pub fn id() -> String {
     rand::rng()
         .sample_iter(&Alphanumeric)
@@ -75,6 +77,12 @@ impl Workspace {
         fs::create_dir_all(&paths.runs)?;
         fs::create_dir_all(&paths.sessions)?;
         let db = Connection::open(&paths.db)?;
+        // WAL lets readers continue while another process appends events, and
+        // the busy timeout absorbs short write contention between a TUI and a
+        // concurrently running command. These are connection-local settings
+        // except for journal_mode, which is persisted in the database.
+        db.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);")?;
         let workspace = Self { paths, db };
         // The previous harness may have been killed mid-run; repair those rows

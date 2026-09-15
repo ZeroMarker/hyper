@@ -1,4 +1,4 @@
-use harness::{AgentMode, StepSpec, TaskSpec};
+use harness::{AgentMode, StepSpec, TaskSpec, Workspace};
 use std::collections::HashMap;
 
 fn step(id: &str) -> StepSpec {
@@ -48,4 +48,27 @@ fn json_defaults_are_compatible() {
     .unwrap();
     assert_eq!(task.steps[0].mode, AgentMode::Build);
     assert!(task.validate().is_ok())
+}
+
+#[test]
+fn workspace_configures_sqlite_for_concurrent_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let journal_mode: String = workspace
+        .db
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal_mode.to_lowercase(), "wal");
+
+    let busy_timeout: i64 = workspace
+        .db
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(busy_timeout, 5_000);
+
+    let synchronous: i64 = workspace
+        .db
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(synchronous, 1);
 }
