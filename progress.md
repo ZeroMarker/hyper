@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-项目已经全面迁移到 Rust 1.94，不再依赖 Node.js、npm 或 TypeScript。
+项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
 ## 已完成
 

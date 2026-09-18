@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use diffy::create_patch;
+use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use wait_timeout::ChildExt;
 
@@ -327,13 +328,13 @@ fn run_agent_tool(
         }
         Err(error) => format!("tool error: {error}"),
     };
-    truncate_utf8(&text, MAX_OBSERVATION).to_owned()
+    truncate_head_tail(&text, MAX_OBSERVATION)
 }
 
 fn workspace_context(root: &Path) -> Result<String> {
     const MAX_TOTAL: usize = 64_000;
     const MAX_FILE: usize = 6_000;
-    let output = Command::new("rg")
+    let files = match Command::new("rg")
         .args([
             "--files",
             "--hidden",
@@ -346,12 +347,21 @@ fn workspace_context(root: &Path) -> Result<String> {
         ])
         .current_dir(root)
         .output()
-        .context("failed to enumerate workspace files with rg")?;
-    let files = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .take(300)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .take(300)
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        Ok(output) => bail!(
+            "rg failed to enumerate workspace files: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            workspace_files(root, true, 300)
+        }
+        Err(error) => return Err(error).context("failed to enumerate workspace files with rg"),
+    };
     let mut context = format!(
         "Workspace: {}\n\nFiles:\n{}\n",
         root.display(),
@@ -389,6 +399,58 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
+/// Keep both ends of an observation so the model sees the command setup and
+/// the final compiler/test error. The returned string never exceeds `max_bytes`.
+fn truncate_head_tail(value: &str, max_bytes: usize) -> String {
+    const MARKER: &str = "\n... [truncated] ...\n";
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    if max_bytes <= MARKER.len() {
+        return truncate_utf8(value, max_bytes).to_owned();
+    }
+
+    let available = max_bytes - MARKER.len();
+    let head_budget = available / 2;
+    let tail_budget = available - head_budget;
+    let head = truncate_utf8(value, head_budget);
+    let mut tail_start = value.len().saturating_sub(tail_budget);
+    while !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}{MARKER}{}", &value[tail_start..])
+}
+
+fn workspace_files(root: &Path, include_hidden: bool, limit: usize) -> Vec<String> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(!include_hidden)
+        .git_ignore(true)
+        .git_global(true);
+    builder.filter_entry(|entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        !matches!(
+            entry.file_name().to_str(),
+            Some(".git" | ".harness" | "target" | "node_modules")
+        )
+    });
+    builder
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            entry
+                .path()
+                .strip_prefix(root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+        })
+        .take(limit)
+        .collect()
+}
+
 /// Default wall-clock budget for a `bash` step.
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 /// Bytes kept per stream before the rest is discarded. The reader keeps
@@ -423,9 +485,19 @@ fn bash(
         Some(index),
     )?;
     let started = Instant::now();
-    let mut builder = Command::new("sh");
+    #[cfg(windows)]
+    let mut builder = {
+        let mut command_builder = Command::new("cmd");
+        command_builder.args(["/D", "/S", "/C", command]);
+        command_builder
+    };
+    #[cfg(not(windows))]
+    let mut builder = {
+        let mut command_builder = Command::new("sh");
+        command_builder.args(["-c", command]);
+        command_builder
+    };
     builder
-        .args(["-c", command])
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -642,14 +714,22 @@ fn search(
         // is matched literally instead of being parsed as an rg option.
         .args(["--line-number", "--fixed-strings", "--", query, "."])
         .current_dir(root)
-        .output()
-        .context("failed to run rg")?;
-    let code = out.status.code().unwrap_or(2);
-    let lines = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .take(limit)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+        .output();
+    let (code, lines) = match out {
+        Ok(out) => (
+            out.status.code().unwrap_or(2),
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .take(limit)
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let lines = search_workspace_files(root, query, limit);
+            (i32::from(lines.is_empty()), lines)
+        }
+        Err(error) => return Err(error).context("failed to run rg"),
+    };
     let payload = json!({"query":query,"lines":lines,"exitCode":code});
     events.write(
         "tool.finished",
@@ -658,6 +738,24 @@ fn search(
         Some(index),
     )?;
     Ok((code <= 1, payload))
+}
+
+fn search_workspace_files(root: &Path, query: &str, limit: usize) -> Vec<String> {
+    let mut matches = Vec::new();
+    for relative in workspace_files(root, false, usize::MAX) {
+        let Ok(content) = fs::read_to_string(root.join(&relative)) else {
+            continue;
+        };
+        for (index, line) in content.lines().enumerate() {
+            if line.contains(query) {
+                matches.push(format!("{relative}:{}:{line}", index + 1));
+                if matches.len() == limit {
+                    return matches;
+                }
+            }
+        }
+    }
+    matches
 }
 fn write_file(
     events: &EventWriter<'_>,
@@ -1134,5 +1232,23 @@ mod tests {
         assert!(message.contains("exit code 1"), "{message}");
         assert!(message.contains("boom"), "{message}");
         assert_eq!(classify_error(&message), "Error");
+    }
+
+    #[test]
+    fn observations_keep_the_head_and_tail() {
+        let value = format!("HEAD{}TAIL", "x".repeat(100));
+        let truncated = truncate_head_tail(&value, 40);
+        assert!(truncated.starts_with("HEAD"), "{truncated}");
+        assert!(truncated.ends_with("TAIL"), "{truncated}");
+        assert!(truncated.contains("[truncated]"), "{truncated}");
+        assert!(truncated.len() <= 40);
+    }
+
+    #[test]
+    fn built_in_search_finds_fixed_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "first\n--literal value\n").unwrap();
+        let matches = search_workspace_files(dir.path(), "--literal", 10);
+        assert_eq!(matches, vec!["sample.txt:2:--literal value"]);
     }
 }

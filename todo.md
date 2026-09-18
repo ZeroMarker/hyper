@@ -26,14 +26,14 @@
 ### 可观测性
 - [ ] 实时展示运行中的 event stream（TUI 订阅事件，不再等任务结束一次性显示）。
 - [ ] 实现 replay/resume：从指定事件/step 重放或断点续跑。
-- [ ] agent loop 的观测结果按「头 + 尾」截断：构建/测试日志的错误在尾部，当前只保留前 4000 字节。
+- [x] agent loop 的观测结果按「头 + 尾」截断，确保构建/测试日志末尾的错误不会丢失。
 
 ### 工程健壮性
-- [ ] streaming 响应（SSE）与 API 瞬时错误的退避重试（`retryable` 已正确标记，但尚无重试逻辑）。
+- [ ] streaming 响应（SSE）。API 瞬时错误的有限退避重试已完成（网络错误、408、429、5xx）。
 - [ ] agent loop 支持并行 tool calls（一次返回多个调用并行执行）。
-- [ ] 跨平台运行时：Windows 下 `sh`/`rg` 缺失问题——捆绑依赖或回退实现（`cmd`/内置搜索）；`rg` 缺失目前会让 agent 直接失败。
+- [x] 跨平台运行时：Windows 使用 `cmd`；`rg` 缺失时回退到内置 workspace 枚举与固定字符串搜索。
 - [ ] 会话与事件表治理：sessions 文件去重、事件表保留策略（避免 `.harness` 无限增长）；`artifacts/` 目前没有任何写入方。
 - [ ] 事件/DB 一致性：JSONL 与 SQLite 索引的兜底重建（`hy repair` 的部分能力已由启动时的 reconcile 提供）。
 - [ ] 更强 sandbox：当前危险命令检查是子串黑名单，绕过容易且会误伤；资源限制（内存/CPU/输出大小上限）尚未实现。
 - [ ] 模型 provider 抽象（trait + 可注入 HTTP），使 agent loop 可被 mock 测试。
-- [ ] SQLite 并发：启用 WAL 并显式设置 busy_timeout。
+- [x] SQLite 并发：启用 WAL 并显式设置 busy_timeout。

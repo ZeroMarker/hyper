@@ -1,7 +1,7 @@
 use std::{env, fs, io::IsTerminal, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use reqwest::blocking::Client;
+use reqwest::{StatusCode, blocking::Client, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -9,6 +9,9 @@ use crate::AgentMode;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+const MAX_API_ATTEMPTS: usize = 3;
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 pub fn system_prompt(mode: AgentMode) -> &'static str {
     match mode {
@@ -199,18 +202,41 @@ pub fn chat_messages(
                 .collect::<Vec<_>>()
         );
     }
-    let response = config
-        .client
-        .post(url)
-        .bearer_auth(&config.api_key)
-        .json(&body)
-        .send()
-        .context("failed to call DeepSeek API")?;
-    let status = response.status();
-    let body = response.text()?;
-    if !status.is_success() {
-        bail!("DeepSeek API returned {status}: {body}")
+    let mut successful_body = None;
+    for attempt in 0..MAX_API_ATTEMPTS {
+        let response = match config
+            .client
+            .post(&url)
+            .bearer_auth(&config.api_key)
+            .json(&body)
+            .send()
+        {
+            Ok(response) => response,
+            Err(_error) if attempt + 1 < MAX_API_ATTEMPTS => {
+                std::thread::sleep(retry_delay(attempt, None));
+                continue;
+            }
+            Err(error) => return Err(error).context("failed to call DeepSeek API"),
+        };
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let response_body = response.text()?;
+        if status.is_success() {
+            successful_body = Some(response_body);
+            break;
+        }
+        if retryable_status(status) && attempt + 1 < MAX_API_ATTEMPTS {
+            std::thread::sleep(retry_delay(attempt, retry_after));
+            continue;
+        }
+        bail!("DeepSeek API returned {status}: {response_body}")
     }
+    let body = successful_body.context("DeepSeek API request exhausted all attempts")?;
     let parsed: ChatResponse = serde_json::from_str(&body)
         .with_context(|| format!("invalid DeepSeek response: {body}"))?;
     let message = parsed
@@ -226,6 +252,24 @@ pub fn chat_messages(
         usage: parsed.usage,
         tool_calls: message.tool_calls.unwrap_or_default(),
     })
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
+    retry_after
+        .unwrap_or_else(|| INITIAL_RETRY_DELAY.saturating_mul(1_u32 << attempt.min(4)))
+        .min(MAX_RETRY_DELAY)
 }
 
 /// One-shot chat request without tool calling (kept for simple prompts).
@@ -247,6 +291,10 @@ pub fn chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
 
     #[test]
     fn defaults_match_current_deepseek_api() {
@@ -271,5 +319,71 @@ mod tests {
             endpoint("http://127.0.0.1:8080/v1"),
             "http://127.0.0.1:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn only_transient_api_statuses_are_retried() {
+        assert!(retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(!retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!retryable_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn retry_after_overrides_exponential_delay() {
+        assert_eq!(retry_delay(0, None), Duration::from_millis(250));
+        assert_eq!(retry_delay(1, None), Duration::from_millis(500));
+        assert_eq!(
+            retry_delay(0, Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            retry_delay(0, Some(Duration::from_secs(120))),
+            MAX_RETRY_DELAY
+        );
+    }
+
+    #[test]
+    fn transient_response_is_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let responses = [
+                (
+                    "503 Service Unavailable",
+                    r#"{"error":{"message":"try again"}}"#,
+                    "Retry-After: 0\r\n",
+                ),
+                (
+                    "200 OK",
+                    r#"{"model":"test-model","choices":[{"message":{"content":"ok"}}]}"#,
+                    "",
+                ),
+            ];
+            for (status, body, extra_headers) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let timeout = Duration::from_secs(2);
+        let config = DeepSeekConfig {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}"),
+            model: "test-model".into(),
+            timeout,
+            client: Client::builder().timeout(timeout).build().unwrap(),
+        };
+
+        let reply = chat_messages(&config, &[json!({"role":"user","content":"hi"})], None).unwrap();
+        assert_eq!(reply.content, "ok");
+        server.join().unwrap();
     }
 }
