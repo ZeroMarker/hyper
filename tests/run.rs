@@ -644,3 +644,306 @@ fn cli_exit_status_follows_the_run_status() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Model requests go to whatever `hyper config` stored, not just to the built-in
+/// DeepSeek endpoint: the API key, the base URL and the model all come from the
+/// configuration file when the environment is empty. The stub asserts the exact
+/// request hyper sends, including the session header OpenCode Go requires.
+#[test]
+fn cli_uses_the_stored_provider_configuration() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    const REPLY: &str =
+        r#"{"model":"stored-model","choices":[{"message":{"content":"stubbed reply"}}]}"#;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let read = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{REPLY}",
+            REPLY.len()
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request[..read]).into_owned()
+    });
+
+    let dir = tempdir().unwrap();
+    let config_home = dir.path().join("config");
+    let config_file = config_home.join("hyper").join("config.json");
+    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+    fs::write(
+        &config_file,
+        format!(
+            r#"{{"deepseek_api_key":"stored-key","base_url":"http://{address}/v1","model":"stored-model"}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["plan", "summarize this project"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("stubbed reply"),
+        "the model reply must be printed"
+    );
+
+    let request = server.join().unwrap();
+    assert!(
+        request.starts_with("POST /v1/chat/completions HTTP/1.1"),
+        "the stored base URL must be used verbatim: {request}"
+    );
+    let headers = request.to_ascii_lowercase();
+    assert!(
+        headers.contains("authorization: bearer stored-key"),
+        "the stored key must be sent: {request}"
+    );
+    assert!(
+        headers.contains("x-opencode-session: hyper-"),
+        "the request must carry a session id: {request}"
+    );
+    assert!(
+        request.contains(r#""model":"stored-model""#),
+        "the stored model must be requested: {request}"
+    );
+}
+
+/// A conversation keeps the user's prompt and the model's answer, and later
+/// turns replay the earlier ones so a follow-up is answered with context.
+#[test]
+fn sessions_keep_the_conversation_and_replay_it() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// A stub that answers each request with a fixed reply and records the
+    /// bodies it received, so a test can see exactly what the model was told.
+    fn serve(
+        replies: Vec<&'static str>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&bodies);
+        let handle = std::thread::spawn(move || {
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = vec![0_u8; 65536];
+                let read = stream.read(&mut request).unwrap();
+                let text = String::from_utf8_lossy(&request[..read]).into_owned();
+                if let Some((_, body)) = text.split_once("\r\n\r\n") {
+                    recorded.lock().unwrap().push(body.to_owned());
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+        });
+        (format!("http://{address}/v1"), bodies, handle)
+    }
+
+    fn reply(text: &str) -> String {
+        format!(r#"{{"model":"stub","choices":[{{"message":{{"content":"{text}"}}}}]}}"#)
+    }
+
+    let first = reply("the answer is 4");
+    let second = reply("it is 8");
+    let (base_url, bodies, server) = serve(vec![
+        Box::leak(first.into_boxed_str()),
+        Box::leak(second.into_boxed_str()),
+    ]);
+
+    let dir = tempdir().unwrap();
+    let config_home = dir.path().join("config");
+    let config_file = config_home.join("hyper").join("config.json");
+    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+    fs::write(
+        &config_file,
+        format!(r#"{{"deepseek_api_key":"k","base_url":"{base_url}","model":"stub"}}"#),
+    )
+    .unwrap();
+
+    let run = |prompt: &str, session: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(["plan", prompt, "--session", session])
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("DEEPSEEK_BASE_URL")
+            .env_remove("DEEPSEEK_MODEL")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    assert!(run("what is 2+2?", "chat-1").contains("the answer is 4"));
+    assert!(run("double it", "chat-1").contains("it is 8"));
+
+    // The second request must carry the first exchange, or the model could not
+    // know what "it" refers to.
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one request per turn");
+    assert!(bodies[1].contains("what is 2+2?"), "{}", bodies[1]);
+    assert!(bodies[1].contains("the answer is 4"), "{}", bodies[1]);
+    assert!(bodies[1].contains("double it"), "{}", bodies[1]);
+    // The first request must not carry the prompt twice.
+    assert_eq!(
+        bodies[0].matches("what is 2+2?").count(),
+        1,
+        "{}",
+        bodies[0]
+    );
+    drop(bodies);
+    server.join().unwrap();
+
+    // The transcript is the conversation, in order, and is listed for the user.
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let messages = workspace.session_messages("chat-1").unwrap();
+    let shape = messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            ("user", "what is 2+2?"),
+            ("assistant", "the answer is 4"),
+            ("user", "double it"),
+            ("assistant", "it is 8"),
+        ]
+    );
+    let row = workspace.session("chat-1").unwrap().unwrap();
+    assert_eq!(row.messages, 4);
+    assert_eq!(row.runs, 2);
+    assert_eq!(row.title, "what is 2+2?");
+}
+
+/// The session id becomes a file name, so it must not be able to escape the
+/// sessions directory.
+#[test]
+fn session_ids_cannot_escape_the_workspace() {
+    let dir = tempdir().unwrap();
+    let outside = dir.path().join("outside.jsonl");
+    let workspace = Workspace::open(dir.path()).unwrap();
+
+    for id in ["../outside", "../../etc/passwd", "a/b", ".", "..", ""] {
+        let result = workspace.append_session_message(
+            id,
+            &harness::SessionMessage {
+                role: "user".into(),
+                content: "nope".into(),
+                timestamp: harness::workspace::now(),
+                run_id: None,
+            },
+        );
+        assert!(result.is_err(), "session id {id:?} must be rejected");
+    }
+    assert!(!outside.exists(), "nothing may be written outside .harness");
+}
+
+/// `hy sessions`, `hy session` and `hy forget` are the user-facing side of the
+/// conversation store, and `forget` must leave the runs it produced alone.
+#[test]
+fn session_commands_list_read_and_forget() {
+    let dir = tempdir().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    for (session, prompt) in [
+        ("first", "what is a closure?"),
+        ("second", "what is a trait?"),
+    ] {
+        for (role, content) in [("user", prompt), ("assistant", "an answer")] {
+            workspace
+                .append_session_message(
+                    session,
+                    &harness::SessionMessage {
+                        role: role.into(),
+                        content: content.into(),
+                        timestamp: harness::workspace::now(),
+                        run_id: (role == "user").then(|| format!("run-{session}")),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let hy = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(args)
+            .current_dir(dir.path())
+            .env_remove("DEEPSEEK_API_KEY")
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (code, stdout, stderr) = hy(&["sessions"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stdout.contains("first") && stdout.contains("second"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("what is a closure?"),
+        "the title is the first prompt: {stdout}"
+    );
+
+    let (code, stdout, stderr) = hy(&["session", "first"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("what is a closure?"), "{stdout}");
+    assert!(stdout.contains("an answer"), "{stdout}");
+    assert!(
+        !stdout.contains("what is a trait?"),
+        "only that conversation: {stdout}"
+    );
+
+    // An unknown conversation is a clean error, not a panic or an empty success.
+    let (code, _, stderr) = hy(&["session", "nope"]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("nope"), "{stderr}");
+
+    let (code, stdout, stderr) = hy(&["forget", "first"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("first"), "{stdout}");
+    assert!(
+        !workspace.session_path("first").exists(),
+        "the transcript file must be gone"
+    );
+    assert!(workspace.session("first").unwrap().is_none());
+    assert!(
+        workspace.session("second").unwrap().is_some(),
+        "forgetting one conversation must not touch another"
+    );
+
+    let (code, _, stderr) = hy(&["forget", "first"]);
+    assert_eq!(code, Some(1), "forgetting twice is an error");
+    assert!(stderr.contains("not found"), "{stderr}");
+}

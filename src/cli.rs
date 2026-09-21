@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::{
     AgentMode, Checkpoint, RunSummary, TaskSpec, Workspace, deepseek::ensure_api_key,
     get_run_details, latest_model_reply, list_runs, prompt_to_task, restore_checkpoint, run_task,
-    tui,
+    run_task_in_session, tui,
 };
 
 #[derive(Parser)]
@@ -25,11 +25,14 @@ struct Cli {
     /// Use plan mode for a direct prompt
     #[arg(short, long)]
     plan: bool,
+    /// Continue a conversation: same as `--session`, for a direct prompt
+    #[arg(long, value_name = "SESSION_ID")]
+    session: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Configure the DeepSeek API key
+    /// Configure the provider API key, base URL and model
     Config,
     Init,
     #[command(visible_alias = "v")]
@@ -45,11 +48,17 @@ enum Commands {
         /// Prompt words; unquoted multi-word prompts are joined with spaces
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
+        /// Continue the given conversation instead of starting a new one
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
     },
     #[command(visible_alias = "b")]
     Build {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
+        /// Continue the given conversation instead of starting a new one
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
     },
     #[command(visible_alias = "ls")]
     Runs {
@@ -60,7 +69,24 @@ enum Commands {
     Show {
         run_id: String,
     },
+    /// List conversations (session id, turns, runs, last update)
+    Sessions {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print a conversation's transcript
+    Session {
+        session_id: String,
+    },
+    /// Delete a conversation; the runs it produced are kept
+    Forget {
+        session_id: String,
+    },
     Tui,
+    /// Open the TUI continuing the given conversation
+    Resume {
+        session_id: String,
+    },
     Diff {
         run_id: String,
     },
@@ -85,7 +111,7 @@ pub fn run() -> Result<()> {
     if cli.command.is_none() {
         ensure_api_key(false)?;
         if cli.prompt.is_empty() {
-            return tui::run(root);
+            return tui::run(root, None);
         }
         let prompt = cli.prompt.join(" ");
         let mode = if cli.plan {
@@ -93,7 +119,7 @@ pub fn run() -> Result<()> {
         } else {
             AgentMode::Build
         };
-        print_prompt_result(&root, &prompt, mode)?;
+        print_prompt_result(&root, &prompt, mode, cli.session.as_deref())?;
         return Ok(());
     }
     match cli.command.expect("command checked above") {
@@ -111,13 +137,23 @@ pub fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&summary)?);
             ensure_success(&summary)?;
         }
-        Commands::Plan { prompt } => {
+        Commands::Plan { prompt, session } => {
             ensure_api_key(false)?;
-            print_prompt_result(&root, &prompt.join(" "), AgentMode::Plan)?
+            print_prompt_result(
+                &root,
+                &prompt.join(" "),
+                AgentMode::Plan,
+                session.as_deref(),
+            )?
         }
-        Commands::Build { prompt } => {
+        Commands::Build { prompt, session } => {
             ensure_api_key(false)?;
-            print_prompt_result(&root, &prompt.join(" "), AgentMode::Build)?
+            print_prompt_result(
+                &root,
+                &prompt.join(" "),
+                AgentMode::Build,
+                session.as_deref(),
+            )?
         }
         Commands::Runs { limit } => {
             for run in list_runs(&root, limit)? {
@@ -137,9 +173,49 @@ pub fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({"run":run,"events":events}))?
             )
         }
+        Commands::Sessions { limit } => {
+            let workspace = Workspace::open(&root)?;
+            for session in workspace.list_sessions(limit)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    session.session_id,
+                    session.messages,
+                    session.runs,
+                    session.updated_at,
+                    session.title
+                )
+            }
+        }
+        Commands::Session { session_id } => {
+            let workspace = Workspace::open(&root)?;
+            let messages = workspace.session_messages(&session_id)?;
+            if messages.is_empty() {
+                bail!("session not found or empty: {session_id}")
+            }
+            for message in messages {
+                println!("[{}] {}", message.role, message.timestamp);
+                println!("{}", message.content);
+                println!();
+            }
+        }
+        Commands::Forget { session_id } => {
+            let workspace = Workspace::open(&root)?;
+            if !workspace.delete_session(&session_id)? {
+                bail!("session not found: {session_id}")
+            }
+            println!("forgot session {session_id} (its runs are kept)")
+        }
         Commands::Tui => {
             ensure_api_key(false)?;
-            tui::run(root)?
+            tui::run(root, None)?
+        }
+        Commands::Resume { session_id } => {
+            ensure_api_key(false)?;
+            let workspace = Workspace::open(&root)?;
+            let session = workspace
+                .session(&session_id)?
+                .with_context(|| format!("session not found: {session_id}"))?;
+            tui::run(root, Some(session.session_id))?
         }
         Commands::Diff { run_id } => diff(&root, &run_id)?,
         Commands::Artifacts { run_id } => artifacts(&root, &run_id)?,
@@ -223,12 +299,27 @@ fn artifacts(root: &std::path::Path, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_prompt_result(root: &std::path::Path, prompt: &str, mode: AgentMode) -> Result<()> {
-    let summary = run_task(&prompt_to_task(prompt, mode), root)?;
+/// Run a direct prompt and print what the model answered. With a session id the
+/// run continues that conversation, and the new turn is appended to it; without
+/// one the run is standalone, as before.
+fn print_prompt_result(
+    root: &std::path::Path,
+    prompt: &str,
+    mode: AgentMode,
+    session_id: Option<&str>,
+) -> Result<()> {
+    let task = prompt_to_task(prompt, mode);
+    let summary = match session_id {
+        Some(session_id) => run_task_in_session(&task, root, session_id)?,
+        None => run_task(&task, root)?,
+    };
     if let Some(content) = latest_model_reply(root, &summary.run_id)? {
         println!("{content}");
     } else {
         println!("{}", serde_json::to_string_pretty(&summary)?);
+    }
+    if let Some(session_id) = session_id {
+        eprintln!("session {session_id}");
     }
     ensure_success(&summary)
 }
@@ -342,7 +433,7 @@ mod tests {
 
     #[test]
     fn direct_prompt_defaults_to_build() {
-        let cli = Cli::try_parse_from(["hy", "fix", "the", "bug"]).unwrap();
+        let cli = Cli::try_parse_from(["ha", "fix", "the", "bug"]).unwrap();
         assert!(cli.command.is_none());
         assert!(!cli.plan);
         assert_eq!(cli.prompt.join(" "), "fix the bug");
@@ -350,7 +441,7 @@ mod tests {
 
     #[test]
     fn short_plan_flag_accepts_direct_prompt() {
-        let cli = Cli::try_parse_from(["hy", "-p", "inspect code"]).unwrap();
+        let cli = Cli::try_parse_from(["ha", "-p", "inspect code"]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.plan);
         assert_eq!(cli.prompt, ["inspect code"]);
@@ -358,15 +449,15 @@ mod tests {
 
     #[test]
     fn legacy_subcommands_and_aliases_still_parse() {
-        let cli = Cli::try_parse_from(["hy", "b", "explain this"]).unwrap();
+        let cli = Cli::try_parse_from(["ha", "b", "explain this"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Build { .. })));
     }
 
     #[test]
     fn multiword_subcommand_prompts_are_accepted_unquoted() {
-        let cli = Cli::try_parse_from(["hy", "plan", "fix", "the", "bug"]).unwrap();
+        let cli = Cli::try_parse_from(["ha", "plan", "fix", "the", "bug"]).unwrap();
         match cli.command {
-            Some(Commands::Plan { prompt }) => assert_eq!(prompt.join(" "), "fix the bug"),
+            Some(Commands::Plan { prompt, .. }) => assert_eq!(prompt.join(" "), "fix the bug"),
             _ => panic!("expected the plan subcommand"),
         }
     }

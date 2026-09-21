@@ -24,7 +24,7 @@
   ],
   "bin": {
     "hyper": "bin/hyper.js",
-    "hy": "bin/hyper.js"
+    "ha": "bin/hyper.js"
   },
   "files": [
     "bin/"

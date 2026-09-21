@@ -19,14 +19,29 @@ Both command names become available:
 ```bash
 hyper init
 hyper run examples/hello.json
-hy tui                     # `hy` is the short alias
-hy "implement login"       # build mode
-hy -p "analyze the bug"    # plan mode
+ha tui                     # `ha` is the short alias of `hyper`
+ha "implement login"       # build mode
+ha -p "analyze the bug"    # plan mode
 ```
 
-Natural-language prompts call the DeepSeek API. Set `DEEPSEEK_API_KEY` (or run
-`hyper config` once to store a key), and optionally `DEEPSEEK_MODEL` /
-`DEEPSEEK_BASE_URL`.
+Natural-language prompts call the configured provider, DeepSeek by default. Run
+`hyper config` once to store the API key, the base URL and the model (they land
+in the user configuration directory with owner-only permissions), or set
+`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` for that shell — the
+environment wins over the stored file. To use a subscription such as OpenCode
+Go, set the base URL to `https://opencode.ai/zen/go/v1`; Hyper then picks the
+right wire protocol per model, or takes `DEEPSEEK_PROTOCOL`
+(`chat` / `responses` / `messages`) when you want to be explicit.
+
+Prompts can continue a conversation, which is what lets a follow-up refer to the
+previous answer:
+
+```bash
+hyper plan "which files implement the policy check?" --session review
+hyper plan "and which tests cover it?" --session review
+hyper sessions                     # list conversations
+hyper resume review                # open the TUI inside this one
+```
 
 ## Supported platforms
 
@@ -56,7 +71,8 @@ export HYPER_BINARY_PATH=/path/to/target/release/hyper
   delivery channel.
 - Requires Node.js 18 or newer to resolve and spawn the binary. The harness
   itself has no Node.js runtime dependency.
-- `hyper bash` runs shell commands and can write files. See the security notes
+- The harness runs shell commands and writes files as part of a prompt: `hyper
+  "run the tests and fix the failure"`. See the security notes
   in the [main README](https://github.com/ZeroMarker/hyper#reliability-and-limits)
   before pointing it at code you do not trust.
 

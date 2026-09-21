@@ -31,6 +31,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Span::styled(app.model.as_str(), Style::default().fg(Color::Magenta)),
         Span::raw("  •  "),
         Span::styled(app.mode.as_str(), Style::default().fg(mode_color)),
+        // Which conversation the next message joins, so a follow-up is never
+        // silently answered by a fresh context.
+        Span::styled(
+            match &app.session {
+                Some(id) => format!("  •  {id}"),
+                None => "  •  new session".into(),
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(header)

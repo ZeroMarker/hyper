@@ -6,7 +6,8 @@
 #   npm/scripts/smoke.sh <staging-dir>
 #
 # Checks that:
-#   1. `hyper` and `hy` both resolve to the platform binary and report a version
+#   1. `hyper` and `ha` both resolve to the platform binary and report the same
+#      version
 #   2. a failing run exits non-zero through the shim (exit code passthrough)
 #   3. a missing platform package produces an actionable error, not a stack trace
 #
@@ -70,7 +71,7 @@ npm install --no-audit --no-fund --omit=optional "$platform_tgz" "$main_tgz" >/d
 
 bin="$work/install/node_modules/.bin"
 [ -x "$bin/hyper" ] || { echo "smoke: npm did not link the hyper binary" >&2; exit 1; }
-[ -x "$bin/hy" ] || { echo "smoke: npm did not link the hy alias" >&2; exit 1; }
+[ -x "$bin/ha" ] || { echo "smoke: npm did not link the ha alias" >&2; exit 1; }
 
 reported="$("$bin/hyper" --version)"
 echo "  hyper --version -> $reported"
@@ -78,7 +79,14 @@ case "$reported" in
   *"$version"*) ;;
   *) echo "smoke: expected version $version in '$reported'" >&2; exit 1 ;;
 esac
-"$bin/hy" --version >/dev/null
+
+# `ha` is the same program under a shorter name, so it must answer identically.
+aliased="$("$bin/ha" --version)"
+echo "  ha --version -> $aliased"
+[ "$aliased" = "$reported" ] || {
+  echo "smoke: ha reported '$aliased' but hyper reported '$reported'" >&2
+  exit 1
+}
 
 cat > task.json <<'JSON'
 {"name":"smoke","steps":[{"id":"s","mode":"build","instruction":"bash:exit 7"}]}

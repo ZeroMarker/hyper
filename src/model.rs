@@ -126,3 +126,32 @@ pub struct RunRow {
     pub started_at: String,
     pub finished_at: Option<String>,
 }
+
+/// One turn of a conversation, in the neutral shape the model APIs use. The
+/// session transcript is what a later run replays as context, so it holds the
+/// user's prompt and the model's answer rather than the internal tool calls:
+/// those live in the run's `events.jsonl`, where the whole trace is recorded.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessage {
+    /// `user` or `assistant`.
+    pub role: String,
+    pub content: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRow {
+    pub session_id: String,
+    /// The first prompt, which is the only summary of a conversation we have
+    /// without asking a model for one.
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub messages: usize,
+    /// How many runs the conversation has produced.
+    pub runs: usize,
+}

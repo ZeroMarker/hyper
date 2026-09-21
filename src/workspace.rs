@@ -12,7 +12,9 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::model::{Failure, HarnessEvent, RunRow, RunSummary, TaskSpec};
+use crate::model::{
+    Failure, HarnessEvent, RunRow, RunSummary, SessionMessage, SessionRow, TaskSpec,
+};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -83,7 +85,7 @@ impl Workspace {
         // except for journal_mode, which is persisted in the database.
         db.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at); CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, messages INTEGER NOT NULL, runs INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);")?;
         let workspace = Self { paths, db };
         // The previous harness may have been killed mid-run; repair those rows
         // so a crashed run does not linger as `running` forever.
@@ -359,6 +361,161 @@ impl Workspace {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(checkpoints)
+    }
+
+    /// The transcript file a session id names. Sessions used to be written as
+    /// one throwaway file per run with an unguessable name; the id is now the
+    /// only handle a conversation needs.
+    ///
+    /// The id is part of a file name, so it is validated first: an id like
+    /// `../../config` would otherwise let a caller read or write outside the
+    /// workspace.
+    pub fn session_path(&self, session_id: &str) -> PathBuf {
+        self.paths.sessions.join(format!("{session_id}.jsonl"))
+    }
+
+    /// Append one turn to a session, creating the session registry row on the
+    /// first turn. Returns the session's updated summary.
+    pub fn append_session_message(
+        &self,
+        session_id: &str,
+        message: &SessionMessage,
+    ) -> Result<SessionRow> {
+        validate_session_id(session_id)?;
+        let path = self.session_path(session_id);
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        serde_json::to_writer(&mut file, message)?;
+        writeln!(file)?;
+        // The turn count comes from the registry rather than from re-reading the
+        // transcript, so appending stays O(1) as a conversation grows.
+        let messages = self.session(session_id)?.map_or(0, |row| row.messages) as i64 + 1;
+        // A run contributes two turns (prompt and answer) but is one run, so
+        // only its opening turn counts.
+        let run = i64::from(message.role == "user" && message.run_id.is_some());
+        self.db.execute(
+            "INSERT INTO sessions (session_id,title,created_at,updated_at,messages,runs) \
+             VALUES (?1,?2,?3,?3,?4,?5) \
+             ON CONFLICT(session_id) DO UPDATE SET \
+               updated_at=excluded.updated_at, messages=excluded.messages, runs=sessions.runs+?5",
+            params![
+                session_id,
+                title_from(message),
+                message.timestamp,
+                messages,
+                run,
+            ],
+        )?;
+        self.session(session_id)?
+            .with_context(|| format!("session {session_id} disappeared after being written"))
+    }
+
+    /// Read a session transcript. A missing file is an empty conversation, not
+    /// an error: `hy session <id>` on an unknown id simply has nothing to show.
+    pub fn session_messages(&self, session_id: &str) -> Result<Vec<SessionMessage>> {
+        validate_session_id(session_id)?;
+        let path = self.session_path(session_id);
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Ok(Vec::new());
+        };
+        content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<SessionMessage>(line)
+                    .with_context(|| format!("invalid session line in {}", path.display()))
+            })
+            .collect()
+    }
+
+    pub fn session(&self, session_id: &str) -> Result<Option<SessionRow>> {
+        let mut stmt = self.db.prepare(
+            "SELECT session_id,title,created_at,updated_at,messages,runs FROM sessions WHERE session_id=?1",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        Ok(match rows.next()? {
+            None => None,
+            Some(row) => Some(SessionRow {
+                session_id: row.get(0)?,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                messages: row.get::<_, i64>(4)?.max(0) as usize,
+                runs: row.get::<_, i64>(5)?.max(0) as usize,
+            }),
+        })
+    }
+
+    /// Recent conversations, newest first.
+    pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionRow>> {
+        let mut stmt = self.db.prepare(
+            "SELECT session_id,title,created_at,updated_at,messages,runs FROM sessions \
+             ORDER BY updated_at DESC LIMIT ?1",
+        )?;
+        Ok(stmt
+            .query_map([limit], |row| {
+                Ok(SessionRow {
+                    session_id: row.get(0)?,
+                    title: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    messages: row.get::<_, i64>(4)?.max(0) as usize,
+                    runs: row.get::<_, i64>(5)?.max(0) as usize,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Forget a conversation: the transcript file and its registry row. The
+    /// runs it produced are left alone, since deleting them would rewrite the
+    /// meaning of the events that already happened.
+    pub fn delete_session(&self, session_id: &str) -> Result<bool> {
+        validate_session_id(session_id)?;
+        let path = self.session_path(session_id);
+        let existed = path.exists() || self.session(session_id)?.is_some();
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        self.db
+            .execute("DELETE FROM sessions WHERE session_id=?1", [session_id])?;
+        Ok(existed)
+    }
+}
+
+/// A conversation id is used as a file name, so only characters that cannot
+/// escape the `sessions/` directory are accepted.
+pub fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() {
+        bail!("session id must not be empty")
+    }
+    if session_id.len() > 64 {
+        bail!("session id must be at most 64 characters")
+    }
+    if session_id == "." || session_id == ".." {
+        bail!("session id must not be a directory reference")
+    }
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("session id may only contain letters, digits, '-' and '_': {session_id}")
+    }
+    Ok(())
+}
+
+/// A conversation is titled by its first prompt, trimmed to something a list
+/// view can show. Later turns never rename it.
+fn title_from(message: &SessionMessage) -> String {
+    let first_line = message
+        .content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let title: String = first_line.chars().take(60).collect();
+    if title.is_empty() {
+        "(untitled)".into()
+    } else {
+        title
     }
 }
 

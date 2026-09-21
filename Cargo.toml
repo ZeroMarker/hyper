@@ -10,8 +10,8 @@ name = "hyper"
 path = "src/main.rs"
 
 [[bin]]
-name = "hy"
-path = "src/bin/hy.rs"
+name = "ha"
+path = "src/bin/ha.rs"
 
 [dependencies]
 anyhow = "1"

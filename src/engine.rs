@@ -18,6 +18,7 @@ use crate::{
     approval::ApprovalGate,
     deepseek::{DeepSeekConfig, ToolSpec, chat_messages, system_prompt},
     model::*,
+    policy,
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
 };
 
@@ -27,6 +28,9 @@ struct EventWriter<'a> {
     path: &'a Path,
     workspace: &'a Workspace,
     gate: Option<ApprovalGate>,
+    /// Earlier turns of the session this run belongs to, oldest first. Empty
+    /// for a standalone run.
+    history: Vec<SessionMessage>,
 }
 impl EventWriter<'_> {
     fn write(
@@ -73,12 +77,7 @@ fn assert_allowed(
         resolve_path(root, target)?;
     }
     if action == "bash" {
-        let cmd = command.unwrap_or_default();
-        for dangerous in ["rm -rf", "sudo", "chmod -R", "chown -R", "/dev/sd", "dd "] {
-            if cmd.contains(dangerous) {
-                bail!("command matches dangerous pattern")
-            }
-        }
+        policy::check_command(command.unwrap_or_default(), root)?;
     }
     Ok(())
 }
@@ -157,17 +156,23 @@ fn agent(
     let config = DeepSeekConfig::from_env()?;
     events.write(
         "model.started",
-        json!({"provider":"deepseek","model":config.model,"agent":true,"maxTurns":MAX_TURNS}),
+        json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS}),
         Some(&step.id),
         Some(index),
     )?;
     let context = workspace_context(root)?;
-    let mut messages = vec![
-        json!({ "role": "system", "content": system_prompt(step.mode) }),
-        json!({ "role": "user", "content": format!(
-            "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
-        ) }),
-    ];
+    let mut messages = vec![json!({ "role": "system", "content": system_prompt(step.mode) })];
+    // Earlier turns of the conversation come first, so the model can answer a
+    // follow-up that depends on what was already discussed.
+    messages.extend(
+        events
+            .history
+            .iter()
+            .map(|message| json!({"role": message.role, "content": message.content})),
+    );
+    messages.push(json!({ "role": "user", "content": format!(
+        "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
+    ) }));
     let specs = tool_specs_for(step);
     for turn in 0..MAX_TURNS {
         let reply = chat_messages(&config, &messages, Some(&specs))?;
@@ -181,7 +186,7 @@ fn agent(
             let payload = serde_json::to_value(&reply)?;
             events.write(
                 "model.finished",
-                json!({"provider":"deepseek","response":payload}),
+                json!({"provider":config.provider,"response":payload}),
                 Some(&step.id),
                 Some(index),
             )?;
@@ -868,7 +873,7 @@ fn edit_file(
 }
 
 pub fn run_task(task: &TaskSpec, root: impl AsRef<Path>) -> Result<RunSummary> {
-    run_task_inner(task, root, None)
+    run_task_inner(task, root, None, None)
 }
 
 /// Run a task with an interactive approval gate: `bash`, `write` and `edit`
@@ -878,13 +883,34 @@ pub fn run_task_with_approval(
     root: impl AsRef<Path>,
     gate: ApprovalGate,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate))
+    run_task_inner(task, root, Some(gate), None)
+}
+
+/// Run a task as one more turn of a conversation: the session's earlier turns
+/// are replayed to the model as context, and this turn is appended afterwards.
+pub fn run_task_in_session(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: &str,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, None, Some(session_id))
+}
+
+/// Same as [`run_task_in_session`], with the TUI approval gate.
+pub fn run_task_in_session_with_approval(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: &str,
+    gate: ApprovalGate,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, Some(gate), Some(session_id))
 }
 
 fn run_task_inner(
     task: &TaskSpec,
     root: impl AsRef<Path>,
     gate: Option<ApprovalGate>,
+    session_id: Option<&str>,
 ) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
@@ -897,14 +923,31 @@ fn run_task_inner(
     fs::write(&run.task, serde_json::to_vec_pretty(task)?)?;
     let started = now();
     workspace.create_run(&run_id, task, &started)?;
+    // The prompt is part of the conversation even if the run fails, so record
+    // the user turn before executing anything. History is read first so this
+    // turn's prompt is not both replayed and re-sent.
+    let history = match session_id {
+        Some(session_id) => {
+            let history = workspace.session_messages(session_id)?;
+            workspace.append_session_message(session_id, &user_turn(task, &started, &run_id))?;
+            history
+        }
+        None => Vec::new(),
+    };
     let events = EventWriter {
         run_id: run_id.clone(),
         task,
         path: &run.events,
         workspace: &workspace,
         gate,
+        history,
     };
-    events.write("run.started", json!({"taskName":task.name}), None, None)?;
+    events.write(
+        "run.started",
+        json!({"taskName":task.name,"sessionId":session_id}),
+        None,
+        None,
+    )?;
     let mut succeeded = 0;
     let mut failure = None;
     for (index, step) in task.steps.iter().enumerate() {
@@ -930,7 +973,10 @@ fn run_task_inner(
                 break;
             }
             Err(error) => {
-                failure = Some(fail(&events, step, index, error.to_string())?);
+                // `{:#}` keeps the source chain, so a failure reports "failed to
+                // call the opencode-go API: connection refused" instead of only
+                // the outermost context.
+                failure = Some(fail(&events, step, index, format!("{error:#}"))?);
                 break;
             }
         }
@@ -956,7 +1002,13 @@ fn run_task_inner(
         events.write("run.finished", json!({"summary":summary}), None, None)?;
     }
     fs::write(&run.summary, serde_json::to_vec_pretty(&summary)?)?;
-    save_session(&workspace, &summary)?;
+    // The conversation keeps what the user saw, failure included, so the next
+    // turn can refer to it.
+    if let Some(session_id) = session_id
+        && let Some(message) = assistant_turn(&workspace, &summary)?
+    {
+        workspace.append_session_message(session_id, &message)?;
+    }
     Ok(summary)
 }
 /// Build the human-readable reason for a tool that reported failure, keeping a
@@ -1043,20 +1095,34 @@ fn classify_error(message: &str) -> &'static str {
     }
 }
 
-fn save_session(workspace: &Workspace, summary: &RunSummary) -> Result<()> {
-    let id = workspace::id();
-    let messages = [
-        json!({"role":"user","content":summary.task_name,"timestamp":summary.started_at,"metadata":{"runId":summary.run_id}}),
-        json!({"role":"assistant","content":format!("Run {} {}",summary.run_id,summary.status),"timestamp":summary.finished_at,"metadata":{}}),
-    ];
-    let text = messages
-        .iter()
-        .map(Value::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    fs::write(workspace.paths.sessions.join(format!("{id}.jsonl")), text)?;
-    Ok(())
+/// The user turn a run contributes to its conversation. The task name is the
+/// prompt for a prompt-driven run, which is the only shape the TUI produces.
+fn user_turn(task: &TaskSpec, started: &str, run_id: &str) -> SessionMessage {
+    SessionMessage {
+        role: "user".into(),
+        content: task.name.clone(),
+        timestamp: started.into(),
+        run_id: Some(run_id.into()),
+    }
+}
+
+/// The assistant turn for a finished run: the model's final answer when it
+/// produced one, otherwise a line describing how the run ended. `None` only
+/// when the run has neither, which cannot happen in practice.
+fn assistant_turn(workspace: &Workspace, summary: &RunSummary) -> Result<Option<SessionMessage>> {
+    let content = match latest_model_reply(workspace.paths.root.clone(), &summary.run_id) {
+        Ok(Some(content)) if !content.trim().is_empty() => content,
+        _ => match &summary.failure {
+            Some(failure) => format!("Run {} failed: {}", summary.run_id, failure.message),
+            None => format!("Run {} {}", summary.run_id, summary.status),
+        },
+    };
+    Ok(Some(SessionMessage {
+        role: "assistant".into(),
+        content,
+        timestamp: summary.finished_at.clone(),
+        run_id: Some(summary.run_id.clone()),
+    }))
 }
 pub fn prompt_to_task(prompt: &str, mode: AgentMode) -> TaskSpec {
     TaskSpec {
@@ -1183,6 +1249,7 @@ mod tests {
             path: &run.events,
             workspace: &workspace,
             gate: None,
+            history: Vec::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the
         // model emitted the call itself.

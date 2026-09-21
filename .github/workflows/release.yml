@@ -72,7 +72,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/${{ matrix.target }}/release/hyper dist/
-          cp target/${{ matrix.target }}/release/hy dist/
+          cp target/${{ matrix.target }}/release/ha dist/
           tar -czf hyper-${{ matrix.suffix }}.tar.gz -C dist .
 
       - name: Package binaries (windows)
@@ -81,7 +81,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target/${{ matrix.target }}/release/hyper.exe dist/
-          Copy-Item target/${{ matrix.target }}/release/hy.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/ha.exe dist/
           Compress-Archive -Path dist/* -DestinationPath hyper-${{ matrix.suffix }}.zip
 
       - name: Upload artifact
