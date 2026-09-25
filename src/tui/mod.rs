@@ -1,8 +1,8 @@
 mod ui;
 
 use crate::{
-    AgentMode, ApprovalGate, ApprovalRequest, deepseek::DEFAULT_MODEL, latest_display_output,
-    list_runs, prompt_to_task, run_task_in_session_with_approval, workspace,
+    AgentMode, ApprovalGate, ApprovalRequest, EventSink, deepseek::DEFAULT_MODEL,
+    latest_display_output, list_runs, prompt_to_task, run_task_in_session_with_updates, workspace,
 };
 use anyhow::Result;
 use crossterm::{
@@ -12,6 +12,7 @@ use crossterm::{
     },
     execute,
 };
+use ratatui::text::Line;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -25,6 +26,9 @@ pub struct App {
     pub mode: AgentMode,
     pub model: String,
     pub output: Vec<String>,
+    pub rendered: Vec<Line<'static>>,
+    pub rendered_count: usize,
+    pub event_tail: VecDeque<String>,
     pub busy: bool,
     pub quit: bool,
     pub scroll: u16,
@@ -39,12 +43,14 @@ pub struct App {
     /// user can still see which conversation they just left.
     pub session_id: Option<String>,
     gate: Option<ApprovalGate>,
+    sink: Option<EventSink>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
 enum Message {
     Task(Result<String, String>),
 }
+
 impl App {
     fn new(root: PathBuf, session: Option<String>) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -58,6 +64,9 @@ impl App {
             mode: AgentMode::Build,
             model,
             output: vec!["Hyper\n你好，需要我帮你做什么？".into()],
+            rendered: Vec::new(),
+            rendered_count: 0,
+            event_tail: VecDeque::new(),
             busy: false,
             quit: false,
             scroll: 0,
@@ -68,6 +77,7 @@ impl App {
             session_id: session.clone(),
             session,
             gate: None,
+            sink: None,
             tx,
             rx,
         }
@@ -85,6 +95,9 @@ impl App {
                 // would leave the next message answering turns the user can no
                 // longer see, so `/new` starts a new conversation as well.
                 self.output.clear();
+                self.rendered.clear();
+                self.rendered_count = 0;
+                self.event_tail.clear();
                 if let Some(previous) = self.session.take() {
                     self.output.push(format!(
                         "Hyper\n已开始新对话（上一段：`{previous}`，用 `hyper session {previous}` 查看）。"
@@ -152,8 +165,11 @@ impl App {
                 self.scroll = 0;
                 self.output.push(format!("You\n{value}"));
                 self.approvals.clear();
+                self.event_tail.clear();
                 let gate = ApprovalGate::new();
                 self.gate = Some(gate.clone());
+                let sink = EventSink::new();
+                self.sink = Some(sink.clone());
                 let root = self.root.clone();
                 let mode = self.mode;
                 let tx = self.tx.clone();
@@ -163,11 +179,12 @@ impl App {
                 let session = self.session.get_or_insert_with(workspace::id).clone();
                 self.session_id = Some(session.clone());
                 std::thread::spawn(move || {
-                    let result = run_task_in_session_with_approval(
+                    let result = run_task_in_session_with_updates(
                         &prompt_to_task(&value, mode),
                         &root,
                         &session,
                         gate,
+                        sink,
                     )
                     .and_then(|summary| {
                         Ok(latest_display_output(&root, &summary.run_id)?
@@ -250,11 +267,23 @@ impl App {
                 self.approvals.push_back(request);
             }
         }
+        if let Some(sink) = &self.sink {
+            for line in sink.drain() {
+                // Repeated model iterations can arrive faster than a redraw.
+                if self.event_tail.back() != Some(&line) {
+                    if self.event_tail.len() == 12 {
+                        self.event_tail.pop_front();
+                    }
+                    self.event_tail.push_back(line);
+                }
+            }
+        }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Message::Task(r) => {
                     self.busy = false;
                     self.approvals.clear();
+                    self.sink = None;
                     self.follow_tail = true;
                     self.scroll = 0;
                     self.output.push(format!(
@@ -284,7 +313,7 @@ pub fn run(root: PathBuf, session: Option<String>) -> Result<()> {
         while !app.quit {
             app.tick = app.tick.wrapping_add(1);
             app.poll();
-            terminal.draw(|f| ui::draw(f, &app))?;
+            terminal.draw(|f| ui::draw(f, &mut app))?;
             if !event::poll(Duration::from_millis(100))? {
                 continue;
             }

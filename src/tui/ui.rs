@@ -10,7 +10,25 @@ use unicode_width::UnicodeWidthStr;
 use super::App;
 use crate::AgentMode;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Only parse markdown for messages added since the previous frame.
+    for message in &app.output[app.rendered_count..] {
+        let mut lines = message.lines();
+        let role = lines.next().unwrap_or("Hyper");
+        let role_color = if role == "You" {
+            Color::Cyan
+        } else {
+            Color::Green
+        };
+        app.rendered.push(Line::styled(
+            role.to_owned(),
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        ));
+        let markdown = lines.collect::<Vec<_>>().join("\n");
+        app.rendered.extend(markdown_lines(&markdown));
+        app.rendered.push(Line::from(""));
+    }
+    app.rendered_count = app.output.len();
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -48,21 +66,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
         areas[0],
     );
 
-    let mut chat = Vec::new();
-    for message in &app.output {
-        let mut lines = message.lines();
-        let role = lines.next().unwrap_or("Hyper");
-        let role_color = if role == "You" {
-            Color::Cyan
-        } else {
-            Color::Green
-        };
+    let mut chat = app.rendered.clone();
+    if !app.event_tail.is_empty() {
         chat.push(Line::styled(
-            role,
-            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+            "Events",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
-        let markdown = lines.collect::<Vec<_>>().join("\n");
-        chat.extend(markdown_lines(&markdown));
+        chat.extend(
+            app.event_tail
+                .iter()
+                .map(|event| Line::styled(event.clone(), Style::default().fg(Color::DarkGray))),
+        );
         chat.push(Line::from(""));
     }
     if app.busy {

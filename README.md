@@ -201,6 +201,9 @@ The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
 
+While a task runs, the TUI shows its recent event stream below the conversation
+(up to 12 brief updates). The complete events remain in `events.jsonl`.
+
 In the TUI, `bash`, `write` and `edit` actions ask for **interactive
 approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
 loop waits for the answer). Command-line runs do not prompt.
@@ -336,4 +339,3 @@ to rehearse a release without spending a version number.
 Maintainers edit `npm/platforms.json` to add a platform; it is the single source
 of truth for the package names, npm `os`/`cpu` fields, and the release archive
 each package is built from.
-

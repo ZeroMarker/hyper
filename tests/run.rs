@@ -1,6 +1,6 @@
 use harness::{
-    AgentMode, ApprovalGate, Checkpoint, StepSpec, TaskSpec, Workspace, get_run_details,
-    restore_checkpoint, run_task, run_task_with_approval,
+    AgentMode, ApprovalGate, Checkpoint, EventSink, StepSpec, TaskSpec, Workspace, get_run_details,
+    restore_checkpoint, run_task, run_task_in_session_with_updates, run_task_with_approval,
 };
 use std::{
     collections::HashMap,
@@ -50,6 +50,26 @@ fn shell_run_records_events() {
     let (_, events) = get_run_details(dir.path(), &summary.run_id).unwrap();
     assert!(events.iter().any(|e| e.event_type == "run.finished"));
     assert!(events.iter().any(|e| e.event_type == "tool.finished"))
+}
+
+#[test]
+fn session_run_publishes_persisted_events_to_the_tui_sink() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("note.txt"), "hello").unwrap();
+    let sink = EventSink::new();
+    let summary = run_task_in_session_with_updates(
+        &task("read", AgentMode::Plan, "read:note.txt"),
+        dir.path(),
+        "chat",
+        ApprovalGate::new(),
+        sink.clone(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
+    let updates = sink.drain();
+    assert!(updates.iter().any(|line| line.contains("run.started")));
+    assert!(updates.iter().any(|line| line.contains("tool.finished")));
+    assert!(updates.iter().any(|line| line.contains("run.finished")));
 }
 
 #[test]

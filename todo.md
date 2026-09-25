@@ -35,7 +35,7 @@
 > 本清单于 2026-09-21 复核；本轮完成协议适配、会话与轻量沙箱后，剩余项已重写。体积参考：一次带工具调用的模型 run ≈ 34 KB（JSONL 4.3 KB + DB payload 1.8 KB + SQLite 页开销），每次 trivial run ≈ 4.7 KB。
 
 ### 可观测性
-- [ ] **实时展示运行中的 event stream（建议先做）**：`EventWriter::write`（engine.rs:32）是所有事件的唯一出口，`ApprovalGate`（approval.rs）已经是「工作线程推送 + TUI 主循环 drain」的现成范式，照它加一个 `EventSink` 即可。前置工作：TUI 目前每帧重新解析全部消息的 markdown（ui.rs:50、219），必须改成「渲染结果缓存 + 一条临时 tail 行」，否则事件一变多就会随 output 增长而变慢；事件队列还需要合并与限长。
+- [x] **实时展示运行中的 event stream**：`EventWriter::write` 在事件持久化后推送简短状态到有界 `EventSink`，TUI 每帧 drain 并保留最近 12 条；重复状态合并。聊天 markdown 只在新消息加入时解析并缓存，事件内容不会把大 payload 复制进 UI 队列。
 - [ ] replay/resume（事件级重放）：会话已解决「对话上下文」，但**从事件重建一次 run 的完整 messages** 仍缺两块——`model.tool_calls`（engine.rs:191）没有记录该轮 assistant 的 `content`；observation 是运行时由 payload 派生（engine.rs:331 头尾截断）而非存储。推进顺序：先补事件字段并抽出 observation 派生函数，再按 `task.json` + 事件重建。`Workspace::last_started_step`（workspace.rs:234）与 `interrupted` 状态已就位。
 - [ ] streaming 响应（SSE）：三个协议目前都是 `stream: false` + 整体读取响应。blocking `Response` 实现了 `Read`，可自行解析 SSE，但流式 tool_calls/`function_call`/`tool_use` 分片需要按协议分别累积。价值依赖「实时展示」——否则流没有出口。
 

@@ -17,6 +17,7 @@ use wait_timeout::ChildExt;
 use crate::{
     approval::ApprovalGate,
     deepseek::{DeepSeekConfig, ToolSpec, chat_messages, system_prompt},
+    event_sink::EventSink,
     model::*,
     policy,
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
@@ -28,6 +29,7 @@ struct EventWriter<'a> {
     path: &'a Path,
     workspace: &'a Workspace,
     gate: Option<ApprovalGate>,
+    sink: Option<EventSink>,
     /// Earlier turns of the session this run belongs to, oldest first. Empty
     /// for a standalone run.
     history: Vec<SessionMessage>,
@@ -57,6 +59,9 @@ impl EventWriter<'_> {
         serde_json::to_writer(&mut file, &event)?;
         writeln!(file)?;
         self.workspace.insert_event(&event)?;
+        if let Some(sink) = &self.sink {
+            sink.push(&event);
+        }
         Ok(event)
     }
 }
@@ -873,7 +878,7 @@ fn edit_file(
 }
 
 pub fn run_task(task: &TaskSpec, root: impl AsRef<Path>) -> Result<RunSummary> {
-    run_task_inner(task, root, None, None)
+    run_task_inner(task, root, None, None, None)
 }
 
 /// Run a task with an interactive approval gate: `bash`, `write` and `edit`
@@ -883,7 +888,7 @@ pub fn run_task_with_approval(
     root: impl AsRef<Path>,
     gate: ApprovalGate,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate), None)
+    run_task_inner(task, root, Some(gate), None, None)
 }
 
 /// Run a task as one more turn of a conversation: the session's earlier turns
@@ -893,7 +898,7 @@ pub fn run_task_in_session(
     root: impl AsRef<Path>,
     session_id: &str,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, None, Some(session_id))
+    run_task_inner(task, root, None, Some(session_id), None)
 }
 
 /// Same as [`run_task_in_session`], with the TUI approval gate.
@@ -903,7 +908,18 @@ pub fn run_task_in_session_with_approval(
     session_id: &str,
     gate: ApprovalGate,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate), Some(session_id))
+    run_task_inner(task, root, Some(gate), Some(session_id), None)
+}
+
+/// Run a TUI conversation turn while publishing persisted events to the UI.
+pub fn run_task_in_session_with_updates(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: &str,
+    gate: ApprovalGate,
+    sink: EventSink,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, Some(gate), Some(session_id), Some(sink))
 }
 
 fn run_task_inner(
@@ -911,6 +927,7 @@ fn run_task_inner(
     root: impl AsRef<Path>,
     gate: Option<ApprovalGate>,
     session_id: Option<&str>,
+    sink: Option<EventSink>,
 ) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
@@ -940,6 +957,7 @@ fn run_task_inner(
         path: &run.events,
         workspace: &workspace,
         gate,
+        sink,
         history,
     };
     events.write(
@@ -1249,6 +1267,7 @@ mod tests {
             path: &run.events,
             workspace: &workspace,
             gate: None,
+            sink: None,
             history: Vec::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the
