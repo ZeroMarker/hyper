@@ -744,56 +744,47 @@ fn cli_uses_the_stored_provider_configuration() {
     );
 }
 
-/// A conversation keeps the user's prompt and the model's answer, and later
-/// turns replay the earlier ones so a follow-up is answered with context.
-#[test]
-fn sessions_keep_the_conversation_and_replay_it() {
+/// A stub model server: it answers each request with the next fixed reply and
+/// records the bodies it received, so a test can assert exactly what the model
+/// was told.
+fn stub_model(
+    replies: Vec<&'static str>,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
-    /// A stub that answers each request with a fixed reply and records the
-    /// bodies it received, so a test can see exactly what the model was told.
-    fn serve(
-        replies: Vec<&'static str>,
-    ) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let bodies = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&bodies);
-        let handle = std::thread::spawn(move || {
-            for reply in replies {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = vec![0_u8; 65536];
-                let read = stream.read(&mut request).unwrap();
-                let text = String::from_utf8_lossy(&request[..read]).into_owned();
-                if let Some((_, body)) = text.split_once("\r\n\r\n") {
-                    recorded.lock().unwrap().push(body.to_owned());
-                }
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
-                    reply.len()
-                )
-                .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&bodies);
+    let handle = std::thread::spawn(move || {
+        for reply in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0_u8; 65536];
+            let read = stream.read(&mut request).unwrap();
+            let text = String::from_utf8_lossy(&request[..read]).into_owned();
+            if let Some((_, body)) = text.split_once("\r\n\r\n") {
+                recorded.lock().unwrap().push(body.to_owned());
             }
-        });
-        (format!("http://{address}/v1"), bodies, handle)
-    }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}/v1"), bodies, handle)
+}
 
-    fn reply(text: &str) -> String {
-        format!(r#"{{"model":"stub","choices":[{{"message":{{"content":"{text}"}}}}]}}"#)
-    }
-
-    let first = reply("the answer is 4");
-    let second = reply("it is 8");
-    let (base_url, bodies, server) = serve(vec![
-        Box::leak(first.into_boxed_str()),
-        Box::leak(second.into_boxed_str()),
-    ]);
-
-    let dir = tempdir().unwrap();
-    let config_home = dir.path().join("config");
+/// Point a workspace at a stub provider, the way `hyper config` would.
+fn stub_config(dir: &std::path::Path, base_url: &str) -> std::path::PathBuf {
+    let config_home = dir.join("config");
     let config_file = config_home.join("hyper").join("config.json");
     fs::create_dir_all(config_file.parent().unwrap()).unwrap();
     fs::write(
@@ -801,6 +792,26 @@ fn sessions_keep_the_conversation_and_replay_it() {
         format!(r#"{{"deepseek_api_key":"k","base_url":"{base_url}","model":"stub"}}"#),
     )
     .unwrap();
+    config_home
+}
+
+/// A conversation keeps the user's prompt and the model's answer, and later
+/// turns replay the earlier ones so a follow-up is answered with context.
+#[test]
+fn sessions_keep_the_conversation_and_replay_it() {
+    fn reply(text: &str) -> String {
+        format!(r#"{{"model":"stub","choices":[{{"message":{{"content":"{text}"}}}}]}}"#)
+    }
+
+    let first = reply("the answer is 4");
+    let second = reply("it is 8");
+    let (base_url, bodies, server) = stub_model(vec![
+        Box::leak(first.into_boxed_str()),
+        Box::leak(second.into_boxed_str()),
+    ]);
+
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &base_url);
 
     let run = |prompt: &str, session: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
@@ -966,4 +977,357 @@ fn session_commands_list_read_and_forget() {
     let (code, _, stderr) = hy(&["forget", "first"]);
     assert_eq!(code, Some(1), "forgetting twice is an error");
     assert!(stderr.contains("not found"), "{stderr}");
+}
+
+/// The tool-calling loop has to be recoverable from the log: `hyper replay`
+/// rebuilds the messages of the last request the model answered, and they are
+/// compared against what the stub server actually received.
+#[test]
+fn replay_rebuilds_the_messages_the_model_was_sent() {
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"looking it up","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"query\":\"needle\"}"}}]}}]}"#;
+    let final_round = r#"{"model":"stub","choices":[{"message":{"content":"the answer is 42"}}]}"#;
+    let (base_url, bodies, server) = stub_model(vec![tool_round, final_round]);
+
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &base_url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["plan", "find the answer"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run_id = fs::read_dir(dir.path().join(".harness/runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    // What the run recorded: the input it was given, the assistant turn, and
+    // the observation that followed it — the three things a rebuild needs and
+    // none of which the log carried before.
+    let (_, events) = get_run_details(dir.path(), &run_id).unwrap();
+    let started = events
+        .iter()
+        .find(|event| event.event_type == "model.started")
+        .expect("the agent step must have started a model call");
+    assert!(
+        started.payload["input"]
+            .as_str()
+            .unwrap()
+            .contains("<workspace_context>"),
+        "the input the model was given must be recorded"
+    );
+    let calls = events
+        .iter()
+        .find(|event| event.event_type == "model.tool_calls")
+        .expect("the model asked for a tool");
+    assert_eq!(
+        calls.payload["message"]["content"], "looking it up",
+        "the assistant turn carries its text, not only its calls"
+    );
+    let observation = events
+        .iter()
+        .find(|event| event.event_type == "model.observation")
+        .expect("the tool result must be recorded as the model saw it");
+    assert_eq!(observation.payload["callId"], "call_1");
+    assert_eq!(observation.payload["turn"], 0);
+    assert!(
+        !observation.payload["observation"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["replay", &run_id])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replayed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(replayed["runId"], run_id);
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one request per model turn");
+    let sent: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let sent_messages = sent.get("messages").expect("the request carried messages");
+    let messages = &replayed["steps"][0]["messages"];
+    assert_eq!(
+        messages, sent_messages,
+        "the rebuilt conversation must be exactly what the model was sent"
+    );
+    let messages = messages.as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call_1");
+    assert_eq!(replayed["steps"][0]["stepId"], "plan");
+    drop(bodies);
+    server.join().unwrap();
+}
+
+/// A run recorded before these events carried their payloads cannot be
+/// rebuilt from data that is not there. Replay says so instead of handing back
+/// a conversation that was never sent.
+#[test]
+fn replay_refuses_a_run_recorded_before_its_payloads() {
+    let dir = tempdir().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let run_id = "legacy";
+    let run = workspace.prepare_run(run_id).unwrap();
+    fs::write(
+        &run.task,
+        serde_json::to_string_pretty(&task("legacy", AgentMode::Build, "bash:echo hi")).unwrap(),
+    )
+    .unwrap();
+    // `model.started` before it recorded the input it was given. The run has
+    // no row either, so this also covers rebuilding one from the log.
+    let event = harness::HarnessEvent {
+        event_id: "legacy-event".into(),
+        run_id: run_id.into(),
+        task_id: "legacy".into(),
+        event_type: "model.started".into(),
+        timestamp: harness::workspace::now(),
+        step_id: Some("step".into()),
+        step_index: Some(0),
+        payload: serde_json::json!({"agent": true}),
+    };
+    fs::write(
+        &run.events,
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    drop(workspace);
+
+    let error = harness::replay_messages(dir.path(), run_id).unwrap_err();
+    assert!(error.to_string().contains("predates"), "{error}");
+}
+
+/// The event keeps a bounded slice of a command's output, so the rest would be
+/// gone with the run. It goes to `artifacts/`, where `ha artifacts` lists it.
+#[test]
+fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
+    let dir = tempdir().unwrap();
+    let mut task = task("huge", AgentMode::Build, "bash:seq 1 400000");
+    task.steps[0].timeout_ms = Some(20_000);
+    let summary = run_task(&task, dir.path()).unwrap();
+    assert_eq!(summary.status, "finished", "{:?}", summary.failure);
+
+    let (_, events) = get_run_details(dir.path(), &summary.run_id).unwrap();
+    let payload = &events
+        .iter()
+        .find(|event| event.event_type == "tool.finished")
+        .expect("no tool.finished event")
+        .payload;
+    assert_eq!(payload["stdout"].as_str().unwrap().len(), 256 * 1024);
+
+    let relative = payload["stdoutArtifact"]
+        .as_str()
+        .expect("the artifact must be named in the event");
+    assert_eq!(
+        relative,
+        format!(
+            ".harness/runs/{}/artifacts/step-0-bash-stdout.log",
+            summary.run_id
+        )
+    );
+    let kept = fs::read_to_string(dir.path().join(relative)).unwrap();
+    assert!(
+        kept.len() > 256 * 1024,
+        "the artifact must hold what the event dropped"
+    );
+    assert!(
+        kept.ends_with("400000\n"),
+        "the tail of the output must survive"
+    );
+    assert!(
+        !payload["stdout"].as_str().unwrap().contains("400000"),
+        "the event keeps only the head of the output"
+    );
+    // An empty stream leaves no zero-byte file behind to wade through.
+    assert!(
+        !dir.path()
+            .join(format!(".harness/runs/{}/artifacts", summary.run_id))
+            .join("step-0-bash-stderr.log")
+            .exists()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["artifacts", &summary.run_id])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("step-0-bash-stdout.log"),
+        "ha artifacts must list it"
+    );
+}
+
+/// The JSONL log is the fact source: an index that lost its rows — a
+/// corrupted database, a workspace copied mid-run — is rebuilt from it.
+#[test]
+fn the_index_is_rebuilt_from_the_jsonl_log() {
+    let dir = tempdir().unwrap();
+    let summary = run_task(
+        &task("durable", AgentMode::Build, "bash:echo durable"),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished");
+
+    {
+        let workspace = Workspace::open(dir.path()).unwrap();
+        workspace
+            .db
+            .execute_batch("DELETE FROM events; DELETE FROM runs;")
+            .unwrap();
+        assert!(
+            workspace.list_runs(10).unwrap().is_empty(),
+            "the index really is empty now"
+        );
+    }
+
+    let reopened = Workspace::open(dir.path()).unwrap();
+    let runs = reopened.list_runs(10).unwrap();
+    assert_eq!(runs.len(), 1, "the run comes back from the log");
+    assert_eq!(runs[0].run_id, summary.run_id);
+    assert_eq!(runs[0].task_name, "durable", "task.json names the run");
+    assert_eq!(runs[0].status, "finished", "the terminal event closed it");
+
+    let events = reopened.events(&summary.run_id).unwrap();
+    let logged = fs::read_to_string(
+        dir.path()
+            .join(format!(".harness/runs/{}/events.jsonl", summary.run_id)),
+    )
+    .unwrap();
+    let lines = logged
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    assert_eq!(events.len(), lines, "every logged event is indexed again");
+    assert_eq!(events.first().unwrap().event_type, "run.started");
+    assert_eq!(events.last().unwrap().event_type, "run.finished");
+}
+
+/// Conversations grow forever without a keep count, and `forget` only removes
+/// them one at a time; runs carry events, artifacts and checkpoints with them.
+#[test]
+fn prune_keeps_the_most_recent_conversations_and_runs() {
+    let dir = tempdir().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    for (index, session) in ["first", "second", "third"].into_iter().enumerate() {
+        for role in ["user", "assistant"] {
+            workspace
+                .append_session_message(
+                    session,
+                    &harness::SessionMessage {
+                        role: role.into(),
+                        content: format!("{session} turn"),
+                        timestamp: format!("2026-01-0{}T00:00:00.000Z", index + 1),
+                        run_id: None,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    for (run_id, day) in [("live", 1), ("run-a", 2), ("run-b", 3), ("run-c", 4)] {
+        workspace.prepare_run(run_id).unwrap();
+        workspace
+            .create_run(
+                run_id,
+                &task(run_id, AgentMode::Build, "bash:echo hi"),
+                &format!("2026-02-0{day}T00:00:00.000Z"),
+            )
+            .unwrap();
+    }
+    // The oldest run is still executing: a prune must leave it alone.
+    let _live = workspace.lock_run("live").unwrap();
+
+    let hy = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(args)
+            .current_dir(dir.path())
+            .env_remove("DEEPSEEK_API_KEY")
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    // A dry run names what would go and touches nothing.
+    let (code, stdout) = hy(&["prune", "--keep", "1", "--dry-run"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains("would prune") && stdout.contains("first"),
+        "{stdout}"
+    );
+    assert!(
+        workspace.session_path("first").exists(),
+        "a dry run must not delete"
+    );
+
+    // Runs report the same way, and a dry run writes nothing at all — not
+    // even the lock file the staleness probe used to leave behind.
+    let runs = dir.path().join(".harness/runs");
+    let (code, stdout) = hy(&["prune", "--runs", "--keep", "0", "--dry-run"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains("would prune") && stdout.contains("run-c"),
+        "{stdout}"
+    );
+    assert!(runs.join("run-a").exists());
+    assert!(
+        !runs.join("run-a").join("lock").exists(),
+        "a dry run must not create lock files"
+    );
+
+    let (code, stdout) = hy(&["prune", "--keep", "1"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("pruned 2 conversations"), "{stdout}");
+    assert!(
+        !workspace.session_path("first").exists() && !workspace.session_path("second").exists(),
+        "the two oldest conversations are gone"
+    );
+    assert!(
+        workspace.session_path("third").exists(),
+        "the newest is kept"
+    );
+    assert!(workspace.session("first").unwrap().is_none());
+
+    let (code, stdout) = hy(&["prune", "--runs", "--keep", "1"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("pruned 2 runs"), "{stdout}");
+    assert!(!runs.join("run-a").exists() && !runs.join("run-b").exists());
+    assert!(runs.join("run-c").exists(), "the newest run is kept");
+    assert!(
+        runs.join("live").exists(),
+        "a run whose lock is held is never pruned"
+    );
+    assert_eq!(
+        workspace.get_run("live").unwrap().unwrap().status,
+        "running"
+    );
 }

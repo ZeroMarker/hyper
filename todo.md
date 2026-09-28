@@ -2,6 +2,10 @@
 
 ## 已完成
 
+- [x] **事件级 replay（按 task.json + 事件重建 messages）**：`hyper replay <run-id>` 把一次 run 发给模型的完整 messages 重建出来并输出 JSON——system prompt、会话前缀、本次 `input`、每轮 assistant 消息与紧随其后的 observation，即**最后一次请求实际携带的 messages**；与 stub 服务端收到的请求体逐字节相等（回归测试断言）。补齐两块原本缺失的数据：`model.tool_calls` 现在记录整轮 assistant 消息（新增 `message` 字段，含 `content` 与 `tool_calls`，原有 `calls` 摘要保留）；observation 不再只在运行时派生，改为落库为新事件 `model.observation`（`turn`/`callId`/`tool`/`observation`），派生逻辑抽成纯函数 `observation()`。另在 `model.started` 增加 `input` 字段记录该 step 真正发送的用户消息（含 workspace context，上限 64 KB），否则重建只能拿一个**已经变了**的上下文去凑。会话前缀取 transcript 中本 run 之前的部分，会话被 `forget` 时该前缀为空、run 自身的记录仍然完整；旧格式 run（缺上述任一字段）直接报错拒绝，不猜造。步骤只在真的走到模型时才出现（`bash:` 前缀步骤没有 messages）。
+- [x] **artifacts 落盘**：`bash` 每路输出最多保留 4 MB（`MAX_ARTIFACT_OUTPUT`），写入 `runs/<id>/artifacts/<step>-<index>-bash-stdout.log`——空流不建文件，超过保留量时尾部追加 `... [truncated after N bytes] ...`。事件仍只存 256 KB（`truncated`/`stdoutBytes` 语义不变），`tool.finished` 新增 `stdoutArtifact`/`stderrArtifact` 字段指向文件，observation 里模型也能看到路径，被截断时可以自己 `read` 回来。实测 `seq 1 300000`：事件 256 KB、artifact 1.99 MB 且末行 `300000` 完整保留；`ha artifacts` 从此有内容。`read` 不复制（原文件就在工作区），observation 的来源 payload 本就在日志里。
+- [x] **保留策略 `ha prune`**：`hyper prune --keep <N>` 按 `updated_at` 只留最近 N 个会话（transcript 文件与注册行一起删），`--runs --keep <N>` 按 `started_at` 留最近 N 个 run（events / artifacts / checkpoints 随目录一起删），`--dry-run` 只报告不删；**持锁的运行中 run 永不作为候选**。会话不必再靠 `ha forget` 逐个删。
+- [x] **事件/DB 兜底重建**：`Workspace::open` 先 `reconcile_events()` 再 `reconcile_stale_runs()`。按 `events.jsonl` 行数与索引事件数比对，相等且 run 行存在就跳过——常态启动只扫文件不解析日志；不等则读日志，必要时用 `task.json` + 首个事件重建缺失的 run 行（task id/name/started_at），再逐条补索引；解析不了的半行跳过（写入方还没写完）。`INSERT OR REPLACE` 改为 `INSERT OR IGNORE`：重复插入不再换 rowid，避免时间戳相同的事件在 `ORDER BY timestamp,rowid` 下被重排。
 - [x] **协议适配**：`Protocol`（`chat` / `responses` / `messages`）三个线协议，`chat_messages` 对外签名不变，协议差异只在其内部翻译。`/v1/messages` 用 `x-api-key` + `anthropic-version`（Bearer 会报 `Missing API key`），`/v1/responses` 用 Bearer；三者共用重试与状态码分类。opencode.ai 主机按模型家族自动探测（minimax/qwen3.6-plus/qwen3.7/qwen3.8 → messages，grok/gpt/muse-spark → responses，其余 chat），其他主机一律 chat；`DEEPSEEK_PROTOCOL`（env）或配置文件 `protocol` 显式值优先，非法值报错而非静默回退。`model.started` 事件新增 `protocol` 字段。实测：三个协议各自单轮与带工具续跑均通过（grok-4.6 / minimax-m2.5 / deepseek-v4-flash）；故意强制错协议会以 503 `Endpoint is unavailable` 失败，证明探测是必要的而非装饰。
 - [x] **会话（多轮上下文）**：`sessions/<id>.jsonl` 存真实对话（prompt + 回答），SQLite `sessions` 表登记标题/轮数/run 数/更新时间；`hyper sessions|session|forget`、`hyper tui --resume` 之外的 `hyper resume <id>`、以及 `plan/build/直接 prompt` 的 `--session <id>`。TUI 一次启动即一段对话：首条消息开新会话，后续消息续接，标题栏显示当前会话 id，`/new` 真正开新对话（旧对话保留可查），`/session` 打印 id。session id 会作为文件名，因此限制为字母/数字/`-`/`_` 并拒绝 `.`/`..`/路径分隔符。实测：CLI 与 TUI 的跨轮上下文（第二问依赖第一问的数字）、`/new` 后模型确实答 `NO CONTEXT`、`resume` 后答出旧数字并追加到同一 transcript。
 - [x] **轻量沙箱（危险命令禁止）**：`src/policy.rs` 以 shell 词法（引号/分隔符/命令替换）解析后判定，取代原先的 6 条子串黑名单。拦截：`rm`/`shred`/`truncate`/`chmod`/`chown`/`mv` 等作用于 `/`、`$HOME`、工作区根、顶层目录或系统目录（`/etc`、`/usr`…）；重定向写入 `/dev/*`、`/etc/*`；`sudo`/`doas`/`dd`/`mkfs*`/`fdisk`/`shutdown`/`systemctl` 等机器级程序；`curl|sh` 管道；以及 `sh -c '…'`、`sudo`、`env`、`timeout`、`xargs` 里嵌套的命令（含 `-ec` 这类聚合 flag，并跳过 wrapper 自己的操作数如 `timeout 5`）。`rm -rf target`、`chmod +x script.sh`、`curl -o f.tar.gz`、`echo hi > out.txt` 仍放行。失败归类为 `PolicyError`。
@@ -32,18 +36,15 @@
 
 ## 下一步（按优先级）
 
-> 本清单于 2026-09-21 复核；本轮完成协议适配、会话与轻量沙箱后，剩余项已重写。体积参考：一次带工具调用的模型 run ≈ 34 KB（JSONL 4.3 KB + DB payload 1.8 KB + SQLite 页开销），每次 trivial run ≈ 4.7 KB。
+> 本清单于 2026-09-28 复核；本轮完成事件级 replay、artifacts 落盘与保留策略、事件/DB 兜底重建后，剩余项已重写。体积参考：一次 trivial run ≈ 2 KB JSONL；一次带工具调用的模型 run ≈ 10 KB JSONL（其中 `model.started` 的 `input` 是大头，随 workspace context 增长、上限 64 KB），另有 SQLite 索引与页开销。
 
 ### 可观测性
 - [x] **实时展示运行中的 event stream**：`EventWriter::write` 在事件持久化后推送简短状态到有界 `EventSink`，TUI 每帧 drain 并保留最近 12 条；重复状态合并。聊天 markdown 只在新消息加入时解析并缓存，事件内容不会把大 payload 复制进 UI 队列。
-- [ ] replay/resume（事件级重放）：会话已解决「对话上下文」，但**从事件重建一次 run 的完整 messages** 仍缺两块——`model.tool_calls`（engine.rs:191）没有记录该轮 assistant 的 `content`；observation 是运行时由 payload 派生（engine.rs:331 头尾截断）而非存储。推进顺序：先补事件字段并抽出 observation 派生函数，再按 `task.json` + 事件重建。`Workspace::last_started_step`（workspace.rs:234）与 `interrupted` 状态已就位。
 - [ ] streaming 响应（SSE）：三个协议目前都是 `stream: false` + 整体读取响应。blocking `Response` 实现了 `Read`，可自行解析 SSE，但流式 tool_calls/`function_call`/`tool_use` 分片需要按协议分别累积。价值依赖「实时展示」——否则流没有出口。
 
 ### 工程健壮性
-- [ ] artifacts 落盘 + 保留策略：`artifacts/` 仍无写入方，而 `read` 截断 64 KB、`bash` 每路截断 256 KB、observation 截断 4 KB——把未截断输出落进 `artifacts/`，既让 `ha artifacts` 有意义，也为 replay 与排障留下证据。保留策略（`ha prune --keep N` 或配置）仍不存在：现在 `sessions/` 会随对话增长，`ha forget` 只能手工逐个删。
-- [ ] 事件/DB 兜底重建：启动时 reconcile 只修 `running` 状态。`INSERT OR REPLACE` 按 event_id 幂等（workspace.rs:267），所以「JSONL 为事实源、按 run 重放回 DB」可行，规模小且独立。
-- [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:206）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。
-- [ ] 资源限制：策略层已完成（`src/policy.rs`：结构化危险命令禁止），但**没有任何资源限制**——没有 setrlimit，内存/CPU/文件大小都不设上限，只有命令超时与 256 KB 输出上限。这一步与下一步（OS 级沙箱）可分开做。
+- [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。
+- [ ] 资源限制：策略层已完成（`src/policy.rs`：结构化危险命令禁止），但**没有任何资源限制**——没有 setrlimit，内存/CPU/文件大小都不设上限，只有命令超时与输出上限（事件 256 KB、artifact 4 MB）。这一步与下一步（OS 级沙箱）可分开做。
 - [ ] OS 级沙箱（需先定威胁模型）：当前是 denylist，不是 containment boundary——未识别的命令仍以用户权限执行。可选 Linux landlock / macOS seatbelt / 默认拒绝 shell，三者工作量差一个数量级。注意 workspace context 会把仓库内容发给模型，prompt injection 是活路径。
 
 ### 协议与模型

@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use crate::{
     AgentMode, Checkpoint, RunSummary, TaskSpec, Workspace, deepseek::ensure_api_key,
-    get_run_details, latest_model_reply, list_runs, prompt_to_task, restore_checkpoint, run_task,
-    run_task_in_session, tui,
+    get_run_details, latest_model_reply, list_runs, prompt_to_task, replay_messages,
+    restore_checkpoint, run_task, run_task_in_session, tui,
 };
 
 #[derive(Parser)]
@@ -102,6 +102,23 @@ enum Commands {
     },
     Undo {
         run_id: String,
+    },
+    /// Rebuild the messages a run sent to the model, printed as JSON
+    Replay {
+        run_id: String,
+    },
+    /// Delete the oldest conversations or runs beyond a keep count
+    Prune {
+        /// How many of the most recent ones to keep
+        #[arg(long, value_name = "N")]
+        keep: usize,
+        /// Prune runs — with their events, artifacts and checkpoints —
+        /// instead of conversations
+        #[arg(long)]
+        runs: bool,
+        /// Report what would be deleted without deleting it
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -249,6 +266,37 @@ pub fn run() -> Result<()> {
             );
         }
         Commands::Undo { run_id } => undo(&root, &run_id)?,
+        Commands::Replay { run_id } => {
+            let steps = replay_messages(&root, &run_id)?;
+            if steps.is_empty() {
+                bail!("run {run_id} never reached the model");
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "runId": run_id,
+                    "steps": steps
+                }))?
+            );
+        }
+        Commands::Prune {
+            keep,
+            runs,
+            dry_run,
+        } => {
+            let workspace = Workspace::open(&root)?;
+            let (pruned, noun) = if runs {
+                (workspace.prune_runs(keep, dry_run)?, "runs")
+            } else {
+                (workspace.prune_sessions(keep, dry_run)?, "conversations")
+            };
+            if pruned.is_empty() {
+                println!("nothing to prune: keeping the {keep} most recent {noun}");
+            } else {
+                let verb = if dry_run { "would prune" } else { "pruned" };
+                println!("{verb} {} {noun}: {}", pruned.len(), pruned.join(", "));
+            }
+        }
     }
     Ok(())
 }

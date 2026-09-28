@@ -161,6 +161,23 @@ the next turn — while the tool calls behind them stay in the run's
 `events.jsonl`. A conversation is therefore small and readable, and the full
 trace is still there when you need it.
 
+## Replay and retention
+
+`ha replay <run-id>` rebuilds the conversation a run sent to the model — the
+system prompt, the conversation prefix it replayed, the input it was given, and
+every assistant turn with the observations that followed it — and prints it as
+JSON. It is built only from the run's `task.json` and its own events, so
+nothing is sent to a provider and no file is touched, and the messages come out
+exactly as the last request carried them. A run recorded before those events
+carried their payloads is refused with an error rather than reconstructed from
+data that is not there.
+
+`ha prune --keep <N>` deletes every conversation but the N most recently
+updated, transcripts and registry rows included; `ha prune --runs --keep <N>`
+does the same for runs, taking their events, artifacts and checkpoints with
+them. A run whose lock is still held is never a candidate. `--dry-run` reports
+what would go and deletes nothing.
+
 ## Commands
 
 ```text
@@ -182,6 +199,8 @@ hyper artifacts <run-id>
 hyper checkpoints <run-id>
 hyper restore <run-id> <checkpoint-id>
 hyper undo <run-id>
+hyper replay <run-id>
+hyper prune --keep <N> [--runs] [--dry-run]
 ```
 
 Every command can use `ha` instead, for example `ha tui` or `ha config`.
@@ -189,6 +208,8 @@ Common aliases remain available: `ha b`, `ha p`, `ha r`, `ha ls`, and `ha s`.
 `ha diff` prints the file diffs recorded by `write`/`edit` tools, `ha artifacts`
 lists the run's artifact files, `ha checkpoints` lists snapshots and
 `ha restore <run> <checkpoint-id>` rewinds one file to a specific snapshot.
+`ha replay <run-id>` prints the rebuilt conversation, and `ha prune --keep <N>`
+retires the oldest conversations or runs.
 
 `ha run`, `ha plan`, `ha build` and a direct prompt exit with status `1` when the
 run does not finish, so CI can rely on the exit status; the run summary is still
@@ -268,22 +289,33 @@ held, the process that owned it is gone, so the run is rewritten as
 lingering as `running` forever. Runs that are still executing keep their lock and
 are never touched.
 
+Every startup also reconciles the index with the log. A run whose
+`events.jsonl` holds events the database does not — a `harness.db` that was lost
+or copied mid-run — is indexed again from the files, and a run with no row at
+all is recreated from its `task.json`. The log is written before the index, so
+an event that reached the files cannot stay unrecorded.
+
 ## Reliability and limits
 
 - `bash` drains stdout and stderr while the command runs, so a command that
-  prints more than the OS pipe capacity cannot deadlock. At most 256 KB per
-  stream is captured (the event payload sets `truncated` and reports the real
-  byte counts); the rest is discarded so a runaway command cannot exhaust memory
-  or the workspace.
+  prints more than the OS pipe capacity cannot deadlock. The event keeps at
+  most 256 KB per stream — it sets `truncated` and reports the real byte
+  counts — while the reader holds up to 4 MB per stream so the output can be
+  filed under `artifacts/` instead. Past that cap the bytes are dropped as they
+  arrive, so a runaway command cannot exhaust memory.
 - A command that exceeds its timeout is killed as a whole process group and
   reported as `TimeoutError` with `"timedOut": true`, which stays distinguishable
   from an ordinary non-zero exit. On Linux the shell additionally dies with the
   harness (`PR_SET_PDEATHSIG`), so a crashed or `kill -9`ed harness does not
   leave commands running — although processes started *by* that shell can still
   outlive it.
-- `ha artifacts` lists `runs/<run-id>/artifacts/`, but no tool writes there yet,
-  so it is always empty. Truncated tool output is not kept anywhere either, so
-  what a long command printed past the cap is gone once the run ends.
+- `ha artifacts` lists `runs/<run-id>/artifacts/`, which every `bash` call
+  writes to: one file per non-empty stream, named
+  `<step>-<index>-bash-stdout.log` (up to 4 MB each, with a marker where it was
+  cut short). That is where the tail of a failing build lives, since the event
+  only keeps the head. `read` results are not copied — the whole file is still
+  in the workspace — and the observations handed to a model are derived from
+  payloads that are already in the log.
 - The dangerous-command check is a **lightweight denylist over shell words, not a
   sandbox**. It rejects the accidents a model talks itself into: `rm`/`shred`/
   `chmod` and redirections aimed at `/`, the home directory, the workspace root

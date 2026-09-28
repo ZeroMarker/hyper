@@ -11,12 +11,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use diffy::create_patch;
 use ignore::WalkBuilder;
+use serde::Serialize;
 use serde_json::{Value, json};
 use wait_timeout::ChildExt;
 
 use crate::{
     approval::ApprovalGate,
-    deepseek::{DeepSeekConfig, ToolSpec, chat_messages, system_prompt},
+    deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages, system_prompt},
     event_sink::EventSink,
     model::*,
     policy,
@@ -108,7 +109,7 @@ fn tool(
     // trimming it away would silently change what gets written.
     let body_source = step.instruction.trim_start();
     if let Some(command) = instruction.strip_prefix("bash:") {
-        return bash(events, root, step, index, command.trim());
+        return bash(events, run, root, step, index, command.trim());
     }
     if let Some(path) = instruction.strip_prefix("read:") {
         return read(events, root, step, index, path.trim());
@@ -159,13 +160,19 @@ fn agent(
 ) -> Result<(bool, Value)> {
     const MAX_TURNS: usize = 12;
     let config = DeepSeekConfig::from_env()?;
+    let context = workspace_context(root)?;
+    // Exactly what the model is given, recorded once per step: a replay can
+    // then rebuild this request without re-deriving a workspace context that
+    // the run itself may since have changed.
+    let input = format!(
+        "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
+    );
     events.write(
         "model.started",
-        json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS}),
+        json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input}),
         Some(&step.id),
         Some(index),
     )?;
-    let context = workspace_context(root)?;
     let mut messages = vec![json!({ "role": "system", "content": system_prompt(step.mode) })];
     // Earlier turns of the conversation come first, so the model can answer a
     // follow-up that depends on what was already discussed.
@@ -175,9 +182,7 @@ fn agent(
             .iter()
             .map(|message| json!({"role": message.role, "content": message.content})),
     );
-    messages.push(json!({ "role": "user", "content": format!(
-        "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
-    ) }));
+    messages.push(json!({ "role": "user", "content": input }));
     let specs = tool_specs_for(step);
     for turn in 0..MAX_TURNS {
         let reply = chat_messages(&config, &messages, Some(&specs))?;
@@ -197,22 +202,22 @@ fn agent(
             )?;
             return Ok((true, payload));
         }
+        let message = assistant_message(&reply);
         events.write(
             "model.tool_calls",
-            json!({"turn":turn,"calls":reply.tool_calls.iter().map(|call| json!({
-                "id":call.id,"name":call.function.name,"arguments":call.function.arguments
-            })).collect::<Vec<_>>()}),
+            json!({
+                "turn":turn,
+                // The whole assistant turn, not only the calls: without the
+                // text beside them this round cannot be replayed.
+                "message":message,
+                "calls":reply.tool_calls.iter().map(|call| json!({
+                    "id":call.id,"name":call.function.name,"arguments":call.function.arguments
+                })).collect::<Vec<_>>()
+            }),
             Some(&step.id),
             Some(index),
         )?;
-        messages.push(json!({
-            "role":"assistant",
-            "content": if reply.content.is_empty() { Value::Null } else { json!(reply.content) },
-            "tool_calls": reply.tool_calls.iter().map(|call| json!({
-                "id":call.id,"type":"function",
-                "function":{"name":call.function.name,"arguments":call.function.arguments}
-            })).collect::<Vec<_>>(),
-        }));
+        messages.push(message);
         for call in &reply.tool_calls {
             let observation = run_agent_tool(
                 events,
@@ -223,6 +228,20 @@ fn agent(
                 &call.function.name,
                 &call.function.arguments,
             );
+            // What the model is told back is derived from the tool payload at
+            // call time; storing it keeps a replay from having to re-derive a
+            // different one from whatever the payload holds later.
+            events.write(
+                "model.observation",
+                json!({
+                    "turn":turn,
+                    "callId":call.id,
+                    "tool":call.function.name,
+                    "observation":observation
+                }),
+                Some(&step.id),
+                Some(index),
+            )?;
             messages.push(json!({
                 "role":"tool",
                 "tool_call_id":call.id,
@@ -231,6 +250,20 @@ fn agent(
         }
     }
     bail!("agent exceeded {MAX_TURNS} tool-calling turns")
+}
+
+/// The assistant turn as the conversation carries it: `content` is `null` when
+/// the model produced only tool calls, which is the shape the APIs expect for
+/// a message that goes on to list its `tool_calls`.
+fn assistant_message(reply: &ModelReply) -> Value {
+    json!({
+        "role":"assistant",
+        "content": if reply.content.is_empty() { Value::Null } else { json!(reply.content) },
+        "tool_calls": reply.tool_calls.iter().map(|call| json!({
+            "id":call.id,"type":"function",
+            "function":{"name":call.function.name,"arguments":call.function.arguments}
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
@@ -284,7 +317,6 @@ fn run_agent_tool(
     name: &str,
     arguments: &str,
 ) -> String {
-    const MAX_OBSERVATION: usize = 4_000;
     let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
     // The allowlist must also bind model-initiated calls: the model can emit a
     // tool call for a tool that was never advertised in `tools`.
@@ -295,7 +327,7 @@ fn run_agent_tool(
         ))
     } else {
         match name {
-            "bash" => bash(events, root, step, index, arg_str(&args, "command")),
+            "bash" => bash(events, run, root, step, index, arg_str(&args, "command")),
             "read" => read(events, root, step, index, arg_str(&args, "path")),
             "search" => search(events, root, step, index, arg_str(&args, "query"), 100),
             "write" => write_file(
@@ -320,6 +352,16 @@ fn run_agent_tool(
             other => Err(anyhow::anyhow!("unknown tool: {other}")),
         }
     };
+    observation(result)
+}
+
+/// What a model is told about one tool call.
+///
+/// This is derived from the tool's payload at call time and stored as its own
+/// event, so the conversation can be rebuilt from the log instead of being
+/// re-derived from payloads that a later read of them may not reproduce.
+fn observation(result: Result<(bool, Value)>) -> String {
+    const MAX_OBSERVATION: usize = 4_000;
     let text = match result {
         Ok((true, payload)) => serde_json::to_string(&payload)
             .unwrap_or_else(|error| format!("serialize error: {error}")),
@@ -466,11 +508,16 @@ const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 /// Bytes kept per stream before the rest is discarded. The reader keeps
 /// draining regardless, so the cap never re-introduces a pipe stall.
 const MAX_CAPTURED_OUTPUT: usize = 256 * 1024;
+/// Bytes of one stream kept for `artifacts/`, wider than the event's slice on
+/// purpose: the log stays bounded per event while a build's whole tail stays
+/// readable. Past this the reader stops storing and keeps draining.
+const MAX_ARTIFACT_OUTPUT: usize = 4 * 1024 * 1024;
 /// How long to wait for a timed-out shell to actually die before giving up.
 const KILL_GRACE: Duration = Duration::from_secs(5);
 
 fn bash(
     events: &EventWriter<'_>,
+    run: &RunPaths,
     root: &Path,
     step: &StepSpec,
     index: usize,
@@ -559,8 +606,8 @@ fn bash(
     // deadlocks as soon as the command writes more than the pipe capacity
     // (~64 KB), which would hang every non-trivial build or test command until
     // the timeout and then report it as a failure.
-    let stdout_reader = capture(stdout, MAX_CAPTURED_OUTPUT);
-    let stderr_reader = capture(stderr, MAX_CAPTURED_OUTPUT);
+    let stdout_reader = capture(stdout, MAX_ARTIFACT_OUTPUT);
+    let stderr_reader = capture(stderr, MAX_ARTIFACT_OUTPUT);
     let mut guard = ProcessGroupGuard::new(child.id());
     let timeout = Duration::from_millis(step.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS));
     let timed_out = child.wait_timeout(timeout)?.is_none();
@@ -575,13 +622,35 @@ fn bash(
     // The child is gone, so both pipes are closed and the readers can finish.
     let (stdout_bytes, stdout_total) = join_capture(stdout_reader, "stdout");
     let (stderr_bytes, stderr_total) = join_capture(stderr_reader, "stderr");
-    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-    let truncated = stdout_total > stdout_bytes.len() || stderr_total > stderr_bytes.len();
+    let full_stdout = String::from_utf8_lossy(&stdout_bytes);
+    let full_stderr = String::from_utf8_lossy(&stderr_bytes);
+    // The event keeps a bounded slice of each stream, so a command that prints
+    // for minutes cannot bloat the audit log. What the reader kept beyond that
+    // slice goes to `artifacts/` instead of being dropped, which is what makes
+    // the tail of a failing build readable after the run.
+    let stdout = truncate_utf8(&full_stdout, MAX_CAPTURED_OUTPUT);
+    let stderr = truncate_utf8(&full_stderr, MAX_CAPTURED_OUTPUT);
+    let truncated = stdout_total > stdout.len() || stderr_total > stderr.len();
+    let stdout_artifact = write_output_artifact(
+        run,
+        root,
+        &artifact_name(&step.id, index, "stdout"),
+        &full_stdout,
+        stdout_bytes.len(),
+        stdout_total,
+    )?;
+    let stderr_artifact = write_output_artifact(
+        run,
+        root,
+        &artifact_name(&step.id, index, "stderr"),
+        &full_stderr,
+        stderr_bytes.len(),
+        stderr_total,
+    )?;
     let all = format!("{stdout}{stderr}");
     let code = status.code().unwrap_or(-1);
     let duration_ms = started.elapsed().as_millis();
-    let payload = json!({
+    let mut payload = json!({
         "command": command,
         "cwd": root,
         "exitCode": code,
@@ -594,10 +663,67 @@ fn bash(
         "stderrBytes": stderr_total,
         "durationMs": duration_ms,
     });
+    // The model is told where the full output lives, so an observation cut
+    // down to a few kilobytes still points at a file it can read back.
+    if let Some(path) = stdout_artifact {
+        payload["stdoutArtifact"] = json!(path);
+    }
+    if let Some(path) = stderr_artifact {
+        payload["stderrArtifact"] = json!(path);
+    }
     let mut event_payload = payload.clone();
     event_payload["tool"] = json!("bash");
     events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
     Ok((code == 0, payload))
+}
+
+/// The name an artifact is filed under: the step it belongs to, its position
+/// in the task, and which stream it holds.
+///
+/// A step id is authored in `task.json`, so it is reduced to characters that
+/// cannot form a path: the name stays one file name inside `artifacts/`.
+fn artifact_name(step_id: &str, index: usize, stream: &str) -> String {
+    let cleaned: String = step_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let cleaned = if cleaned.is_empty() { "step" } else { &cleaned };
+    format!("{cleaned}-{index}-bash-{stream}.log")
+}
+
+/// Write one stream's full output where `ha artifacts` can list it.
+///
+/// Returns the workspace-relative path to record, or `None` when the stream
+/// was empty — an artifact directory full of zero-byte files would hide the
+/// ones that matter.
+fn write_output_artifact(
+    run: &RunPaths,
+    root: &Path,
+    name: &str,
+    text: &str,
+    kept: usize,
+    total: usize,
+) -> Result<Option<String>> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let body = if kept >= total {
+        text.to_owned()
+    } else {
+        format!("{text}\n... [truncated after {total} bytes] ...\n")
+    };
+    fs::write(run.artifacts.join(name), body)?;
+    let relative = run.artifacts.strip_prefix(root).unwrap_or(&run.artifacts);
+    Ok(Some(
+        relative.join(name).to_string_lossy().replace('\\', "/"),
+    ))
 }
 
 /// Read a child pipe to EOF on its own thread, keeping at most `cap` bytes.
@@ -1235,6 +1361,161 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
         }
     }
     Ok(None)
+}
+
+/// One agent step of a run, rebuilt into the conversation that was sent to the
+/// model.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayStep {
+    pub step_id: String,
+    pub index: usize,
+    pub messages: Vec<Value>,
+}
+
+/// Rebuild the messages a run sent to the model from its `task.json` and the
+/// events it recorded.
+///
+/// Each returned step is one tool-calling conversation: the system prompt, the
+/// conversation prefix the run replayed, the input it was given, and every
+/// assistant turn with the observations that followed it — that is, the
+/// messages of the last request the model answered, ready to be sent again.
+/// Steps that never reached the model (a `bash:` instruction, a step that
+/// failed before its first call) are not returned.
+///
+/// Everything is read from the recorded log, so a replay is a view of what
+/// happened: nothing is sent to a provider and no file in the workspace is
+/// touched. Runs recorded before these events carried their payloads — before
+/// `model.started` held its `input` and `model.tool_calls` held the assistant
+/// turn — are refused rather than reconstructed from data that is not there.
+pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<ReplayStep>> {
+    let root = root.as_ref();
+    let workspace = Workspace::open(root)?;
+    let run_dir = workspace.paths.runs.join(run_id);
+    if !run_dir.is_dir() {
+        bail!("run not found: {run_id}");
+    }
+    let task: TaskSpec = serde_json::from_slice(
+        &fs::read(run_dir.join("task.json"))
+            .with_context(|| format!("run {run_id} has no task.json"))?,
+    )
+    .with_context(|| format!("run {run_id} has an unreadable task.json"))?;
+    let events = workspace.events(run_id)?;
+    if events.is_empty() {
+        bail!("run {run_id} has no recorded events");
+    }
+    let history = replay_history(&workspace, &events, run_id)?;
+    let mut steps: Vec<ReplayStep> = Vec::new();
+    let mut current: Option<usize> = None;
+    let mut started: Option<(String, AgentMode)> = None;
+    for event in &events {
+        match event.event_type.as_str() {
+            "step.started" => {
+                let mode = serde_json::from_value::<AgentMode>(
+                    event.payload.get("mode").cloned().unwrap_or(Value::Null),
+                )
+                .unwrap_or_default();
+                started = Some((event.step_id.clone().unwrap_or_default(), mode));
+            }
+            "model.started" => {
+                let input = event
+                    .payload
+                    .get("input")
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!("run {run_id} predates replayable events: its model input was not recorded")
+                    })?;
+                let step_id = event.step_id.clone().unwrap_or_default();
+                // The step is identified by the event; the task file is the
+                // fallback for its mode when the step never announced one.
+                let mode = match &started {
+                    Some((id, mode)) if *id == step_id => *mode,
+                    _ => task
+                        .steps
+                        .iter()
+                        .find(|step| step.id == step_id)
+                        .map(|step| step.mode)
+                        .unwrap_or_default(),
+                };
+                let mut messages = vec![json!({"role":"system","content":system_prompt(mode)})];
+                messages.extend(history.iter().cloned());
+                messages.push(json!({"role":"user","content":input}));
+                steps.push(ReplayStep {
+                    step_id,
+                    index: event.step_index.unwrap_or_default(),
+                    messages,
+                });
+                current = Some(steps.len() - 1);
+            }
+            "model.tool_calls" => {
+                let Some(index) = current else {
+                    continue;
+                };
+                let message = event.payload.get("message").with_context(|| {
+                    format!("run {run_id} predates replayable events: an assistant turn was not recorded")
+                })?;
+                steps[index].messages.push(message.clone());
+            }
+            "model.observation" => {
+                let Some(index) = current else {
+                    continue;
+                };
+                let call_id = event
+                    .payload
+                    .get("callId")
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!("run {run_id} predates replayable events: a tool call id was not recorded")
+                    })?;
+                let observation = event
+                    .payload
+                    .get("observation")
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!("run {run_id} predates replayable events: an observation was not recorded")
+                    })?;
+                steps[index].messages.push(json!({
+                    "role":"tool",
+                    "tool_call_id":call_id,
+                    "content":observation,
+                }));
+            }
+            _ => {}
+        }
+    }
+    Ok(steps)
+}
+
+/// The conversation prefix a run replayed: the transcript up to the turn this
+/// run opened, oldest first.
+///
+/// The prefix belongs to the session rather than to the run, so a forgotten
+/// conversation leaves it out instead of failing the replay — what the run
+/// itself recorded is still complete.
+fn replay_history(
+    workspace: &Workspace,
+    events: &[HarnessEvent],
+    run_id: &str,
+) -> Result<Vec<Value>> {
+    let session_id = events
+        .iter()
+        .find(|event| event.event_type == "run.started")
+        .and_then(|event| event.payload.get("sessionId"))
+        .and_then(Value::as_str);
+    let Some(session_id) = session_id else {
+        return Ok(Vec::new());
+    };
+    let messages = workspace.session_messages(session_id)?;
+    // This run's own prompt and answer come after its history; anything a
+    // later run added comes after those.
+    let cut = messages
+        .iter()
+        .position(|message| message.run_id.as_deref() == Some(run_id))
+        .unwrap_or(messages.len());
+    Ok(messages[..cut]
+        .iter()
+        .map(|message| json!({"role":message.role,"content":message.content}))
+        .collect())
 }
 
 #[cfg(test)]

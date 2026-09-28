@@ -10,7 +10,7 @@ use chrono::Utc;
 use rand::{Rng, distr::Alphanumeric};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::model::{
     Failure, HarnessEvent, RunRow, RunSummary, SessionMessage, SessionRow, TaskSpec,
@@ -87,10 +87,96 @@ impl Workspace {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at); CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, messages INTEGER NOT NULL, runs INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);")?;
         let workspace = Self { paths, db };
+        // The JSONL files are the fact source and the index is derived from
+        // them, so anything the index lost is restored first. Only then can a
+        // row still saying `running` be judged: the events that would have
+        // closed it may have been what was missing.
+        workspace.reconcile_events()?;
         // The previous harness may have been killed mid-run; repair those rows
         // so a crashed run does not linger as `running` forever.
         workspace.reconcile_stale_runs()?;
         Ok(workspace)
+    }
+
+    /// Rebuild the SQLite index from the `events.jsonl` audit log.
+    ///
+    /// Every event is written to the log before it is indexed, so a database
+    /// that lost rows (a partial write, a deleted `harness.db`, a copy of a
+    /// workspace taken mid-run) can always be brought back in line with the
+    /// files. Returns the run ids that had to be repaired.
+    ///
+    /// The index is only re-read when it cannot already agree with the log:
+    /// the line count of the file is compared with the indexed event count,
+    /// so the usual startup touches every run once without parsing it.
+    pub fn reconcile_events(&self) -> Result<Vec<String>> {
+        let Ok(entries) = fs::read_dir(&self.paths.runs) else {
+            return Ok(Vec::new());
+        };
+        let mut repaired = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(run_id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let events_path = path.join("events.jsonl");
+            if !events_path.exists() {
+                continue;
+            }
+            let indexed = self.count_run_events(run_id)?;
+            if self.get_run(run_id)?.is_some() && count_lines(&events_path)? <= indexed {
+                continue;
+            }
+            let events = read_event_log(&events_path)?;
+            // The row is created before its events so a terminal event finds
+            // something to close; a row that already exists is left alone
+            // rather than overwritten with a guess.
+            if self.get_run(run_id)?.is_none() {
+                self.recreate_run_row(run_id, &path, &events)?;
+            }
+            for event in &events {
+                self.insert_event(event)?;
+            }
+            repaired.push(run_id.to_owned());
+        }
+        Ok(repaired)
+    }
+
+    /// Recreate the `runs` row for a run whose events survive but whose row
+    /// does not, from `task.json` and the log itself.
+    fn recreate_run_row(&self, run_id: &str, dir: &Path, events: &[HarnessEvent]) -> Result<()> {
+        // `task.json` is what the run was announced from. When it is gone the
+        // log still names the task: every event carries its id and
+        // `run.started` carries the name.
+        let mut task_id = None;
+        let mut task_name = None;
+        if let Ok(task) = fs::read_to_string(dir.join("task.json"))
+            && let Ok(task) = serde_json::from_str::<TaskSpec>(&task)
+        {
+            task_id = Some(task.task_id().to_owned());
+            task_name = Some(task.name);
+        }
+        for event in events {
+            if event.event_type == "run.started" {
+                task_id.get_or_insert_with(|| event.task_id.clone());
+                if let Some(name) = event.payload.get("taskName").and_then(Value::as_str) {
+                    task_name.get_or_insert_with(|| name.to_owned());
+                }
+            }
+        }
+        let started_at = events.first().map(|event| event.timestamp.clone());
+        self.db.execute(
+            "INSERT OR IGNORE INTO runs VALUES (?1,?2,?3,'running',?4,NULL)",
+            params![
+                run_id,
+                task_id.unwrap_or_else(|| run_id.to_owned()),
+                task_name.unwrap_or_else(|| run_id.to_owned()),
+                started_at.unwrap_or_else(now)
+            ],
+        )?;
+        Ok(())
     }
 
     /// Take the run lock. Must be acquired *before* the run is announced to the
@@ -153,12 +239,19 @@ impl Workspace {
         if !dir.is_dir() {
             return Ok(true);
         }
-        let file = OpenOptions::new()
-            .create(true)
+        // The probe must not create the lock file: `prune --dry-run` asks the
+        // same question, and a dry run touches nothing.
+        let file = match OpenOptions::new()
             .read(true)
             .write(true)
             .truncate(false)
-            .open(dir.join("lock"))?;
+            .open(dir.join("lock"))
+        {
+            Ok(file) => file,
+            // No lock file means no run ever took one, so nobody owns it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error).context("failed to read the run lock"),
+        };
         match file.try_lock() {
             Ok(()) => {
                 let _ = file.unlock();
@@ -233,6 +326,16 @@ impl Workspace {
         Ok(count.max(0) as usize)
     }
 
+    /// How many of a run's events are indexed, whatever their type.
+    fn count_run_events(&self, run_id: &str) -> Result<usize> {
+        let count: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     fn last_started_step(&self, run_id: &str) -> Result<Option<String>> {
         let mut stmt = self.db.prepare(
             "SELECT step_id FROM events WHERE run_id=?1 AND type='step.started' ORDER BY timestamp DESC, rowid DESC LIMIT 1",
@@ -265,8 +368,12 @@ impl Workspace {
         Ok(())
     }
     pub fn insert_event(&self, event: &HarnessEvent) -> Result<()> {
+        // `OR IGNORE` rather than `OR REPLACE`: an event id is never reused,
+        // so a conflict only means the row is already there, and re-inserting
+        // it would give it a fresh rowid — which would reorder a run whose
+        // events share a timestamp, since they are read back by `rowid`.
         self.db.execute(
-            "INSERT OR REPLACE INTO events VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT OR IGNORE INTO events VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 event.event_id,
                 event.run_id,
@@ -479,6 +586,83 @@ impl Workspace {
             .execute("DELETE FROM sessions WHERE session_id=?1", [session_id])?;
         Ok(existed)
     }
+
+    /// The conversations to drop when only the `keep` most recent ones are
+    /// wanted, newest first. `dry_run` reports them without deleting.
+    pub fn prune_sessions(&self, keep: usize, dry_run: bool) -> Result<Vec<String>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT session_id FROM sessions ORDER BY updated_at DESC, session_id DESC")?;
+        let all = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut pruned = Vec::new();
+        for session_id in all.into_iter().skip(keep) {
+            if dry_run {
+                pruned.push(session_id);
+                continue;
+            }
+            self.delete_session(&session_id)?;
+            pruned.push(session_id);
+        }
+        Ok(pruned)
+    }
+
+    /// The runs to drop when only the `keep` most recent ones are wanted.
+    ///
+    /// A run that is still executing is never a candidate: its lock is held,
+    /// so deleting it would pull the log out from under a live writer. Runs
+    /// that are kept are untouched, `dry_run` only reports.
+    pub fn prune_runs(&self, keep: usize, dry_run: bool) -> Result<Vec<String>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT run_id FROM runs ORDER BY started_at DESC, run_id DESC")?;
+        let all = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut pruned = Vec::new();
+        for run_id in all.into_iter().skip(keep) {
+            if !self.run_is_stale(&run_id)? {
+                continue;
+            }
+            pruned.push(run_id.clone());
+            if dry_run {
+                continue;
+            }
+            fs::remove_dir_all(self.paths.runs.join(&run_id))
+                .with_context(|| format!("failed to delete run directory for {run_id}"))?;
+            self.db
+                .execute("DELETE FROM events WHERE run_id=?1", [&run_id])?;
+            self.db
+                .execute("DELETE FROM runs WHERE run_id=?1", [&run_id])?;
+        }
+        Ok(pruned)
+    }
+}
+
+/// Newline-terminated records in an audit log file.
+///
+/// The last line is only counted once it is terminated, so a harness killed
+/// mid-write leaves a count that matches what can actually be parsed.
+fn count_lines(path: &Path) -> Result<usize> {
+    let content = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(content.iter().filter(|byte| **byte == b'\n').count())
+}
+
+/// The events recorded for a run, in log order.
+///
+/// A line that does not parse is skipped instead of failing the recovery: a
+/// truncated line is still being written by someone, and every other event is
+/// worth restoring.
+fn read_event_log(path: &Path) -> Result<Vec<HarnessEvent>> {
+    let content = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(content
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .filter_map(|line| serde_json::from_slice::<HarnessEvent>(line).ok())
+        .collect())
 }
 
 /// A conversation id is used as a file name, so only characters that cannot

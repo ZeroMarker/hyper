@@ -96,6 +96,14 @@ export DEEPSEEK_MODEL="deepseek-v4-flash"   # 或 deepseek-v4-pro
 
 `src/policy.rs` 按 shell 词法（引号、`;`/`&&`/`|`/`&`/换行、重定向、命令替换）分词后判定，取代原先 6 条子串匹配。拦截文件系统破坏（`rm`/`shred`/`truncate`/`chmod`/`chown` 等作用于 `/`、`$HOME`、工作区根、顶层或系统目录）、重定向写入系统路径、机器级程序（`sudo`/`doas`/`dd`/`mkfs*`/`fdisk`/`shutdown`/`systemctl`…）、`curl|sh` 管道，以及 `sh -c '…'` / `sudo` / `env` / `timeout` / `xargs` 内的嵌套命令。这是**轻量禁止而非沙箱**：未识别的命令仍以用户权限执行，没有任何资源限制（无 setrlimit）。
 
+## Replay、artifacts 与保留
+
+- `hyper replay <run-id>` 按 `task.json` + `events.jsonl` 重建该 run 发给模型的完整 messages 并输出 JSON——system、会话前缀、本次 `input`、每轮 assistant 消息与紧随其后的 observation，即**最后一次请求实际携带的 messages**。会话前缀取 transcript 中本 run 之前的部分（会话被 `forget` 则为空，run 自身的记录仍完整）；缺字段的旧格式 run 报错拒绝而非猜造。
+- 为可重建补上的事件字段：`model.started.input`（实际发送的用户消息，含 workspace context，上限 64 KB）、`model.tool_calls.message`（整轮 assistant 消息，含 `content` 与 `tool_calls`；原有 `calls` 摘要保留）、`model.observation`（`turn`/`callId`/`tool`/`observation`）。观测的派生逻辑抽成纯函数 `observation()`。
+- `bash` 输出落盘：每路最多 4 MB 写入 `runs/<id>/artifacts/<step>-<index>-bash-stdout.log`（空流不建文件，超量尾部加截断 marker），事件仍只存 256 KB，并以 `stdoutArtifact`/`stderrArtifact` 指向文件——模型的 observation 里也能看到路径。`ha artifacts` 从此有内容。
+- 保留策略：`hyper prune --keep <N> [--runs] [--dry-run]`——会话按 `updated_at`、run 按 `started_at` 只留最近 N 个；`--runs` 连事件、artifacts、checkpoint 一起删；持锁的运行中 run 永不作为候选。
+- 索引兜底：`Workspace::open` 先 `reconcile_events()` 再 `reconcile_stale_runs()`，用 JSONL 补齐缺失的 run 行（`task.json` + 首个事件）与事件，常态只比对行数不解析日志；`insert_event` 由 `INSERT OR REPLACE` 改 `INSERT OR IGNORE`，避免重复插入换 rowid、让时间戳相同的事件在 `ORDER BY timestamp,rowid` 下重排。
+
 ## 验证
 
 ```bash
@@ -111,7 +119,9 @@ Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败�
 
 本轮（协议/会话/沙箱）新增覆盖：三个协议各自的请求路径与认证头（messages 必须 `x-api-key` 且**无** `authorization`）、body 翻译字段与响应解析（文本 + tool_calls + usage）、messages 工具参数不可解析时不 panic、`detect_protocol` 家族判定与非 opencode 主机回退、显式协议覆盖探测、非法协议名报错；会话跨轮重放（stub 断言第二问的请求体含第一问的 prompt 与回答，且首问不重复）、transcript 顺序与标题、每次 run 只计一次 run、session id 穿越防护（`../outside`、`a/b`、`.`、`..`、空串全部拒绝且不落盘）、`sessions|session|forget` 的 CLI 行为与幂等报错；危险命令的结构化判定（文件系统破坏、机器级程序、`curl|sh`、wrapper 与 `sh -c` 嵌套、工作区根保护、命令分词）。
 
-当前测试数量：41 单元 + 29 集成（run.rs）+ 4 集成（task.rs），全部通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。
+本轮（replay/artifacts/prune/兜底重建）新增覆盖：`hyper replay` 的 messages 与 stub 实收请求体**逐字节相等**（system、user、assistant、tool 四条消息的 role 与 `tool_call_id` 全对）、事件新增字段确实落盘、旧格式 run 被拒绝且缺 run 行也能从日志重建；`bash` 大输出的 artifact 保留尾部而事件仍是 256 KB、`stdoutArtifact` 路径正确、空流不建文件、`ha artifacts` 列表；索引整表丢失后从 JSONL 重建（run 行、task 名、`finished` 状态、事件条数与首尾顺序）；`prune --dry-run` 只报告不删、会话与 run 各按 keep 保留最近的、持锁的运行中 run 不被 prune。
+
+当前测试数量：42 单元 + 35 集成（run.rs）+ 4 集成（task.rs），全部通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。
 
 真实端点与真实 TUI 手工验证（OpenCode Go）：
 
