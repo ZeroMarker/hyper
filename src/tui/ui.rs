@@ -49,6 +49,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Span::styled(app.model.as_str(), Style::default().fg(Color::Magenta)),
         Span::raw("  •  "),
         Span::styled(app.mode.as_str(), Style::default().fg(mode_color)),
+        Span::styled(
+            format!("  •  {}", app.execution_mode.as_str()),
+            Style::default().fg(Color::DarkGray),
+        ),
         // Which conversation the next message joins, so a follow-up is never
         // silently answered by a fresh context.
         Span::styled(

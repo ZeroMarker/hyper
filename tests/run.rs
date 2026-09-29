@@ -1,6 +1,7 @@
 use harness::{
-    AgentMode, ApprovalGate, Checkpoint, EventSink, StepSpec, TaskSpec, Workspace, get_run_details,
-    restore_checkpoint, run_task, run_task_in_session_with_updates, run_task_with_approval,
+    AgentMode, ApprovalGate, Checkpoint, EventSink, ExecutionMode, StepSpec, TaskSpec, Workspace,
+    get_run_details, restore_checkpoint, run_task, run_task_in_session_with_updates,
+    run_task_with_approval, run_task_with_mode,
 };
 use std::{
     collections::HashMap,
@@ -52,6 +53,119 @@ fn shell_run_records_events() {
     assert!(events.iter().any(|e| e.event_type == "tool.finished"))
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn sandboxed_shell_cannot_write_outside_workspace() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let target = outside.path().join("escaped.txt");
+    let instruction = format!("bash:echo escaped > {}", target.display());
+    let summary = run_task(&task("escape", AgentMode::Build, &instruction), root.path()).unwrap();
+    assert_eq!(summary.status, "failed", "{:?}", summary.failure);
+    assert!(!target.exists());
+    let (_, events) = get_run_details(root.path(), &summary.run_id).unwrap();
+    assert_eq!(events[0].payload["executionMode"], "workspace-write");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sandbox_boundary_survives_symlinks_and_child_shells() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    symlink(outside.path(), root.path().join("escape")).unwrap();
+    let summary = run_task(
+        &task(
+            "escape",
+            AgentMode::Build,
+            "bash:sh -c 'echo escaped > escape/child.txt'",
+        ),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "failed", "{:?}", summary.failure);
+    assert!(!outside.path().join("child.txt").exists());
+
+    let summary = run_task(
+        &task(
+            "inside",
+            AgentMode::Build,
+            "bash:sh -c 'echo allowed > inside.txt'",
+        ),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(summary.status, "finished", "{:?}", summary.failure);
+    assert_eq!(
+        fs::read_to_string(root.path().join("inside.txt")).unwrap(),
+        "allowed\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_read_only_and_unrestricted_modes_change_shell_boundary() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let inside = root.path().join("inside.txt");
+    let target = outside.path().join("allowed.txt");
+
+    let readonly = run_task_with_mode(
+        &task("readonly", AgentMode::Build, "bash:echo nope > inside.txt"),
+        root.path(),
+        ExecutionMode::ReadOnly,
+    )
+    .unwrap();
+    assert_eq!(readonly.status, "failed");
+    assert!(!inside.exists());
+
+    let unrestricted = run_task_with_mode(
+        &task(
+            "unrestricted",
+            AgentMode::Build,
+            &format!("bash:echo yes > {}", target.display()),
+        ),
+        root.path(),
+        ExecutionMode::Unrestricted,
+    )
+    .unwrap();
+    assert_eq!(
+        unrestricted.status, "finished",
+        "{:?}",
+        unrestricted.failure
+    );
+    assert_eq!(fs::read_to_string(target).unwrap(), "yes\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sandboxed_shell_cannot_connect_to_tcp() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let instruction = format!(
+        "bash:python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}), 1).close()'"
+    );
+    let denied = run_task(
+        &task("tcp-denied", AgentMode::Build, &instruction),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(denied.status, "failed", "{:?}", denied.failure);
+
+    let allowed = run_task_with_mode(
+        &task("tcp-allowed", AgentMode::Build, &instruction),
+        root.path(),
+        ExecutionMode::Unrestricted,
+    )
+    .unwrap();
+    assert_eq!(allowed.status, "finished", "{:?}", allowed.failure);
+}
+
 #[test]
 fn session_run_publishes_persisted_events_to_the_tui_sink() {
     let dir = tempdir().unwrap();
@@ -81,7 +195,27 @@ fn plan_mode_denies_writes() {
     )
     .unwrap();
     assert_eq!(summary.status, "failed");
-    assert!(summary.failure.unwrap().message.contains("read-only"))
+    assert!(
+        summary
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("read-only")
+    );
+    let (_, events) = get_run_details(dir.path(), &summary.run_id).unwrap();
+    let denied = events
+        .iter()
+        .find(|event| event.event_type == "tool.denied")
+        .unwrap();
+    assert_eq!(denied.payload["tool"], "write");
+    assert_eq!(denied.payload["target"], "demo.txt");
+    assert!(
+        denied.payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("read-only")
+    );
 }
 
 #[test]
@@ -328,12 +462,13 @@ fn approval_gate_allows_the_tool() {
 #[test]
 fn approval_gate_denial_fails_the_step() {
     let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
     let gate = ApprovalGate::new();
     let worker = gate.clone();
     let handle = std::thread::spawn(move || {
         run_task_with_approval(
             &task("gated", AgentMode::Build, "bash:echo should-not-run"),
-            dir.path(),
+            &root,
             worker,
         )
         .unwrap()
@@ -343,6 +478,14 @@ fn approval_gate_denial_fails_the_step() {
     let summary = handle.join().unwrap();
     assert_eq!(summary.status, "failed");
     assert!(summary.failure.unwrap().message.contains("denied"));
+    let (_, events) = get_run_details(dir.path(), &summary.run_id).unwrap();
+    let approval = events
+        .iter()
+        .find(|event| event.event_type == "tool.approval")
+        .unwrap();
+    assert_eq!(approval.payload["tool"], "bash");
+    assert_eq!(approval.payload["approved"], false);
+    assert!(events.iter().any(|event| event.event_type == "tool.denied"));
 }
 
 fn wait_for_request(gate: &ApprovalGate) -> harness::ApprovalRequest {

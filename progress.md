@@ -94,7 +94,7 @@ export DEEPSEEK_MODEL="deepseek-v4-flash"   # 或 deepseek-v4-pro
 
 ## 危险命令策略
 
-`src/policy.rs` 按 shell 词法（引号、`;`/`&&`/`|`/`&`/换行、重定向、命令替换）分词后判定，取代原先 6 条子串匹配。拦截文件系统破坏（`rm`/`shred`/`truncate`/`chmod`/`chown` 等作用于 `/`、`$HOME`、工作区根、顶层或系统目录）、重定向写入系统路径、机器级程序（`sudo`/`doas`/`dd`/`mkfs*`/`fdisk`/`shutdown`/`systemctl`…）、`curl|sh` 管道，以及 `sh -c '…'` / `sudo` / `env` / `timeout` / `xargs` 内的嵌套命令。这是**轻量禁止而非沙箱**：未识别的命令仍以用户权限执行，没有任何资源限制（无 setrlimit）。
+`src/policy.rs` 按 shell 词法（引号、`;`/`&&`/`|`/`&`/换行、重定向、命令替换）分词后判定，取代原先 6 条子串匹配。拦截文件系统破坏（`rm`/`shred`/`truncate`/`chmod`/`chown` 等作用于 `/`、`$HOME`、工作区根、顶层或系统目录）、重定向写入系统路径、机器级程序（`sudo`/`doas`/`dd`/`mkfs*`/`fdisk`/`shutdown`/`systemctl`…）、`curl|sh` 管道，以及 `sh -c '…'` / `sudo` / `env` / `timeout` / `xargs` 内的嵌套命令。解析器本身是轻量禁止而非沙箱；Linux 默认执行模式另有 Landlock 边界。资源限制仍待实现（无 setrlimit）。
 
 ## Replay、artifacts 与保留
 
@@ -121,7 +121,9 @@ Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败�
 
 本轮（replay/artifacts/prune/兜底重建）新增覆盖：`hyper replay` 的 messages 与 stub 实收请求体**逐字节相等**（system、user、assistant、tool 四条消息的 role 与 `tool_call_id` 全对）、事件新增字段确实落盘、旧格式 run 被拒绝且缺 run 行也能从日志重建；`bash` 大输出的 artifact 保留尾部而事件仍是 256 KB、`stdoutArtifact` 路径正确、空流不建文件、`ha artifacts` 列表；索引整表丢失后从 JSONL 重建（run 行、task 名、`finished` 状态、事件条数与首尾顺序）；`prune --dry-run` 只报告不删、会话与 run 各按 keep 保留最近的、持锁的运行中 run 不被 prune。
 
-当前测试数量：42 单元 + 35 集成（run.rs）+ 4 集成（task.rs），全部通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。
+当前测试数量：44 单元 + 40 集成（run.rs）+ 4 集成（task.rs），全部通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。
+
+2026-09-29：增加 `src/sandbox.rs` 的 Linux Landlock 边界。默认 `workspace-write` 允许 shell 在工作区内写入，限制工作区外写入与 TCP bind/connect；`read-only` 禁止工具写入和 shell 写入；`unrestricted` 需显式选择，跳过 shell 隔离和危险命令解析。CLI 的 `--sandbox` 与 `HYPER_SANDBOX` 也作用于 TUI；模式记录在 `run.started`，TUI 标题展示当前模式。策略拒绝写 `tool.denied`（工具、目标、原因），交互确认写 `tool.approval`。集成测试覆盖符号链接、子 shell、工作区内写入、工作区外写入、TCP、显式模式和审计事件。剩余限制见 `todo.md`：Landlock 不能隔离全部网络与 metadata 操作，非 Linux 尚无原生 shell 隔离。
 
 真实端点与真实 TUI 手工验证（OpenCode Go）：
 

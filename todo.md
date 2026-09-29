@@ -45,7 +45,7 @@
 ### 工程健壮性
 - [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。
 - [ ] 资源限制：策略层已完成（`src/policy.rs`：结构化危险命令禁止），但**没有任何资源限制**——没有 setrlimit，内存/CPU/文件大小都不设上限，只有命令超时与输出上限（事件 256 KB、artifact 4 MB）。这一步与下一步（OS 级沙箱）可分开做。
-- [ ] OS 级沙箱（需先定威胁模型）：当前是 denylist，不是 containment boundary——未识别的命令仍以用户权限执行。可选 Linux landlock / macOS seatbelt / 默认拒绝 shell，三者工作量差一个数量级。注意 workspace context 会把仓库内容发给模型，prompt injection 是活路径。
+- [ ] OS 级沙箱（分阶段）：Linux 默认模式已用 Landlock 限制 shell 及其子进程的工作区外写入与 TCP bind/connect；`read-only` / `workspace-write` / `unrestricted` 由 CLI、TUI 共用，非 Linux 或缺 Landlock ABI 4 时默认拒绝 shell。剩余：网络 UDP/Unix socket、Landlock 未覆盖的 metadata 操作、macOS/Windows 原生隔离，以及对 `.harness` 审计文件的保护。workspace context 仍会把仓库内容发给模型，prompt injection 是活路径。
 
 ### 协议与模型
 - [ ] 协议能力的**能力差异**处理：`detect_protocol` 按模型家族在白名单内探测（opencode.ai 主机）；网关新增模型或改名时需要同步，且 `max_tokens`/`max_output_tokens` 目前是固定常量而非按模型上限。若某网关把三种协议挂在不同 base path 下，探测表需改为可配置。

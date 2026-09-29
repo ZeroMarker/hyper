@@ -233,6 +233,33 @@ In the TUI, `bash`, `write` and `edit` actions ask for **interactive
 approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
 loop waits for the answer). Command-line runs do not prompt.
 
+### Shell execution boundary
+
+`--sandbox` applies to CLI and TUI runs. The default is `workspace-write`:
+on Linux, shell commands and their child processes use Landlock to confine
+filesystem writes to the workspace and deny TCP connections. `read-only`
+also denies `write`/`edit` tools and shell writes. `unrestricted` explicitly
+removes shell isolation and the dangerous-command check; the TUI still asks
+before `bash`, `write`, and `edit`. For example:
+
+```bash
+ha --sandbox read-only run examples/hello.json
+ha --sandbox unrestricted "build this project"
+```
+
+`HYPER_SANDBOX` sets the default for either interface; `--sandbox` overrides
+it. The effective mode is recorded in `run.started` and shown in the TUI.
+Sandboxed shell commands use `.harness/tmp` for temporary files. A kernel
+without Landlock ABI 4, or a non-Linux host, rejects sandboxed `bash` instead
+of silently running it without isolation. To run shell commands there, select
+`unrestricted` explicitly.
+
+This boundary limits writes and TCP sockets. Landlock does not restrict reads,
+UDP, Unix sockets, or every metadata operation; commands can still read files
+outside the workspace. Shell commands in `unrestricted` mode run with the
+calling user's privileges. Direct `read`/`write`/`edit` tools continue to use
+workspace path checks in every mode.
+
 ## Task format
 
 ```json
@@ -320,18 +347,17 @@ an event that reached the files cannot stay unrecorded.
   only keeps the head. `read` results are not copied — the whole file is still
   in the workspace — and the observations handed to a model are derived from
   payloads that are already in the log.
-- The dangerous-command check is a **lightweight denylist over shell words, not a
-  sandbox**. It rejects the accidents a model talks itself into: `rm`/`shred`/
-  `chmod` and redirections aimed at `/`, the home directory, the workspace root
+- The dangerous-command check is a **lightweight denylist over shell words**
+  alongside the default Linux shell boundary. It rejects common accidents:
+  `rm`/`shred`/`chmod` and redirections aimed at `/`, the home directory, the workspace root
   or a system directory; machine-level programs (`sudo`, `dd`, `mkfs*`, `fdisk`,
   `shutdown`, `systemctl`, …); `curl … | sh`; and the same commands hidden one
   level down inside `sh -c '…'`, `sudo`, `env`, `timeout` or `xargs`. Quoting and
   command substitution are parsed rather than string-matched, so `rm -rf target`
-  and `curl -o f.tar.gz` still work. It is **not** a containment boundary: a
-  command that is not recognised still runs with your privileges, and a
-  determined model can reach the same effect through a path this list does not
-  name. Command-line runs apply the check without any approval prompt; the TUI
-  additionally asks before every `bash` call.
+  and `curl -o f.tar.gz` still pass the parser. The parser itself is **not** a
+  containment boundary. Command-line runs apply the check without an approval
+  prompt; the TUI additionally asks before every `bash` call. The explicit
+  `unrestricted` mode skips this check.
 - The workspace context sent to the model contains repository file contents, so a
   repository can influence the model's actions (prompt injection). Run Hyper on
   code you trust.

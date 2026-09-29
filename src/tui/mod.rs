@@ -1,8 +1,9 @@
 mod ui;
 
 use crate::{
-    AgentMode, ApprovalGate, ApprovalRequest, EventSink, deepseek::DEFAULT_MODEL, i18n,
-    latest_display_output, list_runs, prompt_to_task, run_task_in_session_with_updates, workspace,
+    AgentMode, ApprovalGate, ApprovalRequest, EventSink, ExecutionMode, deepseek::DEFAULT_MODEL,
+    i18n, latest_display_output, list_runs, prompt_to_task, run_task_in_session_with_updates_mode,
+    workspace,
 };
 use anyhow::Result;
 use crossterm::{
@@ -24,6 +25,7 @@ pub struct App {
     pub root: PathBuf,
     pub input: String,
     pub mode: AgentMode,
+    pub execution_mode: ExecutionMode,
     pub model: String,
     pub output: Vec<String>,
     pub rendered: Vec<Line<'static>>,
@@ -52,7 +54,7 @@ enum Message {
 }
 
 impl App {
-    fn new(root: PathBuf, session: Option<String>) -> Self {
+    fn new(root: PathBuf, session: Option<String>, execution_mode: ExecutionMode) -> Self {
         let (tx, rx) = mpsc::channel();
         let model = std::env::var("DEEPSEEK_MODEL")
             .ok()
@@ -62,6 +64,7 @@ impl App {
             root,
             input: String::new(),
             mode: AgentMode::Build,
+            execution_mode,
             model,
             output: vec![
                 i18n::text(
@@ -179,6 +182,7 @@ impl App {
                 self.sink = Some(sink.clone());
                 let root = self.root.clone();
                 let mode = self.mode;
+                let execution_mode = self.execution_mode;
                 let tx = self.tx.clone();
                 // The first message opens a conversation, and every later one
                 // continues it, which is what gives the model the earlier turns
@@ -186,12 +190,13 @@ impl App {
                 let session = self.session.get_or_insert_with(workspace::id).clone();
                 self.session_id = Some(session.clone());
                 std::thread::spawn(move || {
-                    let result = run_task_in_session_with_updates(
+                    let result = run_task_in_session_with_updates_mode(
                         &prompt_to_task(&value, mode),
                         &root,
                         &session,
                         gate,
                         sink,
+                        execution_mode,
                     )
                     .and_then(|summary| {
                         Ok(latest_display_output(&root, &summary.run_id)?
@@ -337,10 +342,18 @@ impl App {
     }
 }
 pub fn run(root: PathBuf, session: Option<String>) -> Result<()> {
+    run_with_mode(root, session, ExecutionMode::from_env()?)
+}
+
+pub fn run_with_mode(
+    root: PathBuf,
+    session: Option<String>,
+    execution_mode: ExecutionMode,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture)?;
     let result = (|| {
-        let mut app = App::new(root, session);
+        let mut app = App::new(root, session, execution_mode);
         while !app.quit {
             app.tick = app.tick.wrapping_add(1);
             app.poll();
@@ -439,7 +452,7 @@ mod tests {
 
     #[test]
     fn slash_input_filters_and_completes_commands() {
-        let mut app = App::new(PathBuf::from("."), None);
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
         app.input = "/mo".into();
         assert_eq!(app.command_suggestions().len(), 2);
         assert!(app.complete_command());
@@ -451,7 +464,11 @@ mod tests {
     /// longer see, which is worse than having no `/new` at all.
     #[test]
     fn new_starts_a_fresh_conversation() {
-        let mut app = App::new(PathBuf::from("."), Some("previous-chat".into()));
+        let mut app = App::new(
+            PathBuf::from("."),
+            Some("previous-chat".into()),
+            ExecutionMode::default(),
+        );
         app.session = Some("previous-chat".into());
         app.output.push("You\nsomething private".into());
         app.input = "/new".into();
@@ -489,7 +506,11 @@ mod tests {
     /// would silently split in two.
     #[test]
     fn a_resumed_app_keeps_the_same_session() {
-        let mut app = App::new(PathBuf::from("."), Some("chat-1".into()));
+        let mut app = App::new(
+            PathBuf::from("."),
+            Some("chat-1".into()),
+            ExecutionMode::default(),
+        );
         assert_eq!(app.session.as_deref(), Some("chat-1"));
         app.input = "/session".into();
         app.submit();

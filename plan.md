@@ -28,7 +28,7 @@ Hyper 应成为**可审计、可恢复、默认安全的本地终端编码 Agent
 | 维度 | 已具备 | 当前缺口或风险 |
 | --- | --- | --- |
 | 运行可追溯 | 事件、摘要、回放、会话、检查点 | 尚无固定任务集来量化成功率、耗时和恢复效果 |
-| 执行边界 | plan 只读；TUI 对写入和 shell 询问；危险命令规则 | `src/policy.rs` 明言它是拒绝规则而非沙箱；CLI 无交互审批，命令以用户权限执行 |
+| 执行边界 | plan 只读；TUI 对写入和 shell 询问；危险命令规则；Linux shell 默认用 Landlock 限制写入范围与 TCP；运行模式写入事件 | Landlock 不限制外部读取、UDP、Unix socket 和部分 metadata 操作；macOS/Windows 默认拒绝 sandboxed shell，尚无原生隔离 |
 | 模型体验 | Chat、Responses、Messages 三协议与重试 | Chat 请求仍设 `stream: false`；TUI 有事件摘要，但没有逐字模型输出 |
 | 上下文 | 会话续接、工作区文件摘要、最多 12 轮工具调用 | 文件摘要按固定顺序截取，没有显式 token 预算、压缩或相关性检索 |
 | 模型配置 | API key、base URL、model、protocol 的单组配置 | 没有命名 profile、会话内切换、连接诊断；`DEEPSEEK_*` 名称不适合多提供商 |

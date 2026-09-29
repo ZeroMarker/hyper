@@ -21,6 +21,7 @@ use crate::{
     event_sink::EventSink,
     model::*,
     policy,
+    sandbox::{ExecutionMode, Sandbox},
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
 };
 
@@ -31,6 +32,7 @@ struct EventWriter<'a> {
     workspace: &'a Workspace,
     gate: Option<ApprovalGate>,
     sink: Option<EventSink>,
+    execution_mode: ExecutionMode,
     /// Earlier turns of the session this run belongs to, oldest first. Empty
     /// for a standalone run.
     history: Vec<SessionMessage>,
@@ -70,6 +72,7 @@ impl EventWriter<'_> {
 fn assert_allowed(
     root: &Path,
     mode: AgentMode,
+    execution_mode: ExecutionMode,
     action: &str,
     target: Option<&str>,
     command: Option<&str>,
@@ -79,11 +82,73 @@ fn assert_allowed(
     if mode == AgentMode::Plan && (action == "write" || action == "bash") {
         bail!("plan mode is read-only")
     }
+    if execution_mode == ExecutionMode::ReadOnly && action == "write" {
+        bail!("read-only execution mode denies writes")
+    }
     if let Some(target) = target {
         resolve_path(root, target)?;
     }
-    if action == "bash" {
+    if action == "bash" && execution_mode != ExecutionMode::Unrestricted {
         policy::check_command(command.unwrap_or_default(), root)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize(
+    events: &EventWriter<'_>,
+    root: &Path,
+    step: &StepSpec,
+    index: usize,
+    tool: &str,
+    action: &str,
+    target: Option<&str>,
+    command: Option<&str>,
+) -> Result<()> {
+    if let Err(error) = assert_allowed(
+        root,
+        step.mode,
+        events.execution_mode,
+        action,
+        target,
+        command,
+    ) {
+        events.write(
+            "tool.denied",
+            json!({"tool":tool,"target":target,"command":command,"reason":error.to_string()}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn require_approval(
+    events: &EventWriter<'_>,
+    step: &StepSpec,
+    index: usize,
+    tool: &str,
+    detail: &str,
+) -> Result<()> {
+    let Some(gate) = &events.gate else {
+        return Ok(());
+    };
+    let approved = gate.request(tool, detail);
+    events.write(
+        "tool.approval",
+        json!({"tool":tool,"target":detail,"approved":approved}),
+        Some(&step.id),
+        Some(index),
+    )?;
+    if !approved {
+        events.write(
+            "tool.denied",
+            json!({"tool":tool,"target":detail,"reason":"user denied approval"}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        bail!("user denied {tool} action: {detail}")
     }
     Ok(())
 }
@@ -523,18 +588,27 @@ fn bash(
     index: usize,
     command: &str,
 ) -> Result<(bool, Value)> {
-    assert_allowed(root, step.mode, "bash", None, Some(command))?;
-    if let Some(gate) = &events.gate
-        && !gate.request("bash", command)
-    {
-        events.write(
-            "tool.denied",
-            json!({"tool":"bash","command":command}),
-            Some(&step.id),
-            Some(index),
-        )?;
-        bail!("user denied bash command")
-    }
+    authorize(
+        events,
+        root,
+        step,
+        index,
+        "bash",
+        "bash",
+        None,
+        Some(command),
+    )?;
+    let sandbox = if events.execution_mode == ExecutionMode::Unrestricted {
+        None
+    } else {
+        Some(
+            Sandbox::prepare(root, events.execution_mode)
+                .context("could not prepare bash sandbox")?,
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &sandbox;
+    require_approval(events, step, index, "bash", command)?;
     events.write(
         "tool.started",
         json!({"tool":"bash","command":command}),
@@ -558,6 +632,14 @@ fn bash(
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if events.execution_mode != ExecutionMode::Unrestricted {
+        let temp = root.join(".harness").join("tmp");
+        fs::create_dir_all(&temp)?;
+        builder
+            .env("TMPDIR", &temp)
+            .env("TMP", &temp)
+            .env("TEMP", &temp);
+    }
     // Run the shell in its own process group so a timeout can kill the whole
     // tree (shell plus any background children) instead of leaving orphans.
     #[cfg(unix)]
@@ -591,6 +673,12 @@ fn bash(
                 }
                 Ok(())
             });
+        }
+        if let Some(sandbox) = &sandbox {
+            let ruleset_fd = sandbox.ruleset_fd();
+            unsafe {
+                builder.pre_exec(move || Sandbox::apply_in_child(ruleset_fd));
+            }
         }
     }
     let mut child = builder.spawn()?;
@@ -817,7 +905,7 @@ fn read(
     if path.trim().is_empty() {
         bail!("read: path must not be empty")
     }
-    assert_allowed(root, step.mode, "read", Some(path), None)?;
+    authorize(events, root, step, index, "read", "read", Some(path), None)?;
     events.write(
         "tool.started",
         json!({"tool":"read","input":{"path":path}}),
@@ -838,7 +926,7 @@ fn search(
     query: &str,
     limit: usize,
 ) -> Result<(bool, Value)> {
-    assert_allowed(root, step.mode, "read", None, None)?;
+    authorize(events, root, step, index, "search", "read", None, None)?;
     events.write(
         "tool.started",
         json!({"tool":"search","input":{"query":query,"limit":limit}}),
@@ -905,18 +993,17 @@ fn write_file(
     if path.trim().is_empty() {
         bail!("write: path must not be empty")
     }
-    assert_allowed(root, step.mode, "write", Some(path), None)?;
-    if let Some(gate) = &events.gate
-        && !gate.request("write", path)
-    {
-        events.write(
-            "tool.denied",
-            json!({"tool":"write","path":path}),
-            Some(&step.id),
-            Some(index),
-        )?;
-        bail!("user denied write to {path}")
-    }
+    authorize(
+        events,
+        root,
+        step,
+        index,
+        "write",
+        "write",
+        Some(path),
+        None,
+    )?;
+    require_approval(events, step, index, "write", path)?;
     events.write(
         "tool.started",
         json!({"tool":"write","path":path}),
@@ -960,18 +1047,8 @@ fn edit_file(
     if path.trim().is_empty() {
         bail!("edit: path must not be empty")
     }
-    assert_allowed(root, step.mode, "write", Some(path), None)?;
-    if let Some(gate) = &events.gate
-        && !gate.request("edit", path)
-    {
-        events.write(
-            "tool.denied",
-            json!({"tool":"edit","path":path}),
-            Some(&step.id),
-            Some(index),
-        )?;
-        bail!("user denied edit to {path}")
-    }
+    authorize(events, root, step, index, "edit", "write", Some(path), None)?;
+    require_approval(events, step, index, "edit", path)?;
     events.write(
         "tool.started",
         json!({"tool":"edit","path":path}),
@@ -1004,7 +1081,15 @@ fn edit_file(
 }
 
 pub fn run_task(task: &TaskSpec, root: impl AsRef<Path>) -> Result<RunSummary> {
-    run_task_inner(task, root, None, None, None)
+    run_task_with_mode(task, root, ExecutionMode::from_env()?)
+}
+
+pub fn run_task_with_mode(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    execution_mode: ExecutionMode,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, None, None, None, execution_mode)
 }
 
 /// Run a task with an interactive approval gate: `bash`, `write` and `edit`
@@ -1014,7 +1099,14 @@ pub fn run_task_with_approval(
     root: impl AsRef<Path>,
     gate: ApprovalGate,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate), None, None)
+    run_task_inner(
+        task,
+        root,
+        Some(gate),
+        None,
+        None,
+        ExecutionMode::from_env()?,
+    )
 }
 
 /// Run a task as one more turn of a conversation: the session's earlier turns
@@ -1024,7 +1116,16 @@ pub fn run_task_in_session(
     root: impl AsRef<Path>,
     session_id: &str,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, None, Some(session_id), None)
+    run_task_in_session_with_mode(task, root, session_id, ExecutionMode::from_env()?)
+}
+
+pub fn run_task_in_session_with_mode(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: &str,
+    execution_mode: ExecutionMode,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, None, Some(session_id), None, execution_mode)
 }
 
 /// Same as [`run_task_in_session`], with the TUI approval gate.
@@ -1034,7 +1135,14 @@ pub fn run_task_in_session_with_approval(
     session_id: &str,
     gate: ApprovalGate,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate), Some(session_id), None)
+    run_task_inner(
+        task,
+        root,
+        Some(gate),
+        Some(session_id),
+        None,
+        ExecutionMode::from_env()?,
+    )
 }
 
 /// Run a TUI conversation turn while publishing persisted events to the UI.
@@ -1045,7 +1153,32 @@ pub fn run_task_in_session_with_updates(
     gate: ApprovalGate,
     sink: EventSink,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, Some(gate), Some(session_id), Some(sink))
+    run_task_in_session_with_updates_mode(
+        task,
+        root,
+        session_id,
+        gate,
+        sink,
+        ExecutionMode::from_env()?,
+    )
+}
+
+pub fn run_task_in_session_with_updates_mode(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: &str,
+    gate: ApprovalGate,
+    sink: EventSink,
+    execution_mode: ExecutionMode,
+) -> Result<RunSummary> {
+    run_task_inner(
+        task,
+        root,
+        Some(gate),
+        Some(session_id),
+        Some(sink),
+        execution_mode,
+    )
 }
 
 fn run_task_inner(
@@ -1054,6 +1187,7 @@ fn run_task_inner(
     gate: Option<ApprovalGate>,
     session_id: Option<&str>,
     sink: Option<EventSink>,
+    execution_mode: ExecutionMode,
 ) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
@@ -1084,11 +1218,12 @@ fn run_task_inner(
         workspace: &workspace,
         gate,
         sink,
+        execution_mode,
         history,
     };
     events.write(
         "run.started",
-        json!({"taskName":task.name,"sessionId":session_id}),
+        json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode}),
         None,
         None,
     )?;
@@ -1219,6 +1354,8 @@ fn fail(
 }
 fn classify_error(message: &str) -> &'static str {
     if message.contains("plan mode is read-only")
+        || message.contains("read-only execution mode")
+        || message.contains("bash sandbox")
         || message.contains("dangerous pattern")
         || message.contains("escapes workspace root")
         || message.contains("not allowed for step")
@@ -1555,6 +1692,7 @@ mod tests {
             workspace: &workspace,
             gate: None,
             sink: None,
+            execution_mode: ExecutionMode::default(),
             history: Vec::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the

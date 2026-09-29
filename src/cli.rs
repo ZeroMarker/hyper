@@ -5,9 +5,9 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
-    AgentMode, Checkpoint, RunSummary, TaskSpec, Workspace, deepseek::ensure_api_key,
-    get_run_details, latest_model_reply, list_runs, prompt_to_task, replay_messages,
-    restore_checkpoint, run_task, run_task_in_session, tui,
+    AgentMode, Checkpoint, ExecutionMode, RunSummary, TaskSpec, Workspace,
+    deepseek::ensure_api_key, get_run_details, latest_model_reply, list_runs, prompt_to_task,
+    replay_messages, restore_checkpoint, run_task_in_session_with_mode, run_task_with_mode, tui,
 };
 
 #[derive(Parser)]
@@ -17,6 +17,9 @@ use crate::{
     about = "Terminal-first agent harness for local coding workflows"
 )]
 struct Cli {
+    /// Shell isolation: workspace-write (default), read-only, or unrestricted
+    #[arg(long, global = true, value_enum)]
+    sandbox: Option<ExecutionMode>,
     #[command(subcommand)]
     command: Option<Commands>,
     /// Run a natural-language task directly (defaults to build mode)
@@ -125,10 +128,14 @@ enum Commands {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = std::env::current_dir()?;
+    let execution_mode = match cli.sandbox {
+        Some(mode) => mode,
+        None => ExecutionMode::from_env()?,
+    };
     if cli.command.is_none() {
         ensure_api_key(false)?;
         if cli.prompt.is_empty() {
-            return tui::run(root, None);
+            return tui::run_with_mode(root, None, execution_mode);
         }
         let prompt = cli.prompt.join(" ");
         let mode = if cli.plan {
@@ -136,7 +143,7 @@ pub fn run() -> Result<()> {
         } else {
             AgentMode::Build
         };
-        print_prompt_result(&root, &prompt, mode, cli.session.as_deref())?;
+        print_prompt_result(&root, &prompt, mode, cli.session.as_deref(), execution_mode)?;
         return Ok(());
     }
     match cli.command.expect("command checked above") {
@@ -150,7 +157,7 @@ pub fn run() -> Result<()> {
             println!("valid task: {} ({} steps)", task.name, task.steps.len())
         }
         Commands::Run { task } => {
-            let summary = run_task(&read_task(&task)?, &root)?;
+            let summary = run_task_with_mode(&read_task(&task)?, &root, execution_mode)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
             ensure_success(&summary)?;
         }
@@ -161,6 +168,7 @@ pub fn run() -> Result<()> {
                 &prompt.join(" "),
                 AgentMode::Plan,
                 session.as_deref(),
+                execution_mode,
             )?
         }
         Commands::Build { prompt, session } => {
@@ -170,6 +178,7 @@ pub fn run() -> Result<()> {
                 &prompt.join(" "),
                 AgentMode::Build,
                 session.as_deref(),
+                execution_mode,
             )?
         }
         Commands::Runs { limit } => {
@@ -224,7 +233,7 @@ pub fn run() -> Result<()> {
         }
         Commands::Tui => {
             ensure_api_key(false)?;
-            tui::run(root, None)?
+            tui::run_with_mode(root, None, execution_mode)?
         }
         Commands::Resume { session_id } => {
             ensure_api_key(false)?;
@@ -232,7 +241,7 @@ pub fn run() -> Result<()> {
             let session = workspace
                 .session(&session_id)?
                 .with_context(|| format!("session not found: {session_id}"))?;
-            tui::run(root, Some(session.session_id))?
+            tui::run_with_mode(root, Some(session.session_id), execution_mode)?
         }
         Commands::Diff { run_id } => diff(&root, &run_id)?,
         Commands::Artifacts { run_id } => artifacts(&root, &run_id)?,
@@ -355,11 +364,12 @@ fn print_prompt_result(
     prompt: &str,
     mode: AgentMode,
     session_id: Option<&str>,
+    execution_mode: ExecutionMode,
 ) -> Result<()> {
     let task = prompt_to_task(prompt, mode);
     let summary = match session_id {
-        Some(session_id) => run_task_in_session(&task, root, session_id)?,
-        None => run_task(&task, root)?,
+        Some(session_id) => run_task_in_session_with_mode(&task, root, session_id, execution_mode)?,
+        None => run_task_with_mode(&task, root, execution_mode)?,
     };
     if let Some(content) = latest_model_reply(root, &summary.run_id)? {
         println!("{content}");
@@ -443,6 +453,7 @@ fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::StepSpec;
+    use crate::run_task;
     use std::{collections::HashMap, fs, thread, time::Duration};
     use tempfile::tempdir;
 
@@ -508,6 +519,15 @@ mod tests {
             Some(Commands::Plan { prompt, .. }) => assert_eq!(prompt.join(" "), "fix the bug"),
             _ => panic!("expected the plan subcommand"),
         }
+    }
+
+    #[test]
+    fn sandbox_flag_parses_for_direct_and_subcommand_runs() {
+        let direct = Cli::try_parse_from(["ha", "--sandbox", "read-only", "inspect"]).unwrap();
+        assert_eq!(direct.sandbox, Some(ExecutionMode::ReadOnly));
+        let task =
+            Cli::try_parse_from(["ha", "run", "task.json", "--sandbox", "unrestricted"]).unwrap();
+        assert_eq!(task.sandbox, Some(ExecutionMode::Unrestricted));
     }
 
     #[test]

@@ -1,12 +1,10 @@
 //! Rejection of shell commands that would damage the machine.
 //!
-//! This is a denylist over parsed shell words, **not** a sandbox. The harness
-//! hands the command to a real shell with the user's privileges, so a command
-//! that is not recognised here still runs. What it catches is the class of
-//! accident a model talks itself into: erasing the filesystem root or the home
-//! directory, formatting a disk, piping a download into a shell, escalating
-//! with `sudo`. Command-line runs have no approval prompt, so this check is
-//! their only guard; the TUI additionally asks before every `bash` call.
+//! This is a denylist over parsed shell words. In the default execution mode,
+//! Linux Landlock also restricts shell writes and TCP access. This parser
+//! catches common accidents before process creation; it does not replace that
+//! OS boundary. Unrestricted mode skips both checks explicitly. The TUI also
+//! asks before every `bash` call.
 
 use std::path::{Component, Path};
 
