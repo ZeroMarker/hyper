@@ -29,7 +29,7 @@ flowchart LR
 | [`cli.rs`](../src/cli.rs)、[`tui/`](../src/tui/) | 命令解析、交互界面、任务入口、结果展示 |
 | [`model.rs`](../src/model.rs) | 任务、步骤、事件、摘要及会话的数据结构和校验 |
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
-| [`deepseek.rs`](../src/deepseek.rs) | API 配置、协议选择、请求与响应转换 |
+| [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
 | [`workspace.rs`](../src/workspace.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
 | [`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) | 命令检查、Linux Landlock、子进程资源限制 |
 | [`approval.rs`](../src/approval.rs)、[`event_sink.rs`](../src/event_sink.rs) | TUI 与工作线程之间的审批和状态传递 |
@@ -44,15 +44,15 @@ flowchart LR
 3. 写入 `run.started`，依序执行步骤。每一步有 `step.started`，完成时写 `step.finished`；失败时写失败事件并停止后续步骤。
 4. 写入终态事件和 `summary.json`；会话任务随后追加助手消息。运行锁随执行结束释放。
 
-以 `bash:`、`read:`、`search:`、`write:`、`edit:` 开头的指令直接调用对应工具。其他指令进入最多 12 轮的模型工具循环。模型能看到工作区文件清单及部分文件摘录（总体约 64 KB、单文件约 6 KB），并获得步骤允许的工具定义。模型发出的调用按顺序执行，结果作为 `tool` 消息送回；白名单会在执行时再次检查。工具观察文本最长约 4 KB。
+以 `bash:`、`read:`、`search:`、`write:`、`edit:` 开头的指令直接调用对应工具。其他指令进入最多 12 轮的模型工具循环。模型能看到工作区文件清单及部分文件摘录（摘录使用约 64 KB 的目标预算、单文件最多约 6 KB），并获得步骤允许的工具定义。文件清单和用户提示会另占空间，整个模型输入没有严格的 64 KB 上限。模型发出的调用按顺序执行，结果作为 `tool` 消息送回；白名单会在执行时再次检查。工具观察文本最长约 4 KB。
 
-每个事件先追加到 `events.jsonl`，再写入 SQLite，最后将简短状态送往 TUI。TUI 使用工作线程运行任务，主线程处理输入与绘制；状态队列最多保留 128 条，完整记录仍在事件文件中。TUI 的 `bash`、`write`、`edit` 经审批门等待用户响应，超时 600 秒视为拒绝。没有审批门的 CLI 调用不经过这一交互审批。
+每个事件先追加到 `events.jsonl`，再写入 SQLite，最后送往 TUI。TUI 使用工作线程运行任务，主线程处理输入与绘制；简短状态队列最多保留 128 条，增量模型文本另有 128 KiB 的显示缓冲，完整事件仍在事件文件中。TUI 的 `bash`、`write`、`edit` 经审批门等待用户响应，超时 600 秒视为拒绝。没有审批门的 CLI 调用不经过这一交互审批。
 
 ## 模型配置与协议
 
 配置优先级为 `DEEPSEEK_*` 环境变量、用户配置目录中的 `hyper/config.json`、内置默认值。`ha config` 维护 API key、base URL 和模型；Unix 下配置文件仅允许所有者访问。默认服务是 DeepSeek，模型为 `deepseek-v4-flash`。API key 不写入 `model.*` 事件。
 
-内部消息采用中立的聊天消息结构；适配层支持 Chat Completions、Responses、Messages 三类 HTTP 协议。`DEEPSEEK_PROTOCOL` 可显式指定；OpenCode 端点会按模型名前缀选择协议，其他端点默认使用 Chat Completions。请求按步骤共享会话标识，响应一次性读取；可重试的网络错误及部分 HTTP 状态最多尝试 3 次。
+内部消息采用中立的聊天消息结构；适配层支持 Chat Completions、Responses、Messages 三类 HTTP 协议。`DEEPSEEK_PROTOCOL` 可显式指定；OpenCode 端点会按模型名前缀选择协议，其他端点默认使用 Chat Completions。请求按步骤共享会话标识。模型循环使用 SSE 逐块读取响应，文本分片写入 `model.delta` 并送到 TUI；普通 JSON 响应也能读取。工具参数接收完整且协议结束后才执行。连接建立前的网络错误及部分 HTTP 状态最多尝试 3 次；流已开始后发生断流则报错，不重发已输出的内容。
 
 ## 本地持久化
 
@@ -87,6 +87,6 @@ flowchart LR
 
 ## 修改入口与验证
 
-新增任务字段或事件格式时，先修改 [`model.rs`](../src/model.rs)，再核对 [`engine.rs`](../src/engine.rs) 的写入与 replay、[`workspace.rs`](../src/workspace.rs) 的恢复逻辑及 CLI 展示。新增模型协议时在 [`deepseek.rs`](../src/deepseek.rs) 做消息转换；新增工具时同时更新工具说明、实际调用白名单、策略检查和事件记录。改变 Shell 隔离时核对 [`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) 及跨平台失败行为。
+新增任务字段或事件格式时，先修改 [`model.rs`](../src/model.rs)，再核对 [`engine.rs`](../src/engine.rs) 的写入与 replay、[`workspace.rs`](../src/workspace.rs) 的恢复逻辑及 CLI 展示。新增模型协议时核对 [`deepseek.rs`](../src/deepseek.rs) 的消息转换与 [`deepseek/stream.rs`](../src/deepseek/stream.rs) 的流式解析；新增工具时同时更新工具说明、实际调用白名单、策略检查和事件记录。改变 Shell 隔离时核对 [`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) 及跨平台失败行为。
 
 仓库 CI 执行格式检查、Clippy 和测试；本地对应命令为 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`。发布工作流构建多平台二进制并打包 npm 发行物。

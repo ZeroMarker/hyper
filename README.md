@@ -93,8 +93,9 @@ export DEEPSEEK_MODEL="deepseek-v4-pro"               # default: deepseek-v4-fla
 
 ## Providers
 
-Any OpenAI-compatible chat-completions service works: point `DEEPSEEK_BASE_URL`
-(or the stored `base_url`) at it and set the model. DeepSeek is the default.
+For a chat-completions service that accepts Bearer authentication and Hyper's
+request format, point `DEEPSEEK_BASE_URL` (or the stored `base_url`) at it and
+set the model. DeepSeek is the default.
 
 ### OpenCode Go
 
@@ -111,9 +112,10 @@ Or store the same three values once with `ha config` and drop the exports.
 OpenCode Go requires every request to identify its conversation in
 `x-opencode-session`; Hyper sends one id per step (all turns of that step share
 it) and identifies itself as `hyper/<version>` rather than as its HTTP library.
-Runs against a non-DeepSeek endpoint record that in the audit log: the
-`model.*` events carry `"provider": "opencode-go"`, the base URL and the
-protocol, so a run is never filed as a DeepSeek call it did not make.
+Runs against a non-DeepSeek endpoint record that in the audit log:
+`model.started` carries the provider, base URL, and protocol. `model.finished`
+also carries the provider, so a run is not filed as a DeepSeek call it did not
+make.
 
 ### Protocols
 
@@ -135,8 +137,9 @@ gateway that maps models differently:
 export DEEPSEEK_PROTOCOL="messages"   # chat | responses | messages
 ```
 
-The value in the configuration file, written by `ha config`, is used the same
-way, and the environment wins over it. An unrecognised name is rejected rather
+An optional `protocol` value in the configuration file is used the same way;
+`ha config` preserves an existing value but does not prompt for one. The
+environment wins over the file. An unrecognised name is rejected rather
 than silently ignored. Each model's protocol is recorded in the run's
 `model.started` event, so a surprising answer is always traceable to the
 endpoint it came from.
@@ -227,8 +230,9 @@ run does not finish, so CI can rely on the exit status; the run summary is still
 printed on stdout. Subcommand prompts may be passed unquoted as several words:
 `ha plan fix the login bug` is the same as `ha -p "fix the login bug"`.
 
-The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
-`Enter` to submit, arrow keys to select runs, and `Esc` to exit. Slash commands:
+The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode (or
+complete a slash command), `Enter` to submit, arrow keys to scroll or choose a
+slash-command suggestion, and `Esc` to exit. Slash commands:
 `/help`, `/runs`, `/session`, `/mode plan|build`, `/new`, and `/quit`. `/runs`
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
@@ -353,8 +357,8 @@ an event that reached the files cannot stay unrecorded.
 
 - `bash` drains stdout and stderr while the command runs, so a command that
   prints more than the OS pipe capacity cannot deadlock. The event keeps at
-  most 256 KB per stream — it sets `truncated` and reports the real byte
-  counts — while the reader holds up to 4 MB per stream so the output can be
+  most 256 KiB per stream — it sets `truncated` and reports the real byte
+  counts — while the reader holds up to 4 MiB per stream so the output can be
   filed under `artifacts/` instead. Past that cap the bytes are dropped as they
   arrive, so a runaway command cannot exhaust memory.
 - A command that exceeds its timeout is killed as a whole process group and
@@ -371,11 +375,11 @@ an event that reached the files cannot stay unrecorded.
   memory cap.
 - `ha artifacts` lists `runs/<run-id>/artifacts/`, which every `bash` call
   writes to: one file per non-empty stream, named
-  `<step>-<index>-bash-stdout.log` (up to 4 MB each, with a marker where it was
-  cut short). That is where the tail of a failing build lives, since the event
-  only keeps the head. `read` results are not copied — the whole file is still
-  in the workspace — and the observations handed to a model are derived from
-  payloads that are already in the log.
+  `<step>-<index>-bash-stdout.log` (up to 4 MiB each, with a marker where it was
+  cut short). For output between 256 KiB and 4 MiB, the artifact retains text
+  omitted from the event. Output beyond 4 MiB is not retained. `read` results
+  are not copied — the whole file is still in the workspace — and the
+  observations handed to a model are derived from payloads already in the log.
 - The dangerous-command check is a **lightweight denylist over shell words**
   alongside the default Linux shell boundary. It rejects common accidents:
   `rm`/`shred`/`chmod` and redirections aimed at `/`, the home directory, the workspace root

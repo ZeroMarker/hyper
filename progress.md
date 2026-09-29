@@ -27,7 +27,7 @@
 
 代码审查加实测发现的缺陷，已全部修复并补上回归测试：
 
-- [x] **`bash` 管道死锁（严重）**：stdout/stderr 原先在子进程退出后才读取，命令输出超过管道容量（Linux 约 64KB）时双方互锁，只能等到超时被杀。现在边运行边抽干两条管道，每路最多保留 256KB（超出部分丢弃并标记 `truncated`），读写均在 `capture()` 中完成。
+- [x] **`bash` 管道死锁（严重）**：stdout/stderr 原先在子进程退出后才读取，命令输出超过管道容量（Linux 约 64 KiB）时双方互锁，只能等到超时被杀。现在边运行边抽干两条管道；当前每路最多保留 4 MiB，其中 256 KiB 进入事件，超出保留量的部分丢弃并标记 `truncated`。
 - [x] **超时与普通失败不可区分**：超时现在记录 `"timedOut": true`，失败信息为 `command ... timed out after Nms and was killed`，`errorType` 为 `TimeoutError` 且 `retryable` 为 true。
 - [x] **失败任务退出码为 0**：`ha run` / `ha plan` / `ha build` / 直接 prompt 在 run 未 finished 时以退出码 1 结束（stdout 仍打印 summary）。
 - [x] **`write:` 缺内容行会静默清空文件**：缺少内容行直接报错；`write:a.txt\n` 仍表示写入空文件。同时 `write:` / `edit:` 内容改用未 trim 的原始 instruction，避免尾部换行被吃掉。
@@ -74,7 +74,7 @@ export DEEPSEEK_BASE_URL="https://opencode.ai/zen/go/v1"
 export DEEPSEEK_MODEL="deepseek-v4-flash"   # 或 deepseek-v4-pro
 ```
 
-请求头：`x-opencode-session: hyper-<id>`（每个 step 一个，同一步的多轮共享，OpenCode Go 缺此头返回 400 `MissingSessionID`）、`User-Agent: hyper/<version>`。`model.started` / `model.finished` 事件记录实际 provider（`deepseek` / `opencode-go` / 其他主机名）、base URL 与 protocol。
+请求头：`x-opencode-session: hyper-<id>`（每个 step 一个，同一步的多轮共享，OpenCode Go 缺此头返回 400 `MissingSessionID`）、`User-Agent: hyper/<version>`。`model.started` 记录实际 provider（`deepseek` / `opencode-go` / 其他主机名）、base URL 与 protocol；`model.finished` 记录 provider 和最终响应。
 
 ### 协议选择
 
@@ -84,7 +84,7 @@ export DEEPSEEK_MODEL="deepseek-v4-flash"   # 或 deepseek-v4-pro
 | `responses` | `{base}/responses` | `Authorization: Bearer` | Grok、GPT、Muse Spark |
 | `messages` | `{base}/messages` | `x-api-key` + `anthropic-version: 2023-06-01` | MiniMax、Qwen3.6 Plus / 3.7 / 3.8 |
 
-`DEEPSEEK_PROTOCOL`（环境变量）> 配置文件 `protocol` > 自动探测。探测仅对 opencode.ai 主机按模型家族生效，其他主机固定 `chat`。三个协议共用重试/背压/Usage 映射，差异只在 `chat_messages` 内部翻译；中性消息格式仍是 OpenAI chat 形状。
+`DEEPSEEK_PROTOCOL`（环境变量）> 配置文件 `protocol` > 自动探测。探测仅对 opencode.ai 主机按模型家族生效，其他主机固定 `chat`。三个协议共用重试与状态码分类；消息转换在 `deepseek.rs`，SSE 解析在 `deepseek/stream.rs`。中性消息格式仍是 OpenAI chat 形状。
 
 ## 会话（多轮上下文）
 
@@ -99,7 +99,7 @@ export DEEPSEEK_MODEL="deepseek-v4-flash"   # 或 deepseek-v4-pro
 ## Replay、artifacts 与保留
 
 - `hyper replay <run-id>` 按 `task.json` + `events.jsonl` 重建该 run 发给模型的完整 messages 并输出 JSON——system、会话前缀、本次 `input`、每轮 assistant 消息与紧随其后的 observation，即**最后一次请求实际携带的 messages**。会话前缀取 transcript 中本 run 之前的部分（会话被 `forget` 则为空，run 自身的记录仍完整）；缺字段的旧格式 run 报错拒绝而非猜造。
-- 为可重建补上的事件字段：`model.started.input`（实际发送的用户消息，含 workspace context，上限 64 KB）、`model.tool_calls.message`（整轮 assistant 消息，含 `content` 与 `tool_calls`；原有 `calls` 摘要保留）、`model.observation`（`turn`/`callId`/`tool`/`observation`）。观测的派生逻辑抽成纯函数 `observation()`。
+- 为可重建补上的事件字段：`model.started.input`（实际发送的用户消息，含 workspace context；文件摘录有约 64 KB 的目标预算，但整个输入没有严格上限）、`model.tool_calls.message`（整轮 assistant 消息，含 `content` 与 `tool_calls`；原有 `calls` 摘要保留）、`model.observation`（`turn`/`callId`/`tool`/`observation`）。观测的派生逻辑抽成纯函数 `observation()`。
 - `bash` 输出落盘：每路最多 4 MB 写入 `runs/<id>/artifacts/<step>-<index>-bash-stdout.log`（空流不建文件，超量尾部加截断 marker），事件仍只存 256 KB，并以 `stdoutArtifact`/`stderrArtifact` 指向文件——模型的 observation 里也能看到路径。`ha artifacts` 从此有内容。
 - 保留策略：`hyper prune --keep <N> [--runs] [--dry-run]`——会话按 `updated_at`、run 按 `started_at` 只留最近 N 个；`--runs` 连事件、artifacts、checkpoint 一起删；持锁的运行中 run 永不作为候选。
 - 索引兜底：`Workspace::open` 先 `reconcile_events()` 再 `reconcile_stale_runs()`，用 JSONL 补齐缺失的 run 行（`task.json` + 首个事件）与事件，常态只比对行数不解析日志；`insert_event` 由 `INSERT OR REPLACE` 改 `INSERT OR IGNORE`，避免重复插入换 rowid、让时间戳相同的事件在 `ORDER BY timestamp,rowid` 下重排。
@@ -121,13 +121,13 @@ Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败�
 
 本轮（replay/artifacts/prune/兜底重建）新增覆盖：`hyper replay` 的 messages 与 stub 实收请求体**逐字节相等**（system、user、assistant、tool 四条消息的 role 与 `tool_call_id` 全对）、事件新增字段确实落盘、旧格式 run 被拒绝且缺 run 行也能从日志重建；`bash` 大输出的 artifact 保留尾部而事件仍是 256 KB、`stdoutArtifact` 路径正确、空流不建文件、`ha artifacts` 列表；索引整表丢失后从 JSONL 重建（run 行、task 名、`finished` 状态、事件条数与首尾顺序）；`prune --dry-run` 只报告不删、会话与 run 各按 keep 保留最近的、持锁的运行中 run 不被 prune。
 
-当前测试数量：44 单元 + 43 集成（run.rs）+ 5 集成（task.rs），全部通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。
+截至 2026-09-29：48 单元 + 43 集成（run.rs）+ 5 集成（task.rs）通过；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 均干净。此数字是当时快照，后续以测试命令输出为准。
 
 2026-09-29：Linux `bash` 新增 `RLIMIT_AS`、`RLIMIT_FSIZE`、`RLIMIT_CPU`，默认分别是 8 GiB 虚拟地址空间、单文件 1 GiB、wall timeout 向上取整加 2 秒 CPU 时间。任务步骤可在 `limits` 中覆盖三个值；`tool.started`/`tool.finished` 记录预算，CPU 或文件超限写 `ResourceLimitError`。测试覆盖内存上限继承、1 MiB 文件上限、1 秒 CPU 上限以及非法零值。这些上限按进程生效，不是 cgroup 总配额。
 
 2026-09-29：增加 `src/sandbox.rs` 的 Linux Landlock 边界。默认 `workspace-write` 允许 shell 在工作区内写入，限制工作区外写入与 TCP bind/connect；`read-only` 禁止工具写入和 shell 写入；`unrestricted` 需显式选择，跳过 shell 隔离和危险命令解析。CLI 的 `--sandbox` 与 `HYPER_SANDBOX` 也作用于 TUI；模式记录在 `run.started`，TUI 标题展示当前模式。策略拒绝写 `tool.denied`（工具、目标、原因），交互确认写 `tool.approval`。集成测试覆盖符号链接、子 shell、工作区内写入、工作区外写入、TCP、显式模式和审计事件。剩余限制见 `todo.md`：Landlock 不能隔离全部网络与 metadata 操作，非 Linux 尚无原生 shell 隔离。
 
-真实端点与真实 TUI 手工验证（OpenCode Go）：
+此前非流式版本的真实端点与真实 TUI 手工验证（OpenCode Go）：
 
 - 三协议各一轮对话与带工具续跑：`deepseek-v4-flash`（chat）、`grok-4.6`（responses）、`minimax-m2.5`（messages）均成功；强制错协议（grok+chat、minimax+responses）以 503 `Endpoint is unavailable` 失败，证明探测必要。
 - `model.started` 事件分别记录 `protocol=chat|messages|responses`。
@@ -136,4 +136,4 @@ Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败�
 
 GitHub Actions 在 `main` 分支和 Pull Request 上自动运行 fmt/clippy/test/release 构建（`.github/workflows/ci.yml`）。
 
-2026-09-29：agent loop 的三种协议改用 SSE。Chat 累积 `tool_calls` 参数分片，Messages 累积 `tool_use` 的 JSON 分片，Responses 在 `response.completed` 取完整结果；收到文本即写 `model.delta` 并送到 TUI 实时显示。断流缺完成标记报错，未完成的工具参数不会执行；返回普通 JSON 的服务端仍可用。新增本地分段 SSE 测试，确认首块在连接结束前抵达回调，以及三协议工具调用和用量重建。
+2026-09-29：agent loop 的三种协议改用 SSE。Chat 累积 `tool_calls` 参数分片，Messages 累积 `tool_use` 的 JSON 分片，Responses 在 `response.completed` 取完整结果；收到文本即写 `model.delta` 并送到 TUI 实时显示。断流缺完成标记报错，未完成的工具参数不会执行；返回普通 JSON 的服务端仍可用。新增本地分段 SSE 测试，确认首块在连接结束前抵达回调，以及三协议工具调用和用量重建。尚未对改动后的流式路径进行真实服务端点或真实 TUI 手工验证。
