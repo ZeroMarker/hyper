@@ -70,8 +70,8 @@ ha -p "analyze the bug"  # plan mode
 
 On the first `ha` launch, Hyper prompts for the provider API key and stores it,
 along with the API base URL and the model, in the user configuration directory
-with owner-only permissions. Run `ha config` to replace any of the three; the
-base URL and model prompts accept their defaults with a bare Enter.
+with owner-only permissions. Run `ha config` to update them. A bare Enter keeps
+the stored API key, base URL, or model; a new key is entered without echoing it.
 
 Environment variables override the stored file, which overrides the defaults,
 so CI needs no configuration file:

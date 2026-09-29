@@ -32,6 +32,8 @@ environment wins over the stored file. To use a subscription such as OpenCode
 Go, set the base URL to `https://opencode.ai/zen/go/v1`; Hyper then picks the
 right wire protocol per model, or takes `DEEPSEEK_PROTOCOL`
 (`chat` / `responses` / `messages`) when you want to be explicit.
+Running `hyper config` again lets you change any value; press Enter at the key
+prompt to keep the stored key.
 
 Prompts can continue a conversation, which is what lets a follow-up refer to the
 previous answer:

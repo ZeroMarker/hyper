@@ -744,6 +744,36 @@ fn cli_uses_the_stored_provider_configuration() {
     );
 }
 
+#[test]
+fn cli_reports_configuration_errors_without_prompting_for_a_key() {
+    let dir = tempdir().unwrap();
+    let config_home = dir.path().join("config");
+    let config_file = config_home.join("hyper").join("config.json");
+    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+
+    for (contents, expected) in [
+        ("{invalid", "invalid configuration file"),
+        (
+            r#"{"deepseek_api_key":"stored-key","protocol":"typo"}"#,
+            "unknown protocol",
+        ),
+    ] {
+        fs::write(&config_file, contents).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(["plan", "hello"])
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("DEEPSEEK_PROTOCOL")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("API key is not configured"), "{error}");
+    }
+}
+
 /// A stub model server: it answers each request with the next fixed reply and
 /// records the bodies it received, so a test can assert exactly what the model
 /// was told.

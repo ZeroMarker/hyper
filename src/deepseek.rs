@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -306,22 +306,43 @@ pub fn endpoint(base_url: &str, protocol: Protocol) -> String {
 /// place. The key stays hidden while it is typed; the base URL and the model are
 /// shown with the defaults a bare Enter accepts.
 pub fn ensure_api_key(force: bool) -> Result<()> {
-    if !force && DeepSeekConfig::from_env().is_ok() {
-        return Ok(());
+    let path = config_path()?;
+    let stored = read_stored_config(&path)?.unwrap_or_default();
+    if !force {
+        let has_key = env::var("DEEPSEEK_API_KEY")
+            .ok()
+            .is_some_and(|key| !key.trim().is_empty())
+            || !stored.deepseek_api_key.trim().is_empty();
+        if has_key {
+            // Surface malformed settings instead of treating every error as a
+            // missing key and opening the first-run wizard.
+            resolve_settings(|key| env::var(key).ok(), Some(stored))?;
+            return Ok(());
+        }
     }
     if !std::io::stdin().is_terminal() {
+        if force {
+            bail!("`hyper config` requires an interactive terminal")
+        }
         bail!(
-            "DeepSeek API key is not configured; run `hyper config` in a terminal or set DEEPSEEK_API_KEY"
+            "provider API key is not configured; run `hyper config` in a terminal or set DEEPSEEK_API_KEY"
         )
     }
-    println!("首次使用需要配置模型服务的 API Key。");
-    println!("配置将保存在本机用户配置目录，输入内容不会显示。");
-    let key = rpassword::prompt_password("API Key: ")?;
-    let key = key.trim();
+    println!("配置模型服务的 API Key、地址和模型。");
+    println!("配置将保存在本机用户配置目录，密钥输入内容不会显示。");
+    let key = rpassword::prompt_password(if stored.deepseek_api_key.trim().is_empty() {
+        "API Key: "
+    } else {
+        "API Key（留空保留已有密钥）: "
+    })?;
+    let key = if key.trim().is_empty() {
+        stored.deepseek_api_key.trim()
+    } else {
+        key.trim()
+    };
     if key.is_empty() {
         bail!("API key must not be empty")
     }
-    let stored = read_stored_config(&config_path()?)?.unwrap_or_default();
     let base_url = prompt_line(
         "API base URL",
         stored.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
@@ -340,7 +361,6 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     let protocol = resolve_protocol(configured.clone(), &base_url, &model)?;
-    let path = config_path()?;
     save_config(
         &path,
         &StoredConfig {
@@ -397,12 +417,20 @@ fn save_config(path: &Path, config: &StoredConfig) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_vec_pretty(config)?;
-    fs::write(path, content)?;
+    // Write into a private file and replace the old configuration only after
+    // the entire JSON document is ready. NamedTempFile uses owner-only access.
+    let parent = path.parent().context("configuration path has no parent")?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    pending.write_all(&content)?;
+    pending.flush()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        pending
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    pending.persist(path)?;
     Ok(())
 }
 
