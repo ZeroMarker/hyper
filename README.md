@@ -233,8 +233,9 @@ The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode,
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
 
-While a task runs, the TUI shows its recent event stream below the conversation
-(up to 12 brief updates). The complete events remain in `events.jsonl`.
+While a task runs, the TUI shows streamed model text and its recent event stream
+(up to 12 brief updates). The complete events, including `model.delta` text
+chunks, remain in `events.jsonl`.
 
 In the TUI, `bash`, `write` and `edit` actions ask for **interactive
 approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent

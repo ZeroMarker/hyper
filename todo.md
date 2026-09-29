@@ -40,7 +40,7 @@
 
 ### 可观测性
 - [x] **实时展示运行中的 event stream**：`EventWriter::write` 在事件持久化后推送简短状态到有界 `EventSink`，TUI 每帧 drain 并保留最近 12 条；重复状态合并。聊天 markdown 只在新消息加入时解析并缓存，事件内容不会把大 payload 复制进 UI 队列。
-- [ ] streaming 响应（SSE）：三个协议目前都是 `stream: false` + 整体读取响应。blocking `Response` 实现了 `Read`，可自行解析 SSE，但流式 tool_calls/`function_call`/`tool_use` 分片需要按协议分别累积。价值依赖「实时展示」——否则流没有出口。
+- [x] streaming 响应（SSE）：agent loop 的 Chat、Responses、Messages 请求现在使用流式响应；文本分片写入 `model.delta` 事件并实时显示在 TUI。Chat 的 `tool_calls` 和 Messages 的 `tool_use` 参数按分片累积，Responses 从完成事件取完整 `function_call`；缺少协议完成标记时失败，不执行残缺的工具调用。服务端返回普通 JSON 时兼容读取。CLI 的机器可读实时 JSONL 模式仍是独立后续工作。
 
 ### 工程健壮性
 - [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。

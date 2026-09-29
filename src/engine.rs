@@ -17,7 +17,7 @@ use wait_timeout::ChildExt;
 
 use crate::{
     approval::ApprovalGate,
-    deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages, system_prompt},
+    deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt},
     event_sink::EventSink,
     model::*,
     policy,
@@ -251,7 +251,17 @@ fn agent(
     messages.push(json!({ "role": "user", "content": input }));
     let specs = tool_specs_for(step);
     for turn in 0..MAX_TURNS {
-        let reply = chat_messages(&config, &messages, Some(&specs))?;
+        let reply = chat_messages_stream(&config, &messages, Some(&specs), &mut |content| {
+            if !content.is_empty() {
+                events.write(
+                    "model.delta",
+                    json!({"turn":turn,"content":content}),
+                    Some(&step.id),
+                    Some(index),
+                )?;
+            }
+            Ok(())
+        })?;
         events.write(
             "model.iteration",
             json!({"turn":turn,"model":reply.model,"usage":reply.usage}),

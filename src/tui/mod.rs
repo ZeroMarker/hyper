@@ -31,6 +31,7 @@ pub struct App {
     pub rendered: Vec<Line<'static>>,
     pub rendered_count: usize,
     pub event_tail: VecDeque<String>,
+    pub live_text: String,
     pub busy: bool,
     pub quit: bool,
     pub scroll: u16,
@@ -76,6 +77,7 @@ impl App {
             rendered: Vec::new(),
             rendered_count: 0,
             event_tail: VecDeque::new(),
+            live_text: String::new(),
             busy: false,
             quit: false,
             scroll: 0,
@@ -107,6 +109,7 @@ impl App {
                 self.rendered.clear();
                 self.rendered_count = 0;
                 self.event_tail.clear();
+                self.live_text.clear();
                 if let Some(previous) = self.session.take() {
                     self.output.push(format!(
                         "Hyper\n{} `{previous}`. {} `hyper session {previous}`.",
@@ -176,6 +179,7 @@ impl App {
                 self.output.push(format!("You\n{value}"));
                 self.approvals.clear();
                 self.event_tail.clear();
+                self.live_text.clear();
                 let gate = ApprovalGate::new();
                 self.gate = Some(gate.clone());
                 let sink = EventSink::new();
@@ -301,6 +305,15 @@ impl App {
             }
         }
         if let Some(sink) = &self.sink {
+            self.live_text.push_str(&sink.take_text());
+            const MAX_LIVE_TEXT: usize = 128 * 1024;
+            if self.live_text.len() > MAX_LIVE_TEXT {
+                let mut drop = self.live_text.len() - MAX_LIVE_TEXT;
+                while !self.live_text.is_char_boundary(drop) {
+                    drop += 1;
+                }
+                self.live_text.drain(..drop);
+            }
             for line in sink.drain() {
                 // Repeated model iterations can arrive faster than a redraw.
                 if self.event_tail.back() != Some(&line) {
@@ -317,6 +330,7 @@ impl App {
                     self.busy = false;
                     self.approvals.clear();
                     self.sink = None;
+                    self.live_text.clear();
                     self.follow_tail = true;
                     self.scroll = 0;
                     self.output.push(format!(

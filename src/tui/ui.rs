@@ -71,6 +71,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     let mut chat = app.rendered.clone();
+    if app.busy && !app.live_text.is_empty() {
+        chat.push(Line::styled(
+            "Hyper",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+        chat.extend(app.live_text.lines().map(|line| Line::raw(line.to_owned())));
+        chat.push(Line::from(""));
+    }
     if !app.event_tail.is_empty() {
         chat.push(Line::styled(
             "Events",

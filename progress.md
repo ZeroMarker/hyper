@@ -135,3 +135,5 @@ Rust 集成测试覆盖 task 校验、shell event、plan 只读、shell 失败�
 - 沙箱：`rm -rf /`、`sudo id`、`curl|sh`、`dd`、`sh -c "rm -rf /usr"` 全部 `PolicyError`；`cargo --version`、`rm -rf target`、`echo hi > out.txt` 正常执行。
 
 GitHub Actions 在 `main` 分支和 Pull Request 上自动运行 fmt/clippy/test/release 构建（`.github/workflows/ci.yml`）。
+
+2026-09-29：agent loop 的三种协议改用 SSE。Chat 累积 `tool_calls` 参数分片，Messages 累积 `tool_use` 的 JSON 分片，Responses 在 `response.completed` 取完整结果；收到文本即写 `model.delta` 并送到 TUI 实时显示。断流缺完成标记报错，未完成的工具参数不会执行；返回普通 JSON 的服务端仍可用。新增本地分段 SSE 测试，确认首块在连接结束前抵达回调，以及三协议工具调用和用量重建。

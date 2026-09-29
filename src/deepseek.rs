@@ -16,6 +16,11 @@ use serde_json::json;
 
 use crate::{AgentMode, i18n, workspace};
 
+mod stream;
+use stream::{stream_chat, stream_messages, stream_responses};
+
+type TextCallback<'a> = dyn FnMut(&str) -> Result<()> + 'a;
+
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -613,9 +618,25 @@ pub fn chat_messages(
     tools: Option<&[ToolSpec]>,
 ) -> Result<ModelReply> {
     match config.protocol {
-        Protocol::Chat => openai_chat(config, messages, tools),
-        Protocol::Responses => openai_responses(config, messages, tools),
-        Protocol::Messages => anthropic_messages(config, messages, tools),
+        Protocol::Chat => openai_chat(config, messages, tools, None),
+        Protocol::Responses => openai_responses(config, messages, tools, None),
+        Protocol::Messages => anthropic_messages(config, messages, tools, None),
+    }
+}
+
+/// Stream an agent turn. The callback receives text as soon as the provider
+/// sends it; a complete reply is returned only after the protocol's terminal
+/// event. Callers must not execute tool calls from incomplete argument chunks.
+pub fn chat_messages_stream(
+    config: &DeepSeekConfig,
+    messages: &[serde_json::Value],
+    tools: Option<&[ToolSpec]>,
+    on_text: &mut TextCallback<'_>,
+) -> Result<ModelReply> {
+    match config.protocol {
+        Protocol::Chat => openai_chat(config, messages, tools, Some(on_text)),
+        Protocol::Responses => openai_responses(config, messages, tools, Some(on_text)),
+        Protocol::Messages => anthropic_messages(config, messages, tools, Some(on_text)),
     }
 }
 
@@ -623,8 +644,13 @@ fn openai_chat(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
 ) -> Result<ModelReply> {
-    let mut body = json!({ "model": config.model, "messages": messages, "stream": false });
+    let streaming = on_text.is_some();
+    let mut body = json!({ "model": config.model, "messages": messages, "stream": streaming });
+    if streaming {
+        body["stream_options"] = json!({"include_usage":true});
+    }
     if let Some(tools) = tools {
         body["tools"] = json!(
             tools
@@ -639,6 +665,9 @@ fn openai_chat(
                 }))
                 .collect::<Vec<_>>()
         );
+    }
+    if let Some(on_text) = on_text {
+        return stream_chat(config, &body, on_text);
     }
     let response = post(config, &body)?;
     let parsed: ChatResponse = serde_json::from_str(&response)
@@ -700,6 +729,7 @@ fn openai_responses(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
 ) -> Result<ModelReply> {
     let (instructions, input) = responses_input(messages);
     let mut body = json!({
@@ -707,6 +737,9 @@ fn openai_responses(
         "input": input,
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     });
+    if on_text.is_some() {
+        body["stream"] = json!(true);
+    }
     if !instructions.is_empty() {
         body["instructions"] = json!(instructions);
     }
@@ -724,6 +757,9 @@ fn openai_responses(
                 }))
                 .collect::<Vec<_>>()
         );
+    }
+    if let Some(on_text) = on_text {
+        return stream_responses(config, &body, on_text);
     }
     let response = post(config, &body)?;
     let parsed: ResponsesResponse = serde_json::from_str(&response)
@@ -830,6 +866,7 @@ fn anthropic_messages(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
 ) -> Result<ModelReply> {
     let (system, turns) = messages_turns(messages);
     let mut body = json!({
@@ -838,6 +875,9 @@ fn anthropic_messages(
         // Required: without it the gateway rejects the request outright.
         "max_tokens": MAX_OUTPUT_TOKENS,
     });
+    if on_text.is_some() {
+        body["stream"] = json!(true);
+    }
     if !system.is_empty() {
         body["system"] = json!(system);
     }
@@ -853,6 +893,9 @@ fn anthropic_messages(
                 }))
                 .collect::<Vec<_>>()
         );
+    }
+    if let Some(on_text) = on_text {
+        return stream_messages(config, &body, on_text);
     }
     let response = post(config, &body)?;
     let parsed: MessagesResponse = serde_json::from_str(&response)

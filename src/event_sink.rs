@@ -6,12 +6,14 @@ use std::{
 use crate::model::HarnessEvent;
 
 const MAX_PENDING: usize = 128;
+const MAX_PENDING_TEXT: usize = 128 * 1024;
 
 /// A bounded handoff from the task worker to the TUI. The audit log remains
 /// authoritative; the UI can safely skip old updates if it falls behind.
 #[derive(Clone, Default)]
 pub struct EventSink {
     queue: Arc<Mutex<VecDeque<String>>>,
+    text: Arc<Mutex<String>>,
 }
 
 impl EventSink {
@@ -20,6 +22,24 @@ impl EventSink {
     }
 
     pub fn push(&self, event: &HarnessEvent) {
+        if event.event_type == "model.delta" {
+            if let Some(delta) = event
+                .payload
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+            {
+                let mut text = self.text.lock().expect("text queue poisoned");
+                text.push_str(delta);
+                if text.len() > MAX_PENDING_TEXT {
+                    let mut drop = text.len() - MAX_PENDING_TEXT;
+                    while !text.is_char_boundary(drop) {
+                        drop += 1;
+                    }
+                    text.drain(..drop);
+                }
+            }
+            return;
+        }
         let mut queue = self.queue.lock().expect("event queue poisoned");
         let line = event_line(event);
         if queue.back() == Some(&line) {
@@ -37,6 +57,10 @@ impl EventSink {
             .expect("event queue poisoned")
             .drain(..)
             .collect()
+    }
+
+    pub fn take_text(&self) -> String {
+        std::mem::take(&mut *self.text.lock().expect("text queue poisoned"))
     }
 }
 
