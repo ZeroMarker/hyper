@@ -13,6 +13,11 @@ DeepSeek is the default model provider for natural-language tasks. The default
 model is `deepseek-v4-flash` and the default endpoint is
 `https://api.deepseek.com`.
 
+## Documentation
+
+- [Program design](docs/design.md): modules, execution flow, storage, and boundaries.
+- [Plan](plan.md), [todo](todo.md), and [progress](progress.md): direction, pending work, and change history (Chinese).
+
 ## Install
 
 No Rust toolchain required — the npm package carries prebuilt binaries and only
@@ -170,11 +175,13 @@ trace is still there when you need it.
 `ha replay <run-id>` rebuilds the conversation a run sent to the model — the
 system prompt, the conversation prefix it replayed, the input it was given, and
 every assistant turn with the observations that followed it — and prints it as
-JSON. It is built only from the run's `task.json` and its own events, so
-nothing is sent to a provider and no file is touched, and the messages come out
-exactly as the last request carried them. A run recorded before those events
-carried their payloads is refused with an error rather than reconstructed from
-data that is not there.
+JSON. It uses the run's `task.json` and events, plus the session transcript for
+the conversation prefix. Replay makes no provider request and executes no
+tools, though opening the workspace may repair its SQLite index. If the session
+has been forgotten, replay omits that prefix. A run recorded before the events
+carried the necessary payloads is refused instead of being guessed from missing
+data. The system prompt comes from the current version of Hyper, so replay
+after a prompt change may differ from the original request.
 
 `ha prune --keep <N>` deletes every conversation but the N most recently
 updated, transcripts and registry rows included; `ha prune --runs --keep <N>`
