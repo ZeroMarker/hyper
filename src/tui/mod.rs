@@ -1,7 +1,7 @@
 mod ui;
 
 use crate::{
-    AgentMode, ApprovalGate, ApprovalRequest, EventSink, deepseek::DEFAULT_MODEL,
+    AgentMode, ApprovalGate, ApprovalRequest, EventSink, deepseek::DEFAULT_MODEL, i18n,
     latest_display_output, list_runs, prompt_to_task, run_task_in_session_with_updates, workspace,
 };
 use anyhow::Result;
@@ -63,7 +63,13 @@ impl App {
             input: String::new(),
             mode: AgentMode::Build,
             model,
-            output: vec!["Hyper\n你好，需要我帮你做什么？".into()],
+            output: vec![
+                i18n::text(
+                    "Hyper\nHi, how can I help?",
+                    "Hyper\n你好，需要我帮你做什么？",
+                )
+                .into(),
+            ],
             rendered: Vec::new(),
             rendered_count: 0,
             event_tail: VecDeque::new(),
@@ -100,26 +106,31 @@ impl App {
                 self.event_tail.clear();
                 if let Some(previous) = self.session.take() {
                     self.output.push(format!(
-                        "Hyper\n已开始新对话（上一段：`{previous}`，用 `hyper session {previous}` 查看）。"
+                        "Hyper\n{} `{previous}`. {} `hyper session {previous}`.",
+                        i18n::text("Started a new conversation. Previous:", "已开始新对话。上一段："),
+                        i18n::text("View it with", "可使用以下命令查看：")
                     ));
                 }
             }
             "/session" => {
                 let text = match (&self.session, &self.session_id) {
                     (Some(id), _) => format!(
-                        "Hyper\n当前对话：`{id}`（`hyper session {id}` 查看，`--session {id}` 继续）"
+                        "Hyper\n{} `{id}`. {} `hyper session {id}`; {} `--session {id}`.",
+                        i18n::text("Current conversation:", "当前对话："),
+                        i18n::text("View with", "查看："),
+                        i18n::text("continue with", "继续：")
                     ),
                     (None, Some(previous)) => {
-                        format!("Hyper\n当前尚未开始新对话。上一段：`{previous}`")
+                        format!("Hyper\n{} `{previous}`", i18n::text("No new conversation yet. Previous:", "尚未开始新对话。上一段："))
                     }
-                    (None, None) => "Hyper\n还没开始对话：发送一条消息即会创建。".into(),
+                    (None, None) => i18n::text("Hyper\nNo conversation yet. Send a message to start one.", "Hyper\n还没开始对话：发送一条消息即会创建。").into(),
                 };
                 self.output.push(text);
             }
             "/runs" => match list_runs(&self.root, 8) {
                 Ok(runs) if runs.is_empty() => self
                     .output
-                    .push("Hyper\n暂无运行记录。运行一个任务后会显示在这里。".into()),
+                    .push(i18n::text("Hyper\nNo runs yet. Run a task to see it here.", "Hyper\n暂无运行记录。运行一个任务后会显示在这里。").into()),
                 Ok(runs) => {
                     let lines = runs
                         .iter()
@@ -134,31 +145,27 @@ impl App {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    self.output.push(format!(
-                        "Hyper\n最近运行（`hyper show <run-id>` 查看详情）：\n{lines}"
-                    ));
+                    self.output.push(format!("Hyper\n{}\n{lines}", i18n::text("Recent runs (`hyper show <run-id>` for details):", "最近运行（`hyper show <run-id>` 查看详情）：")));
                 }
                 Err(error) => self
                     .output
-                    .push(format!("Hyper\n无法读取运行记录：{error}")),
+                    .push(format!("Hyper\n{} {error}", i18n::text("Could not read runs:", "无法读取运行记录："))),
             },
             "/config" => self.output.push(
-                "Hyper\n退出后运行 `hyper config` 可重新配置 API Key / base URL / model。".into(),
+                i18n::text("Hyper\nExit and run `hyper config` to update the API key, base URL, or model.", "Hyper\n退出后运行 `hyper config` 可重新配置 API Key / base URL / model。").into(),
             ),
             "/help" => self
                 .output
-                .push("Hyper\n输入 `/` 打开命令提示，使用 ↑↓ 选择、Tab 补全、Enter 执行。".into()),
+                .push(i18n::text("Hyper\nType `/` for commands. Use ↑↓ to select, Tab to complete, and Enter to run.", "Hyper\n输入 `/` 打开命令提示，使用 ↑↓ 选择、Tab 补全、Enter 执行。").into()),
             "/mode plan" => {
                 self.mode = AgentMode::Plan;
-                self.output.push("Hyper\n已切换到 **plan** 模式。".into());
+                self.output.push(i18n::text("Hyper\nSwitched to **plan** mode.", "Hyper\n已切换到 **plan** 模式。").into());
             }
             "/mode build" => {
                 self.mode = AgentMode::Build;
-                self.output.push("Hyper\n已切换到 **build** 模式。".into());
+                self.output.push(i18n::text("Hyper\nSwitched to **build** mode.", "Hyper\n已切换到 **build** 模式。").into());
             }
-            _ if value.starts_with('/') => self.output.push(format!(
-                "Hyper\n未知命令：`{value}`。输入 `/` 查看命令提示。"
-            )),
+            _ if value.starts_with('/') => self.output.push(format!("Hyper\n{} `{value}`. {}", i18n::text("Unknown command:", "未知命令："), i18n::text("Type `/` to see commands.", "输入 `/` 查看命令提示。"))),
             _ => {
                 self.busy = true;
                 self.follow_tail = true;
@@ -188,7 +195,7 @@ impl App {
                     )
                     .and_then(|summary| {
                         Ok(latest_display_output(&root, &summary.run_id)?
-                            .unwrap_or_else(|| format!("任务已{}。", summary.status)))
+                            .unwrap_or_else(|| format!("{} {}.", i18n::text("Task", "任务已"), summary.status)))
                     })
                     .map_err(|e| e.to_string());
                     let _ = tx.send(Message::Task(result));
@@ -219,17 +226,38 @@ impl App {
         if !self.input.starts_with('/') || self.input.contains(' ') {
             return Vec::new();
         }
-        const COMMANDS: [(&str, &str); 8] = [
-            ("/help", "显示帮助"),
-            ("/new", "开始新对话（当前对话保留在 sessions/ 中）"),
-            ("/session", "显示当前对话 id"),
-            ("/mode plan", "切换到只读规划模式"),
-            ("/mode build", "切换到构建模式"),
-            ("/runs", "提示如何查看运行历史"),
-            ("/config", "提示如何重新配置 API Key"),
-            ("/quit", "退出 Hyper"),
+        let commands = [
+            ("/help", i18n::text("Show help", "显示帮助")),
+            (
+                "/new",
+                i18n::text(
+                    "Start a new conversation",
+                    "开始新对话（当前对话保留在 sessions/ 中）",
+                ),
+            ),
+            (
+                "/session",
+                i18n::text("Show conversation ID", "显示当前对话 id"),
+            ),
+            (
+                "/mode plan",
+                i18n::text("Switch to read-only plan mode", "切换到只读规划模式"),
+            ),
+            (
+                "/mode build",
+                i18n::text("Switch to build mode", "切换到构建模式"),
+            ),
+            (
+                "/runs",
+                i18n::text("Show recent runs", "提示如何查看运行历史"),
+            ),
+            (
+                "/config",
+                i18n::text("Show API key setup", "提示如何重新配置 API Key"),
+            ),
+            ("/quit", i18n::text("Exit Hyper", "退出 Hyper")),
         ];
-        COMMANDS
+        commands
             .into_iter()
             .filter(|(command, _)| command.starts_with(&self.input))
             .collect()
@@ -288,7 +316,10 @@ impl App {
                     self.scroll = 0;
                     self.output.push(format!(
                         "Hyper\n{}",
-                        r.unwrap_or_else(|e| format!("执行失败：{e}"))
+                        r.unwrap_or_else(|e| format!(
+                            "{} {e}",
+                            i18n::text("Failed:", "执行失败：")
+                        ))
                     ));
                 }
             }
@@ -438,9 +469,8 @@ mod tests {
             app.output
         );
         assert!(
-            app.output
-                .iter()
-                .any(|line| line.contains("previous-chat") && line.contains("已开始新对话")),
+            app.output.iter().any(|line| line.contains("previous-chat")
+                && line.contains(i18n::text("Started a new conversation", "已开始新对话"))),
             "the user must be told which conversation was left: {:?}",
             app.output
         );
@@ -449,7 +479,8 @@ mod tests {
         app.submit();
         let reported = app.output.last().unwrap();
         assert!(
-            reported.contains("尚未开始新对话") && reported.contains("previous-chat"),
+            reported.contains(i18n::text("No new conversation yet", "尚未开始新对话"))
+                && reported.contains("previous-chat"),
             "after /new the app reports the conversation it left: {reported:?}"
         );
     }

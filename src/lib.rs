@@ -3,6 +3,7 @@ pub mod cli;
 pub mod deepseek;
 pub mod engine;
 pub mod event_sink;
+pub mod i18n;
 pub mod model;
 pub mod policy;
 pub mod tui;

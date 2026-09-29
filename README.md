@@ -73,6 +73,10 @@ along with the API base URL and the model, in the user configuration directory
 with owner-only permissions. Run `ha config` to update them. A bare Enter keeps
 the stored API key, base URL, or model; a new key is entered without echoing it.
 
+Interface text defaults to English. Set `HYPER_LANG=zh` (or `zh-CN`) to show
+Hyper's prompts and TUI controls in Chinese. Model replies and tool output are
+displayed in their original language.
+
 Environment variables override the stored file, which overrides the defaults,
 so CI needs no configuration file:
 

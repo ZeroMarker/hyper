@@ -14,7 +14,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{AgentMode, workspace};
+use crate::{AgentMode, i18n, workspace};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
@@ -328,12 +328,27 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
             "provider API key is not configured; run `hyper config` in a terminal or set DEEPSEEK_API_KEY"
         )
     }
-    println!("配置模型服务的 API Key、地址和模型。");
-    println!("配置将保存在本机用户配置目录，密钥输入内容不会显示。");
+    println!(
+        "{}",
+        i18n::text(
+            "Configure the provider API key, base URL, and model.",
+            "配置模型服务的 API Key、地址和模型。"
+        )
+    );
+    println!(
+        "{}",
+        i18n::text(
+            "Settings are saved in your user configuration directory. The key is hidden while you type.",
+            "配置将保存在本机用户配置目录，密钥输入内容不会显示。"
+        )
+    );
     let key = rpassword::prompt_password(if stored.deepseek_api_key.trim().is_empty() {
         "API Key: "
     } else {
-        "API Key（留空保留已有密钥）: "
+        i18n::text(
+            "API Key (press Enter to keep the saved key): ",
+            "API Key（留空保留已有密钥）: ",
+        )
     })?;
     let key = if key.trim().is_empty() {
         stored.deepseek_api_key.trim()
@@ -346,12 +361,15 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
     let base_url = prompt_line(
         "API base URL",
         stored.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
-        "https://opencode.ai/zen/go/v1 用于 OpenCode Go",
+        i18n::text(
+            "https://opencode.ai/zen/go/v1 for OpenCode Go",
+            "https://opencode.ai/zen/go/v1 用于 OpenCode Go",
+        ),
     )?;
     let model = prompt_line(
         "Model",
         stored.model.as_deref().unwrap_or(DEFAULT_MODEL),
-        "例如 deepseek-v4-pro",
+        i18n::text("for example, deepseek-v4-pro", "例如 deepseek-v4-pro"),
     )?;
     // The wizard stays at three questions, so the protocol is reported rather
     // than asked for: a pinned one keeps, otherwise the model name decides.
@@ -371,14 +389,19 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
             protocol: stored.protocol,
         },
     )?;
-    println!("配置已保存到 {}", path.display());
     println!(
-        "协议 {}（{}）",
+        "{} {}",
+        i18n::text("Configuration saved to", "配置已保存到"),
+        path.display()
+    );
+    println!(
+        "{} {} ({})",
+        i18n::text("Protocol", "协议"),
         protocol.as_str(),
         if configured.is_some() {
-            "配置指定"
+            i18n::text("configured", "配置指定")
         } else {
-            "自动探测"
+            i18n::text("detected automatically", "自动探测")
         }
     );
     Ok(())
@@ -386,7 +409,7 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
 
 /// Read one line, falling back to `default` when the user just presses Enter.
 fn prompt_line(label: &str, default: &str, hint: &str) -> Result<String> {
-    print!("{label} [{default}]（{hint}）: ");
+    print!("{label} [{default}] ({hint}): ");
     std::io::Write::flush(&mut std::io::stdout())?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;

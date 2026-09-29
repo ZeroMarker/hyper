@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::App;
-use crate::AgentMode;
+use crate::{AgentMode, i18n};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // Only parse markdown for messages added since the previous frame.
@@ -84,9 +84,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.busy {
         const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let status = if app.approvals.is_empty() {
-            format!("{} 正在思考", SPINNER[app.tick % SPINNER.len()])
+            format!(
+                "{} {}",
+                SPINNER[app.tick % SPINNER.len()],
+                i18n::text("Thinking", "正在思考")
+            )
         } else {
-            format!("{} 等待确认", SPINNER[app.tick % SPINNER.len()])
+            format!(
+                "{} {}",
+                SPINNER[app.tick % SPINNER.len()],
+                i18n::text("Waiting for approval", "等待确认")
+            )
         };
         chat.push(Line::from(vec![
             Span::styled(
@@ -136,9 +144,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     render_command_palette(frame, app, areas[2]);
 
     frame.render_widget(
-        Paragraph::new(" ↑↓/PgUp/PgDn 滚动  End 最新  Tab 模式  Enter 发送  Esc 退出")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(i18n::text(
+            " ↑↓/PgUp/PgDn Scroll  End Latest  Tab Mode  Enter Send  Esc Exit",
+            " ↑↓/PgUp/PgDn 滚动  End 最新  Tab 模式  Enter 发送  Esc 退出",
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
         areas[3],
     );
 }
@@ -157,7 +168,7 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
     let detail = truncate_width(&request.detail.replace('\n', " "), max_width);
     let lines = vec![
         Line::from(Span::styled(
-            format!(" 需要确认：{}", request.tool),
+            format!(" {} {}", i18n::text("Approve:", "需要确认："), request.tool),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -166,7 +177,7 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
         Line::from(Span::styled(detail, Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(Span::styled(
-            " y 允许    n / Esc 拒绝",
+            i18n::text(" y Allow    n / Esc Deny", " y 允许    n / Esc 拒绝"),
             Style::default().fg(Color::Cyan),
         )),
     ];

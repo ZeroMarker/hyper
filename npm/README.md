@@ -34,6 +34,8 @@ right wire protocol per model, or takes `DEEPSEEK_PROTOCOL`
 (`chat` / `responses` / `messages`) when you want to be explicit.
 Running `hyper config` again lets you change any value; press Enter at the key
 prompt to keep the stored key.
+Interface text defaults to English; set `HYPER_LANG=zh` for Chinese prompts and
+TUI controls. Model replies and tool output are shown as received.
 
 Prompts can continue a conversation, which is what lets a follow-up refer to the
 previous answer:

@@ -1330,7 +1330,10 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
                 .and_then(|value| value.get("message"))
                 .and_then(Value::as_str)
         {
-            return Ok(Some(format!("执行失败：{message}")));
+            return Ok(Some(format!(
+                "{} {message}",
+                crate::i18n::text("Failed:", "执行失败：")
+            )));
         }
         if event.event_type == "tool.finished" {
             for field in ["stdout", "content", "diff"] {
@@ -1347,7 +1350,7 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Ok(Some(if text.is_empty() {
-                    "未找到匹配内容。".into()
+                    crate::i18n::text("No matches found.", "未找到匹配内容。").into()
                 } else {
                     text
                 }));
@@ -1356,8 +1359,11 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
                 .payload
                 .get("tool")
                 .and_then(Value::as_str)
-                .unwrap_or("工具");
-            return Ok(Some(format!("{tool} 执行完成。")));
+                .unwrap_or(crate::i18n::text("Tool", "工具"));
+            return Ok(Some(format!(
+                "{tool} {}",
+                crate::i18n::text("finished.", "执行完成。")
+            )));
         }
     }
     Ok(None)
