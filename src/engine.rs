@@ -21,6 +21,7 @@ use crate::{
     event_sink::EventSink,
     model::*,
     policy,
+    resource::ResourceBudget,
     sandbox::{ExecutionMode, Sandbox},
     workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
 };
@@ -608,10 +609,14 @@ fn bash(
     };
     #[cfg(not(target_os = "linux"))]
     let _ = &sandbox;
+    let resource_budget =
+        ResourceBudget::for_step(step).context("could not prepare bash resource limits")?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = &resource_budget;
     require_approval(events, step, index, "bash", command)?;
     events.write(
         "tool.started",
-        json!({"tool":"bash","command":command}),
+        json!({"tool":"bash","command":command,"resourceLimits":resource_budget}),
         Some(&step.id),
         Some(index),
     )?;
@@ -680,6 +685,11 @@ fn bash(
                 builder.pre_exec(move || Sandbox::apply_in_child(ruleset_fd));
             }
         }
+        if let Some(budget) = resource_budget {
+            unsafe {
+                builder.pre_exec(move || budget.apply_in_child());
+            }
+        }
     }
     let mut child = builder.spawn()?;
     let stdout = child
@@ -706,6 +716,27 @@ fn bash(
         Some(status) => status,
         None => bail!("bash command could not be terminated after {timeout:?}"),
     };
+    let code = status.code().unwrap_or(-1);
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    #[cfg(target_os = "linux")]
+    let resource_limit = match signal.or_else(|| (code >= 128).then_some(code - 128)) {
+        Some(libc::SIGXCPU) => Some("cpu"),
+        Some(libc::SIGXFSZ) => Some("file"),
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let resource_limit: Option<&str> = None;
+    if resource_limit.is_some() {
+        // A shell can survive a child hitting its limit and can also leave
+        // background children holding our output pipes open. End the group.
+        kill_group(child.id());
+    }
     guard.disarm();
     // The child is gone, so both pipes are closed and the readers can finish.
     let (stdout_bytes, stdout_total) = join_capture(stdout_reader, "stdout");
@@ -736,7 +767,6 @@ fn bash(
         stderr_total,
     )?;
     let all = format!("{stdout}{stderr}");
-    let code = status.code().unwrap_or(-1);
     let duration_ms = started.elapsed().as_millis();
     let mut payload = json!({
         "command": command,
@@ -750,6 +780,9 @@ fn bash(
         "stdoutBytes": stdout_total,
         "stderrBytes": stderr_total,
         "durationMs": duration_ms,
+        "signal": signal,
+        "resourceLimit": resource_limit,
+        "resourceLimits": resource_budget,
     });
     // The model is told where the full output lives, so an observation cut
     // down to a few kilobytes still points at a file it can read back.
@@ -1294,6 +1327,20 @@ fn run_task_inner(
 /// timeout distinguishable from an ordinary non-zero exit.
 fn failure_message(payload: &Value) -> String {
     let command = payload.get("command").and_then(Value::as_str).unwrap_or("");
+    if let Some(limit) = payload.get("resourceLimit").and_then(Value::as_str) {
+        let (field, unit) = match limit {
+            "cpu" => ("cpuSeconds", "s"),
+            _ => ("fileMb", "MiB"),
+        };
+        let amount = payload
+            .get("resourceLimits")
+            .and_then(|limits| limits.get(field))
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        return format!(
+            "command {command:?} exceeded its {limit} resource limit ({amount} {unit})"
+        );
+    }
     if payload
         .get("timedOut")
         .and_then(Value::as_bool)
@@ -1364,6 +1411,8 @@ fn classify_error(message: &str) -> &'static str {
         "PolicyError"
     } else if message.contains("timed out") || message.contains("could not be terminated") {
         "TimeoutError"
+    } else if message.contains("resource limit") {
+        "ResourceLimitError"
     } else if message.contains("DeepSeek") || message.contains("agent exceeded") {
         "ModelError"
     } else if message.contains("not found in")
@@ -1415,6 +1464,7 @@ pub fn prompt_to_task(prompt: &str, mode: AgentMode) -> TaskSpec {
             instruction: prompt.into(),
             tools: None,
             timeout_ms: None,
+            limits: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -1674,6 +1724,7 @@ mod tests {
             instruction: "test".into(),
             tools: Some(tools.into_iter().map(str::to_owned).collect()),
             timeout_ms: None,
+            limits: None,
             metadata: HashMap::new(),
         }
     }

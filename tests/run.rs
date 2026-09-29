@@ -1,7 +1,7 @@
 use harness::{
-    AgentMode, ApprovalGate, Checkpoint, EventSink, ExecutionMode, StepSpec, TaskSpec, Workspace,
-    get_run_details, restore_checkpoint, run_task, run_task_in_session_with_updates,
-    run_task_with_approval, run_task_with_mode,
+    AgentMode, ApprovalGate, BashResourceLimits, Checkpoint, EventSink, ExecutionMode, StepSpec,
+    TaskSpec, Workspace, get_run_details, restore_checkpoint, run_task,
+    run_task_in_session_with_updates, run_task_with_approval, run_task_with_mode,
 };
 use std::{
     collections::HashMap,
@@ -21,6 +21,7 @@ fn task(name: &str, mode: AgentMode, instruction: &str) -> TaskSpec {
             instruction: instruction.into(),
             tools: None,
             timeout_ms: None,
+            limits: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -37,6 +38,7 @@ fn task_with_tools(name: &str, tools: Vec<String>, instruction: &str) -> TaskSpe
             instruction: instruction.into(),
             tools: Some(tools),
             timeout_ms: None,
+            limits: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -136,6 +138,72 @@ fn explicit_read_only_and_unrestricted_modes_change_shell_boundary() {
         unrestricted.failure
     );
     assert_eq!(fs::read_to_string(target).unwrap(), "yes\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_inherits_memory_limit_and_records_budget() {
+    let root = tempdir().unwrap();
+    let mut spec = task("memory", AgentMode::Build, "bash:cat /proc/self/limits");
+    spec.steps[0].limits = Some(BashResourceLimits {
+        memory_mb: Some(128),
+        ..Default::default()
+    });
+    let summary = run_task(&spec, root.path()).unwrap();
+    assert_eq!(summary.status, "finished", "{:?}", summary.failure);
+    let (_, events) = get_run_details(root.path(), &summary.run_id).unwrap();
+    let finished = events
+        .iter()
+        .find(|event| event.event_type == "tool.finished")
+        .unwrap();
+    assert_eq!(finished.payload["resourceLimits"]["memoryMb"], 128);
+    assert!(
+        finished.payload["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("134217728")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_file_size_limit_stops_large_output_file() {
+    let root = tempdir().unwrap();
+    let mut spec = task(
+        "file",
+        AgentMode::Build,
+        "bash:head -c 4194304 /dev/zero > big.bin",
+    );
+    spec.steps[0].limits = Some(BashResourceLimits {
+        file_mb: Some(1),
+        ..Default::default()
+    });
+    let summary = run_task(&spec, root.path()).unwrap();
+    assert_eq!(summary.status, "failed");
+    assert!(fs::metadata(root.path().join("big.bin")).unwrap().len() <= 1024 * 1024);
+    let (_, events) = get_run_details(root.path(), &summary.run_id).unwrap();
+    let finished = events
+        .iter()
+        .find(|event| event.event_type == "tool.finished")
+        .unwrap();
+    assert_eq!(finished.payload["resourceLimits"]["fileMb"], 1);
+    assert_eq!(finished.payload["resourceLimit"], "file");
+    assert_eq!(summary.failure.unwrap().error_type, "ResourceLimitError");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_cpu_limit_ends_busy_loop_before_wall_timeout() {
+    let root = tempdir().unwrap();
+    let mut spec = task("cpu", AgentMode::Build, "bash:while :; do :; done");
+    spec.steps[0].timeout_ms = Some(30_000);
+    spec.steps[0].limits = Some(BashResourceLimits {
+        cpu_seconds: Some(1),
+        ..Default::default()
+    });
+    let summary = run_task(&spec, root.path()).unwrap();
+    assert_eq!(summary.status, "failed");
+    assert_eq!(summary.failure.unwrap().error_type, "ResourceLimitError");
 }
 
 #[cfg(target_os = "linux")]

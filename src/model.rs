@@ -34,8 +34,23 @@ pub struct StepSpec {
     pub tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<BashResourceLimits>,
     #[serde(default)]
     pub metadata: Metadata,
+}
+
+/// Optional per-step overrides for the shell's Linux process limits. Each
+/// unspecified value retains the default limit.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashResourceLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -63,6 +78,22 @@ impl TaskSpec {
             }
             if !ids.insert(&step.id) {
                 bail!("duplicate step id: {}", step.id)
+            }
+            if let Some(limits) = &step.limits {
+                for (name, value) in [
+                    ("memoryMb", limits.memory_mb),
+                    ("fileMb", limits.file_mb),
+                    ("cpuSeconds", limits.cpu_seconds),
+                ] {
+                    if value == Some(0) {
+                        bail!("step {}: {name} must be greater than zero", step.id)
+                    }
+                }
+                for (name, value) in [("memoryMb", limits.memory_mb), ("fileMb", limits.file_mb)] {
+                    if value.is_some_and(|mb| mb.checked_mul(1024 * 1024).is_none()) {
+                        bail!("step {}: {name} is too large", step.id)
+                    }
+                }
             }
         }
         Ok(())

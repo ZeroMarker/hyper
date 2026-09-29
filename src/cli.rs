@@ -467,6 +467,7 @@ mod tests {
                 instruction: instruction.into(),
                 tools: None,
                 timeout_ms: None,
+                limits: None,
                 metadata: HashMap::new(),
             }],
             metadata: HashMap::new(),

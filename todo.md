@@ -44,7 +44,7 @@
 
 ### 工程健壮性
 - [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。
-- [ ] 资源限制：策略层已完成（`src/policy.rs`：结构化危险命令禁止），但**没有任何资源限制**——没有 setrlimit，内存/CPU/文件大小都不设上限，只有命令超时与输出上限（事件 256 KB、artifact 4 MB）。这一步与下一步（OS 级沙箱）可分开做。
+- [x] 资源限制：Linux `bash` 子进程增加 `RLIMIT_AS`（默认 8 GiB 虚拟地址空间）、`RLIMIT_FSIZE`（默认单文件 1 GiB）、`RLIMIT_CPU`（默认 wall timeout 向上取整后加 2 秒），支持步骤级 `limits.memoryMb` / `fileMb` / `cpuSeconds`；继承更严格的父进程软限制，超 CPU/文件上限记录 `ResourceLimitError` 与配置值。限制按进程生效，不是整棵进程树或整个工作区的总配额；后续若需聚合上限，需另做 cgroup/job object。
 - [ ] OS 级沙箱（分阶段）：Linux 默认模式已用 Landlock 限制 shell 及其子进程的工作区外写入与 TCP bind/connect；`read-only` / `workspace-write` / `unrestricted` 由 CLI、TUI 共用，非 Linux 或缺 Landlock ABI 4 时默认拒绝 shell。剩余：网络 UDP/Unix socket、Landlock 未覆盖的 metadata 操作、macOS/Windows 原生隔离，以及对 `.harness` 审计文件的保护。workspace context 仍会把仓库内容发给模型，prompt injection 是活路径。
 
 ### 协议与模型

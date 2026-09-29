@@ -6,6 +6,7 @@ pub mod event_sink;
 pub mod i18n;
 pub mod model;
 pub mod policy;
+pub mod resource;
 pub mod sandbox;
 pub mod tui;
 pub mod workspace;

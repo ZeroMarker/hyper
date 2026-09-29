@@ -8,6 +8,7 @@ fn step(id: &str) -> StepSpec {
         instruction: "bash:echo ok".into(),
         tools: None,
         timeout_ms: None,
+        limits: None,
         metadata: HashMap::new(),
     }
 }
@@ -38,6 +39,26 @@ fn duplicate_ids_are_rejected() {
             .to_string()
             .contains("duplicate step id")
     )
+}
+
+#[test]
+fn zero_resource_limits_are_rejected() {
+    let mut task = TaskSpec {
+        id: None,
+        name: "bad limits".into(),
+        steps: vec![step("one")],
+        metadata: Default::default(),
+    };
+    task.steps[0].limits = Some(harness::BashResourceLimits {
+        cpu_seconds: Some(0),
+        ..Default::default()
+    });
+    assert!(
+        task.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("cpuSeconds")
+    );
 }
 
 #[test]

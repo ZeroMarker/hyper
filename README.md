@@ -291,6 +291,21 @@ produces a final answer (capped at 12 turns). In plan mode the model only sees
 the read-only tools. The optional per-step `tools` field acts as an allowlist:
 `"tools": ["read", "search"]` restricts that step to the listed tools.
 
+On Linux, every `bash` process receives a default limit of 8 GiB virtual
+address space and 1 GiB per output file. Its CPU time limit defaults to the
+step's wall timeout rounded up to seconds plus two seconds. A step can override
+each value without changing the others:
+
+```json
+"timeoutMs": 30000,
+"limits": { "memoryMb": 2048, "fileMb": 128, "cpuSeconds": 20 }
+```
+
+`limits` applies only to `bash`, including its descendants. These are
+per-process limits inherited by child processes, not a total quota for the
+process tree or workspace. Values of zero are rejected. An inherited tighter
+limit remains in force. Explicit `limits` on non-Linux hosts are rejected.
+
 ## Workspace
 
 Runs are stored beneath `.harness/` using the existing compatible layout:
@@ -340,6 +355,12 @@ an event that reached the files cannot stay unrecorded.
   harness (`PR_SET_PDEATHSIG`), so a crashed or `kill -9`ed harness does not
   leave commands running — although processes started *by* that shell can still
   outlive it.
+- On Linux, `bash` also starts with `RLIMIT_AS`, `RLIMIT_FSIZE`, and
+  `RLIMIT_CPU`. The configured values are included in `tool.started` and
+  `tool.finished`; a CPU or file-size limit signal is reported as
+  `ResourceLimitError`. Memory allocation failures can be reported by the
+  program as an ordinary non-zero exit; inspect its stderr and the recorded
+  memory cap.
 - `ha artifacts` lists `runs/<run-id>/artifacts/`, which every `bash` call
   writes to: one file per non-empty stream, named
   `<step>-<index>-bash-stdout.log` (up to 4 MB each, with a marker where it was
