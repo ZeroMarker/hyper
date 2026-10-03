@@ -134,6 +134,68 @@ class OfflineCLI(unittest.TestCase):
             self.assertFalse(metrics['finished'])
             self.assertLess(metrics['duration_seconds'],3)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux terminal and shell isolation')
+    def test_tui_ctrl_c_cancels_approval_and_continues_same_session(self):
+        import fcntl
+        import select
+        import struct
+        import termios
+        import time
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'README.md').write_text('TUI cancellation fixture\n')
+            master, slave = os.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
+            env = os.environ.copy()
+            env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})
+            child = subprocess.Popen([str(self.binary),'--sandbox','workspace-write','tui'],cwd=root,env=env,
+                                     stdin=slave,stdout=slave,stderr=slave,close_fds=True)
+            os.close(slave)
+            os.set_blocking(master,False)
+            def until(predicate):
+                deadline = time.monotonic()+5
+                data = b''
+                while time.monotonic() < deadline:
+                    if select.select([master],[],[],0.03)[0]:
+                        try:
+                            data += os.read(master,65536)
+                        except OSError:
+                            pass
+                    if predicate(data):
+                        return
+                    if child.poll() is not None:
+                        self.fail('TUI exited before the expected gate')
+                self.fail('TUI gate timed out')
+            def summaries(status):
+                return [p for p in root.glob('.harness/runs/*/summary.json') if json.loads(p.read_text())['status']==status]
+            try:
+                until(lambda data: b'Hyper' in data)
+                os.write(master,b'bash:echo wrong > out.txt\r')
+                until(lambda data: b'Allow' in data)
+                os.write(master,b'\x03')
+                until(lambda data: bool(summaries('cancelled')))
+                self.assertFalse((root/'out.txt').exists())
+                until(lambda data: b'Cancelled' in data or b'cancelled' in data)
+                os.write(master,b'bash:echo ok > out.txt\r')
+                until(lambda data: b'Allow' in data)
+                os.write(master,b'y')
+                until(lambda data: bool(summaries('finished')))
+                self.assertEqual((root/'out.txt').read_text().strip(),'ok')
+                # Drain the terminal while waiting for shutdown, as a real
+                # terminal consumer does, so rendering cannot fill the PTY.
+                time.sleep(0.15)
+                os.write(master,b'/quit\r')
+                until(lambda data: child.poll() is not None)
+                self.assertEqual(child.wait(timeout=5),0)
+                sessions = list(root.glob('.harness/sessions/*.jsonl'))
+                self.assertEqual(len(sessions),1)
+                self.assertEqual(len(sessions[0].read_text().splitlines()),4)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                os.close(master)
+
     def test_restore_accepts_absolute_checkpoint_targets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

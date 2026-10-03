@@ -21,6 +21,22 @@ pub struct EventSink {
 }
 
 impl EventSink {
+    /// CLI pipe writes must not prevent signal cancellation. A writable pipe
+    /// still receives terminal events; a stalled/closed pipe cannot hold the
+    /// engine hostage after cancellation. The persisted log is authoritative.
+    pub(crate) fn cancellable_stdout(cancellation: crate::CancellationToken) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::jsonl(std::io::BufWriter::new(
+                CancellableStdout::new(cancellation)?,
+            )))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = cancellation;
+            Ok(Self::jsonl(std::io::stdout()))
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -90,6 +106,89 @@ impl EventSink {
     }
 }
 
+#[cfg(unix)]
+struct CancellableStdout {
+    fd: std::os::fd::OwnedFd,
+    original_flags: i32,
+    cancellation: crate::CancellationToken,
+}
+
+#[cfg(unix)]
+impl CancellableStdout {
+    fn new(cancellation: crate::CancellationToken) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        std::io::stdout().flush()?;
+        // dup shares the open-file-description flags with stdout. Restore them
+        // before the owned descriptor is closed, including every error path.
+        let raw = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if original_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    fd.as_raw_fd(),
+                    libc::F_SETFL,
+                    original_flags | libc::O_NONBLOCK,
+                )
+            } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd,
+            original_flags,
+            cancellation,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Write for CancellableStdout {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let count =
+                unsafe { libc::write(self.fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            if count >= 0 {
+                return Ok(count as usize);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error);
+            }
+            self.cancellation.check().map_err(std::io::Error::other)?;
+            let mut poll = libc::pollfd {
+                fd: self.fd.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut poll, 1, 25) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CancellableStdout {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let _ = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, self.original_flags) };
+    }
+}
+
 fn event_line(event: &HarnessEvent) -> String {
     if event.event_type == "model.context_budget" {
         return format!(
@@ -106,7 +205,7 @@ fn event_line(event: &HarnessEvent) -> String {
     }
     let detail = match event.event_type.as_str() {
         "model.started" => event.payload.get("model"),
-        "tool.started" | "tool.finished" => event.payload.get("tool"),
+        "tool.started" | "tool.finished" | "tool.cancelled" => event.payload.get("tool"),
         "step.failed" | "run.failed" => event.payload.get("message"),
         _ => None,
     }

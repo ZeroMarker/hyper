@@ -264,8 +264,10 @@ printed on stdout. Subcommand prompts may be passed unquoted as several words:
 
 The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode (or
 complete a slash command), `Enter` to submit, arrow keys to scroll or choose a
-slash-command suggestion, and `Esc` to exit. Slash commands:
-`/help`, `/runs`, `/session`, `/mode plan|build`, `/new`, and `/quit`. `/runs`
+slash-command suggestion. While running, `Esc` or `Ctrl-C` cancels the current
+run; while idle, either exits. In an approval modal, `Esc` denies that action
+and `Ctrl-C` cancels the run. Slash commands:
+`/help`, `/runs`, `/session`, `/mode plan|build`, `/new`, `/cancel`, and `/quit`. `/runs`
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
 
@@ -286,8 +288,9 @@ Stdout contains one complete event per line, identical to the run's audit log,
 in persistence order. Each line is flushed immediately, including streamed
 `model.delta` text. Plain answers and pretty-printed summaries are omitted;
 successful runs end with `run.finished` (its payload includes the summary),
-and failed runs with `run.failed` (its payload includes the failure).
-Diagnostics go to stderr and failed runs still exit with status `1`.
+failed runs with `run.failed` (its payload includes the failure), and cancelled
+runs with `run.cancelled` (summary and cancellation reason).
+Diagnostics go to stderr; failed runs exit with status `1`, cancelled runs `130`.
 JSONL mode never opens the configuration wizard; missing or invalid provider
 settings are recorded as run failures. Use `ha config` separately.
 
@@ -297,9 +300,31 @@ remain available, and a run left unfinished is repaired as interrupted on the
 next workspace open. `--jsonl` requires a run command or prompt and cannot be
 used with the TUI or inspection commands.
 
+CLI `Ctrl-C` and Unix `SIGTERM`/`SIGHUP` use the same run cancellation source as
+the TUI. Cancellation interrupts response-header/body waits, all three SSE
+protocols, retry delays, approval waits, and shell process groups. Later tools
+and steps stop; completed file changes and checkpoints remain. It does not
+automatically undo changes. `cancelled` is a deliberate terminal state, distinct
+from task `failed` and crash-recovered `interrupted`; the conversation can continue
+with a fresh run token. TUI `/quit` and shutdown wait for the active worker to settle.
+
+On Unix, CLI JSONL pipe backpressure is also cancellable. If a consumer stops
+reading or the output closes during cancellation, stdout can be incomplete;
+the full cancellation event, summary and session still persist in `.harness`.
+Native Windows pipe backpressure, terminal rendering backpressure, and OS-blocked filesystem I/O do not yet have
+a bounded cancellation guarantee. Custom synchronous event writers must supply
+their own interruptible I/O. Linux gated tests assert completion within two
+seconds for network, approval, shell and stalled JSONL-pipe waits.
+
+Synchronous library users can pass `RunOptions` and a shared `CancellationToken`
+to `run_task_with_control`; cancel its clone from another thread. Library calls
+do not install process signal handlers. The existing run APIs remain available.
+
 In the TUI, `bash`, `write` and `edit` actions ask for **interactive
 approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
 loop waits for the answer). Command-line runs do not prompt.
+Shell tool stdin is closed; supply command input with pipes or redirection,
+so a tool cannot consume TUI keyboard events.
 
 ### Shell execution boundary
 

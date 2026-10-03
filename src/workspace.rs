@@ -388,6 +388,7 @@ impl Workspace {
         let status = match event.event_type.as_str() {
             "run.finished" => Some("finished"),
             "run.failed" => Some("failed"),
+            "run.cancelled" => Some("cancelled"),
             "run.interrupted" => Some("interrupted"),
             _ => None,
         };

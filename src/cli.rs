@@ -5,10 +5,12 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
-    AgentMode, Checkpoint, EventSink, ExecutionMode, RunSummary, TaskSpec, Workspace,
-    deepseek::ensure_api_key, get_run_details, latest_model_reply, list_runs, prompt_to_task,
-    replay_messages, restore_checkpoint, run_task_in_session_with_mode, run_task_with_event_sink,
-    run_task_with_mode, tui,
+    AgentMode, CancellationToken, Checkpoint, EventSink, ExecutionMode, RunOptions, RunSummary,
+    TaskSpec, Workspace,
+    cancellation::{self, Cancelled},
+    deepseek::ensure_api_key,
+    get_run_details, latest_model_reply, list_runs, prompt_to_task, replay_messages,
+    restore_checkpoint, run_task_with_control, tui,
 };
 
 #[derive(Parser)]
@@ -179,17 +181,22 @@ pub fn run() -> Result<()> {
         }
         Commands::Run { task } => {
             let task = read_task(&task)?;
-            let summary = if cli.jsonl {
-                run_task_with_event_sink(
-                    &task,
-                    &root,
-                    None,
-                    EventSink::jsonl(std::io::stdout()),
+            let cancellation = CancellationToken::new();
+            let _signals = cancellation::signals(&cancellation)?;
+            let summary = run_task_with_control(
+                &task,
+                &root,
+                RunOptions {
+                    cancellation: cancellation.clone(),
                     execution_mode,
-                )?
-            } else {
-                run_task_with_mode(&task, &root, execution_mode)?
-            };
+                    sink: if cli.jsonl {
+                        Some(EventSink::cancellable_stdout(cancellation.clone())?)
+                    } else {
+                        None
+                    },
+                    ..RunOptions::default()
+                },
+            )?;
             if !cli.jsonl {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             }
@@ -350,6 +357,17 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Keep machine-readable stdout clean and give cancellation a distinct exit code.
+pub fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            std::process::ExitCode::from(if error.is::<Cancelled>() { 130 } else { 1 })
+        }
+    }
+}
+
 fn diff(root: &std::path::Path, run_id: &str) -> Result<()> {
     let (run, events) = get_run_details(root, run_id)?;
     if run.is_none() {
@@ -408,20 +426,26 @@ fn print_prompt_result(
     jsonl: bool,
 ) -> Result<()> {
     let task = prompt_to_task(prompt, mode);
-    if jsonl {
-        let summary = run_task_with_event_sink(
-            &task,
-            root,
-            session_id,
-            EventSink::jsonl(std::io::stdout()),
+    let cancellation = CancellationToken::new();
+    let _signals = cancellation::signals(&cancellation)?;
+    let summary = run_task_with_control(
+        &task,
+        root,
+        RunOptions {
+            cancellation: cancellation.clone(),
             execution_mode,
-        )?;
+            session_id: session_id.map(str::to_owned),
+            sink: if jsonl {
+                Some(EventSink::cancellable_stdout(cancellation.clone())?)
+            } else {
+                None
+            },
+            ..RunOptions::default()
+        },
+    )?;
+    if jsonl || summary.status == "cancelled" {
         return ensure_success(&summary);
     }
-    let summary = match session_id {
-        Some(session_id) => run_task_in_session_with_mode(&task, root, session_id, execution_mode)?,
-        None => run_task_with_mode(&task, root, execution_mode)?,
-    };
     if let Some(content) = latest_model_reply(root, &summary.run_id)? {
         println!("{content}");
     } else {
@@ -436,6 +460,9 @@ fn print_prompt_result(
 /// Fail the process when a run did not finish, so scripts and CI can rely on the
 /// exit status instead of parsing stdout.
 fn ensure_success(summary: &RunSummary) -> Result<()> {
+    if summary.status == "cancelled" {
+        return Err(Cancelled.into());
+    }
     if summary.status == "finished" {
         return Ok(());
     }

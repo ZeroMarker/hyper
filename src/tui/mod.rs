@@ -1,9 +1,9 @@
 mod ui;
 
 use crate::{
-    AgentMode, ApprovalGate, ApprovalRequest, EventSink, ExecutionMode, deepseek::DEFAULT_MODEL,
-    i18n, latest_display_output, list_runs, prompt_to_task, run_task_in_session_with_updates_mode,
-    workspace,
+    AgentMode, ApprovalGate, ApprovalRequest, CancellationToken, EventSink, ExecutionMode,
+    RunOptions, cancellation, deepseek::DEFAULT_MODEL, i18n, latest_display_output, list_runs,
+    prompt_to_task, run_task_with_control, workspace,
 };
 use anyhow::Result;
 use crossterm::{
@@ -46,6 +46,10 @@ pub struct App {
     /// user can still see which conversation they just left.
     pub session_id: Option<String>,
     gate: Option<ApprovalGate>,
+    cancellation: Option<CancellationToken>,
+    process_cancellation: CancellationToken,
+    worker: Option<std::thread::JoinHandle<()>>,
+    quit_requested: bool,
     sink: Option<EventSink>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -88,6 +92,10 @@ impl App {
             session_id: session.clone(),
             session,
             gate: None,
+            cancellation: None,
+            process_cancellation: CancellationToken::new(),
+            worker: None,
+            quit_requested: false,
             sink: None,
             tx,
             rx,
@@ -95,12 +103,22 @@ impl App {
     }
     fn submit(&mut self) {
         let value = self.input.trim().to_owned();
+        if value == "/cancel" {
+            self.input.clear();
+            self.cancel_active();
+            return;
+        }
+        if matches!(value.as_str(), "/quit" | "/exit") {
+            self.input.clear();
+            self.request_quit();
+            return;
+        }
         if value.is_empty() || self.busy {
             return;
         }
         self.input.clear();
         match value.as_str() {
-            "/quit" | "/exit" => self.quit = true,
+            "/quit" | "/exit" => self.request_quit(),
             "/new" => {
                 // Clearing the transcript without dropping the conversation
                 // would leave the next message answering turns the user can no
@@ -193,14 +211,14 @@ impl App {
                 // as context.
                 let session = self.session.get_or_insert_with(workspace::id).clone();
                 self.session_id = Some(session.clone());
-                std::thread::spawn(move || {
-                    let result = run_task_in_session_with_updates_mode(
-                        &prompt_to_task(&value, mode),
-                        &root,
-                        &session,
-                        gate,
-                        sink,
-                        execution_mode,
+                let cancellation = self.process_cancellation.child();
+                self.cancellation = Some(cancellation.clone());
+                self.worker = Some(std::thread::spawn(move || {
+                    let result = run_task_with_control(
+                        &prompt_to_task(&value, mode), &root, RunOptions {
+                            cancellation, execution_mode, session_id: Some(session),
+                            gate: Some(gate), sink: Some(sink),
+                        }
                     )
                     .and_then(|summary| {
                         Ok(latest_display_output(&root, &summary.run_id)?
@@ -208,7 +226,7 @@ impl App {
                     })
                     .map_err(|e| e.to_string());
                     let _ = tx.send(Message::Task(result));
-                });
+                }));
             }
         }
     }
@@ -264,6 +282,7 @@ impl App {
                 "/config",
                 i18n::text("Show API key setup", "提示如何重新配置 API Key"),
             ),
+            ("/cancel", i18n::text("Cancel current run", "取消当前运行")),
             ("/quit", i18n::text("Exit Hyper", "退出 Hyper")),
         ];
         commands
@@ -297,7 +316,25 @@ impl App {
         self.command_index = 0;
         true
     }
+    fn cancel_active(&mut self) {
+        if let Some(token) = &self.cancellation {
+            token.cancel();
+        }
+        self.deny_all();
+    }
+
+    fn request_quit(&mut self) {
+        self.quit_requested = true;
+        self.cancel_active();
+        if !self.busy {
+            self.quit = true;
+        }
+    }
+
     fn poll(&mut self) {
+        if self.process_cancellation.is_cancelled() {
+            self.request_quit();
+        }
         // Surface new approval requests from the running task thread.
         if let Some(gate) = &self.gate {
             for request in gate.drain() {
@@ -328,6 +365,14 @@ impl App {
             match msg {
                 Message::Task(r) => {
                     self.busy = false;
+                    self.cancellation = None;
+                    self.gate = None;
+                    if let Some(worker) = self.worker.take() {
+                        let _ = worker.join();
+                    }
+                    if self.quit_requested {
+                        self.quit = true;
+                    }
                     self.approvals.clear();
                     self.sink = None;
                     self.live_text.clear();
@@ -355,6 +400,15 @@ impl App {
         self.follow_tail = self.scroll == 0;
     }
 }
+impl Drop for App {
+    fn drop(&mut self) {
+        self.cancel_active();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub fn run(root: PathBuf, session: Option<String>) -> Result<()> {
     run_with_mode(root, session, ExecutionMode::from_env()?)
 }
@@ -368,6 +422,7 @@ pub fn run_with_mode(
     execute!(std::io::stdout(), EnableMouseCapture)?;
     let result = (|| {
         let mut app = App::new(root, session, execution_mode);
+        let _signals = cancellation::signals(&app.process_cancellation)?;
         while !app.quit {
             app.tick = app.tick.wrapping_add(1);
             app.poll();
@@ -388,7 +443,17 @@ pub fn run_with_mode(
             if k.kind != KeyEventKind::Press {
                 continue;
             }
-            // While an approval is pending, all keys answer the modal.
+            // Ctrl-C cancels even while an approval modal is active.
+            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                if app.busy {
+                    app.cancel_active();
+                } else {
+                    app.request_quit();
+                }
+                continue;
+            }
+            // Esc in the modal denies just that action; Ctrl-C cancels the run.
+            // While an approval is pending, all other keys answer the modal.
             if !app.approvals.is_empty() {
                 match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.approve_first(),
@@ -398,11 +463,13 @@ pub fn run_with_mode(
                 continue;
             }
             match (k.code, k.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                    app.deny_all();
-                    app.quit = true;
+                (KeyCode::Esc, _) => {
+                    if app.busy {
+                        app.cancel_active();
+                    } else {
+                        app.request_quit();
+                    }
                 }
-                (KeyCode::Esc, _) => app.quit = true,
                 (KeyCode::Tab, _) => {
                     if !app.complete_command() {
                         app.mode = if app.mode == AgentMode::Build {
@@ -463,6 +530,116 @@ pub fn run_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_command_unblocks_modal_and_conversation_can_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        app.input = "write:out.txt\nwrong".into();
+        app.submit();
+        let started = std::time::Instant::now();
+        while app.approvals.is_empty() {
+            app.poll();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.input = "/cancel".into();
+        app.submit();
+        while app.busy {
+            app.poll();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.quit);
+        assert!(!dir.path().join("out.txt").exists());
+        assert!(app.approvals.is_empty());
+        assert!(app.worker.is_none());
+        assert!(
+            app.output.last().unwrap().contains("cancelled")
+                || app.output.last().unwrap().contains("取消")
+        );
+        let session = app.session.clone().unwrap();
+        app.input = "write:out.txt\nok".into();
+        app.submit();
+        while app.busy {
+            app.poll();
+            app.approve_first();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.session.as_deref(), Some(session.as_str()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            workspace::Workspace::open(dir.path())
+                .unwrap()
+                .session_messages(&session)
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn quit_waits_for_active_run_to_settle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        app.input = "write:out.txt\nwrong".into();
+        app.submit();
+        app.request_quit();
+        assert!(!app.quit);
+        let started = std::time::Instant::now();
+        while !app.quit {
+            app.poll();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.busy);
+        assert!(app.worker.is_none());
+        assert!(!dir.path().join("out.txt").exists());
+        assert_eq!(
+            workspace::Workspace::open(dir.path())
+                .unwrap()
+                .list_runs(1)
+                .unwrap()[0]
+                .status,
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn process_cancellation_stops_worker_without_ui_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        app.input = "write:out.txt\nwrong".into();
+        app.submit();
+        let started = std::time::Instant::now();
+        let mut pending = Vec::new();
+        while pending.is_empty() {
+            pending.extend(app.gate.as_ref().unwrap().drain());
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.process_cancellation.cancel();
+        while !app.worker.as_ref().unwrap().is_finished() {
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!dir.path().join("out.txt").exists());
+        assert_eq!(
+            workspace::Workspace::open(dir.path())
+                .unwrap()
+                .list_runs(1)
+                .unwrap()[0]
+                .status,
+            "cancelled"
+        );
+        app.poll();
+        assert!(app.quit);
+        assert!(!app.busy);
+    }
 
     #[test]
     fn slash_input_filters_and_completes_commands() {

@@ -17,6 +17,7 @@ use wait_timeout::ChildExt;
 
 use crate::{
     approval::ApprovalGate,
+    cancellation::{CancellationToken, POLL_INTERVAL},
     context::{bounded_history, estimated_tokens, history_budget},
     deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt},
     event_sink::EventSink,
@@ -38,6 +39,7 @@ struct EventWriter<'a> {
     /// Earlier turns of the session this run belongs to, oldest first. Empty
     /// for a standalone run.
     history: Vec<SessionMessage>,
+    cancellation: CancellationToken,
 }
 impl EventWriter<'_> {
     fn write(
@@ -64,8 +66,11 @@ impl EventWriter<'_> {
         serde_json::to_writer(&mut file, &event)?;
         writeln!(file)?;
         self.workspace.insert_event(&event)?;
-        if let Some(sink) = &self.sink {
-            sink.publish(&event)?;
+        if let Some(sink) = &self.sink
+            && let Err(error) = sink.publish(&event)
+            && !self.cancellation.is_cancelled()
+        {
+            return Err(error);
         }
         Ok(event)
     }
@@ -107,6 +112,7 @@ fn authorize(
     target: Option<&str>,
     command: Option<&str>,
 ) -> Result<()> {
+    events.cancellation.check()?;
     if let Err(error) = assert_allowed(
         root,
         step.mode,
@@ -133,10 +139,22 @@ fn require_approval(
     tool: &str,
     detail: &str,
 ) -> Result<()> {
+    events.cancellation.check()?;
     let Some(gate) = &events.gate else {
         return Ok(());
     };
-    let approved = gate.request(tool, detail);
+    let approved = match gate.request_cancellable(tool, detail, &events.cancellation) {
+        Ok(approved) => approved,
+        Err(error) => {
+            events.write(
+                "tool.approval",
+                json!({"tool":tool,"target":detail,"approved":null,"cancelled":true}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            return Err(error);
+        }
+    };
     events.write(
         "tool.approval",
         json!({"tool":tool,"target":detail,"approved":approved}),
@@ -162,6 +180,7 @@ fn tool(
     step: &StepSpec,
     index: usize,
 ) -> Result<(bool, Value)> {
+    events.cancellation.check()?;
     let instruction = step.instruction.trim();
     const TOOLS: [&str; 5] = ["bash", "read", "search", "write", "edit"];
     if let Some(name) = TOOLS
@@ -226,7 +245,8 @@ fn agent(
     prompt: &str,
 ) -> Result<(bool, Value)> {
     const MAX_TURNS: usize = 12;
-    let config = DeepSeekConfig::from_env()?;
+    let mut config = DeepSeekConfig::from_env()?;
+    config.cancellation = events.cancellation.clone();
     let history_budget = history_budget()?;
     let mut history = bounded_history(&events.history, history_budget);
     let system = system_prompt(step.mode);
@@ -274,6 +294,7 @@ fn agent(
         Some(index),
     )?;
     for turn in 0..MAX_TURNS {
+        events.cancellation.check()?;
         let estimated = config.estimated_request_tokens(&messages, Some(&specs))?;
         events.write(
             "model.context_budget",
@@ -289,6 +310,7 @@ fn agent(
         )?;
         config.budget.check(estimated)?;
         let reply = chat_messages_stream(&config, &messages, Some(&specs), &mut |content| {
+            events.cancellation.check()?;
             if !content.is_empty() {
                 events.write(
                     "model.delta",
@@ -332,6 +354,7 @@ fn agent(
         )?;
         messages.push(message);
         for call in &reply.tool_calls {
+            events.cancellation.check()?;
             let observation = run_agent_tool(
                 events,
                 run,
@@ -360,6 +383,7 @@ fn agent(
                 "tool_call_id":call.id,
                 "content": observation,
             }));
+            events.cancellation.check()?;
         }
     }
     bail!("agent exceeded {MAX_TURNS} tool-calling turns")
@@ -682,6 +706,9 @@ fn bash(
     };
     builder
         .current_dir(root)
+        // Tools are noninteractive; they must never compete with the TUI for
+        // keyboard input, including the cancellation key.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if events.execution_mode != ExecutionMode::Unrestricted {
@@ -738,6 +765,7 @@ fn bash(
             }
         }
     }
+    events.cancellation.check()?;
     let mut child = builder.spawn()?;
     let stdout = child
         .stdout
@@ -755,8 +783,26 @@ fn bash(
     let stderr_reader = capture(stderr, MAX_ARTIFACT_OUTPUT);
     let mut guard = ProcessGroupGuard::new(child.id());
     let timeout = Duration::from_millis(step.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS));
-    let timed_out = child.wait_timeout(timeout)?.is_none();
-    if timed_out {
+    let waiting = Instant::now();
+    let mut cancelled = false;
+    let mut timed_out = false;
+    loop {
+        if events.cancellation.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        if waiting.elapsed() >= timeout {
+            timed_out = true;
+            break;
+        }
+        if child
+            .wait_timeout(POLL_INTERVAL.min(timeout.saturating_sub(waiting.elapsed())))?
+            .is_some()
+        {
+            break;
+        }
+    }
+    if timed_out || cancelled {
         kill_process_tree(&mut child);
     }
     let status = match child.wait_timeout(KILL_GRACE)? {
@@ -784,6 +830,7 @@ fn bash(
         // background children holding our output pipes open. End the group.
         kill_group(child.id());
     }
+    kill_group(child.id());
     guard.disarm();
     // The child is gone, so both pipes are closed and the readers can finish.
     let (stdout_bytes, stdout_total) = join_capture(stdout_reader, "stdout");
@@ -823,6 +870,7 @@ fn bash(
         "stderr": stderr,
         "all": all,
         "timedOut": timed_out,
+        "cancelled": cancelled,
         "truncated": truncated,
         "stdoutBytes": stdout_total,
         "stderrBytes": stderr_total,
@@ -841,7 +889,17 @@ fn bash(
     }
     let mut event_payload = payload.clone();
     event_payload["tool"] = json!("bash");
-    events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
+    events.write(
+        if cancelled {
+            "tool.cancelled"
+        } else {
+            "tool.finished"
+        },
+        event_payload,
+        Some(&step.id),
+        Some(index),
+    )?;
+    events.cancellation.check()?;
     Ok((code == 0, payload))
 }
 
@@ -1169,7 +1227,15 @@ pub fn run_task_with_mode(
     root: impl AsRef<Path>,
     execution_mode: ExecutionMode,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, None, None, None, execution_mode)
+    run_task_inner(
+        task,
+        root,
+        None,
+        None,
+        None,
+        execution_mode,
+        CancellationToken::new(),
+    )
 }
 
 /// Run a CLI task with a lossless stream of persisted events.
@@ -1180,7 +1246,15 @@ pub fn run_task_with_event_sink(
     sink: EventSink,
     execution_mode: ExecutionMode,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, None, session_id, Some(sink), execution_mode)
+    run_task_inner(
+        task,
+        root,
+        None,
+        session_id,
+        Some(sink),
+        execution_mode,
+        CancellationToken::new(),
+    )
 }
 
 /// Run a task with an interactive approval gate: `bash`, `write` and `edit`
@@ -1197,6 +1271,7 @@ pub fn run_task_with_approval(
         None,
         None,
         ExecutionMode::from_env()?,
+        CancellationToken::new(),
     )
 }
 
@@ -1216,7 +1291,15 @@ pub fn run_task_in_session_with_mode(
     session_id: &str,
     execution_mode: ExecutionMode,
 ) -> Result<RunSummary> {
-    run_task_inner(task, root, None, Some(session_id), None, execution_mode)
+    run_task_inner(
+        task,
+        root,
+        None,
+        Some(session_id),
+        None,
+        execution_mode,
+        CancellationToken::new(),
+    )
 }
 
 /// Same as [`run_task_in_session`], with the TUI approval gate.
@@ -1233,6 +1316,7 @@ pub fn run_task_in_session_with_approval(
         Some(session_id),
         None,
         ExecutionMode::from_env()?,
+        CancellationToken::new(),
     )
 }
 
@@ -1269,6 +1353,33 @@ pub fn run_task_in_session_with_updates_mode(
         Some(session_id),
         Some(sink),
         execution_mode,
+        CancellationToken::new(),
+    )
+}
+
+/// Opt-in control for CLI, TUI and embedding without installing signal handlers.
+#[derive(Default)]
+pub struct RunOptions {
+    pub gate: Option<ApprovalGate>,
+    pub session_id: Option<String>,
+    pub sink: Option<EventSink>,
+    pub execution_mode: ExecutionMode,
+    pub cancellation: CancellationToken,
+}
+
+pub fn run_task_with_control(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    options: RunOptions,
+) -> Result<RunSummary> {
+    run_task_inner(
+        task,
+        root,
+        options.gate,
+        options.session_id.as_deref(),
+        options.sink,
+        options.execution_mode,
+        options.cancellation,
     )
 }
 
@@ -1279,6 +1390,7 @@ fn run_task_inner(
     session_id: Option<&str>,
     sink: Option<EventSink>,
     execution_mode: ExecutionMode,
+    cancellation: CancellationToken,
 ) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
@@ -1311,6 +1423,7 @@ fn run_task_inner(
         sink,
         execution_mode,
         history,
+        cancellation,
     };
     events.write(
         "run.started",
@@ -1321,6 +1434,10 @@ fn run_task_inner(
     let mut succeeded = 0;
     let mut failure = None;
     for (index, step) in task.steps.iter().enumerate() {
+        if events.cancellation.is_cancelled() {
+            failure = Some(cancelled_failure(None));
+            break;
+        }
         events.write(
             "step.started",
             json!({"instruction":step.instruction,"mode":step.mode}),
@@ -1337,6 +1454,16 @@ fn run_task_inner(
                 )?;
                 succeeded += 1
             }
+            _ if events.cancellation.is_cancelled() => {
+                failure = Some(cancelled_failure(Some(&step.id)));
+                events.write(
+                    "step.cancelled",
+                    json!({"failure":failure}),
+                    Some(&step.id),
+                    Some(index),
+                )?;
+                break;
+            }
             Ok((false, payload)) => {
                 let msg = failure_message(&payload);
                 failure = Some(fail(&events, step, index, msg)?);
@@ -1351,11 +1478,19 @@ fn run_task_inner(
             }
         }
     }
+    if failure.is_none() && events.cancellation.is_cancelled() {
+        failure = Some(cancelled_failure(None));
+    }
+    let cancelled = failure
+        .as_ref()
+        .is_some_and(|failure| failure.error_type == "Cancelled");
     let finished = now();
     let summary = RunSummary {
         run_id: run_id.clone(),
         task_name: task.name.clone(),
-        status: if failure.is_some() {
+        status: if cancelled {
+            "cancelled"
+        } else if failure.is_some() {
             "failed"
         } else {
             "finished"
@@ -1363,12 +1498,19 @@ fn run_task_inner(
         .into(),
         steps_total: task.steps.len(),
         steps_succeeded: succeeded,
-        steps_failed: usize::from(failure.is_some()),
+        steps_failed: usize::from(failure.is_some() && !cancelled),
         started_at: started,
         finished_at: finished,
         failure,
     };
-    if summary.failure.is_none() {
+    if cancelled {
+        events.write(
+            "run.cancelled",
+            json!({"summary":summary,"failure":summary.failure}),
+            None,
+            None,
+        )?;
+    } else if summary.failure.is_none() {
         events.write("run.finished", json!({"summary":summary}), None, None)?;
     }
     fs::write(&run.summary, serde_json::to_vec_pretty(&summary)?)?;
@@ -1381,6 +1523,17 @@ fn run_task_inner(
     }
     Ok(summary)
 }
+fn cancelled_failure(step: Option<&str>) -> Failure {
+    Failure {
+        error_type: "Cancelled".into(),
+        message: "run cancelled by user; completed file changes were kept".into(),
+        retryable: false,
+        step_id: step.map(str::to_owned),
+        details: HashMap::new(),
+        cause: None,
+    }
+}
+
 /// Build the human-readable reason for a tool that reported failure, keeping a
 /// timeout distinguishable from an ordinary non-zero exit.
 fn failure_message(payload: &Value) -> String {
@@ -1500,12 +1653,22 @@ fn user_turn(task: &TaskSpec, started: &str, run_id: &str) -> SessionMessage {
 /// produced one, otherwise a line describing how the run ended. `None` only
 /// when the run has neither, which cannot happen in practice.
 fn assistant_turn(workspace: &Workspace, summary: &RunSummary) -> Result<Option<SessionMessage>> {
-    let content = match latest_model_reply(workspace.paths.root.clone(), &summary.run_id) {
-        Ok(Some(content)) if !content.trim().is_empty() => content,
-        _ => match &summary.failure {
-            Some(failure) => format!("Run {} failed: {}", summary.run_id, failure.message),
-            None => format!("Run {} {}", summary.run_id, summary.status),
-        },
+    let content = if summary.status == "cancelled" {
+        format!(
+            "Run {} cancelled: completed file changes were kept",
+            summary.run_id
+        )
+    } else {
+        match latest_model_reply(workspace.paths.root.clone(), &summary.run_id) {
+            Ok(Some(content)) if !content.trim().is_empty() => content,
+            _ => match &summary.failure {
+                Some(failure) => format!(
+                    "Run {} {}: {}",
+                    summary.run_id, summary.status, failure.message
+                ),
+                None => format!("Run {} {}", summary.run_id, summary.status),
+            },
+        }
     };
     Ok(Some(SessionMessage {
         role: "assistant".into(),
@@ -1570,7 +1733,7 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
         {
             return Ok(Some(content.to_owned()));
         }
-        if event.event_type == "run.failed"
+        if matches!(event.event_type.as_str(), "run.failed" | "run.cancelled")
             && let Some(message) = event
                 .payload
                 .get("failure")
@@ -1579,7 +1742,11 @@ pub fn latest_display_output(root: impl AsRef<Path>, run_id: &str) -> Result<Opt
         {
             return Ok(Some(format!(
                 "{} {message}",
-                crate::i18n::text("Failed:", "执行失败：")
+                if event.event_type == "run.cancelled" {
+                    crate::i18n::text("Cancelled:", "已取消：")
+                } else {
+                    crate::i18n::text("Failed:", "执行失败：")
+                }
             )));
         }
         if event.event_type == "tool.finished" {
@@ -1845,6 +2012,7 @@ mod tests {
             sink: None,
             execution_mode: ExecutionMode::default(),
             history: Vec::new(),
+            cancellation: CancellationToken::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the
         // model emitted the call itself.

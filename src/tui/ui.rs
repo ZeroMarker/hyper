@@ -97,7 +97,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.busy {
         const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let status = if app.approvals.is_empty() {
+        let status = if app
+            .cancellation
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            format!(
+                "{} {}",
+                SPINNER[app.tick % SPINNER.len()],
+                i18n::text("Cancelling", "正在取消")
+            )
+        } else if app.approvals.is_empty() {
             format!(
                 "{} {}",
                 SPINNER[app.tick % SPINNER.len()],
@@ -159,8 +169,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(
         Paragraph::new(i18n::text(
-            " ↑↓/PgUp/PgDn Scroll  End Latest  Tab Mode  Enter Send  Esc Exit",
-            " ↑↓/PgUp/PgDn 滚动  End 最新  Tab 模式  Enter 发送  Esc 退出",
+            " ↑↓ Scroll  End Latest  Tab Mode  Enter Send  Esc/Ctrl-C Cancel or Exit",
+            " ↑↓ 滚动  End 最新  Tab 模式  Enter 发送  Esc/Ctrl-C 取消或退出",
         ))
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::DarkGray)),
@@ -191,7 +201,10 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
         Line::from(Span::styled(detail, Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(Span::styled(
-            i18n::text(" y Allow    n / Esc Deny", " y 允许    n / Esc 拒绝"),
+            i18n::text(
+                " y Allow    n / Esc Deny    Ctrl-C Cancel run",
+                " y 允许    n / Esc 拒绝    Ctrl-C 取消运行",
+            ),
             Style::default().fg(Color::Cyan),
         )),
     ];

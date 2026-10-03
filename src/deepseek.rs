@@ -144,6 +144,8 @@ pub struct DeepSeekConfig {
     /// Reused across the turns of an agent loop so the TLS handshake and the
     /// connection pool are paid for once per step instead of once per turn.
     client: Client,
+    async_client: reqwest::Client,
+    pub(crate) cancellation: crate::CancellationToken,
 }
 
 impl DeepSeekConfig {
@@ -211,6 +213,12 @@ impl DeepSeekConfig {
             model: settings.model,
             protocol: settings.protocol,
             timeout,
+            cancellation: crate::CancellationToken::new(),
+            async_client: reqwest::Client::builder()
+                .timeout(timeout)
+                .user_agent(USER_AGENT)
+                .default_headers(headers.clone())
+                .build()?,
             client: Client::builder()
                 .timeout(timeout)
                 .user_agent(USER_AGENT)

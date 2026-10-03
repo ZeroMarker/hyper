@@ -26,7 +26,7 @@ cargo build --bin hyper
 python3 -m unittest discover -s evals -v
 ```
 
-测试覆盖所有 fixture 的正反例、确定性与深文件位置、未知用量、超时，以及真实 Hyper CLI 对本地 HTTP stub 的端到端运行。可以通过 `HYPER_EVAL_BINARY` 指定其他二进制。
+测试覆盖所有 fixture 的正反例、确定性与深文件位置、未知用量、超时，以及真实 Hyper CLI 对本地 HTTP stub 的端到端运行；Linux 另用 PTY 验证 TUI 审批中的 Ctrl-C 取消、继续同一会话和正常退出。可以通过 `HYPER_EVAL_BINARY` 指定其他二进制。
 
 ## 真实模型基线
 

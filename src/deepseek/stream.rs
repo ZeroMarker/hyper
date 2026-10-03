@@ -1,11 +1,11 @@
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use reqwest::{blocking::Response, header::CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 use serde_json::{Value, json};
 
 use super::{
@@ -15,15 +15,56 @@ use super::{
 
 const MAX_SSE_EVENT: usize = 1024 * 1024;
 
+/// An async response exposed to the existing synchronous protocol parsers.
+/// Each socket wait selects cancellation, including JSON fallback body reads.
+struct Response {
+    response: reqwest::Response,
+    pending: Vec<u8>,
+    offset: usize,
+    cancellation: crate::CancellationToken,
+}
+impl Response {
+    fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.response.headers()
+    }
+}
+impl Read for Response {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        self.cancellation.check().map_err(std::io::Error::other)?;
+        if output.is_empty() {
+            return Ok(0);
+        }
+        while self.offset == self.pending.len() {
+            let chunk = self
+                .cancellation
+                .io(|| self.response.chunk())
+                .map_err(std::io::Error::other)?;
+            let Some(chunk) = chunk else {
+                return Ok(0);
+            };
+            self.pending = chunk.to_vec();
+            self.offset = 0;
+        }
+        let length = output.len().min(self.pending.len() - self.offset);
+        output[..length].copy_from_slice(&self.pending[self.offset..self.offset + length]);
+        self.offset += length;
+        Ok(length)
+    }
+}
+
 /// Status failures can be retried before any SSE payload is consumed. A broken
 /// stream cannot be retried: doing so would duplicate deltas already audited.
 fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
     let url = endpoint(&config.base_url, config.protocol);
     for attempt in 0..MAX_API_ATTEMPTS {
-        let response = match config.client.post(&url).json(body).send() {
+        let response = match config
+            .cancellation
+            .io(|| config.async_client.post(&url).json(body).send())
+        {
             Ok(response) => response,
+            Err(error) if config.cancellation.is_cancelled() => return Err(error),
             Err(_) if attempt + 1 < MAX_API_ATTEMPTS => {
-                std::thread::sleep(retry_delay(attempt, None));
+                config.cancellation.wait(retry_delay(attempt, None))?;
                 continue;
             }
             Err(error) => {
@@ -32,7 +73,12 @@ fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
         };
         let status = response.status();
         if status.is_success() {
-            return Ok(response);
+            return Ok(Response {
+                response,
+                pending: Vec::new(),
+                offset: 0,
+                cancellation: config.cancellation.clone(),
+            });
         }
         let retry_after = response
             .headers()
@@ -40,9 +86,11 @@ fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_secs);
-        let response_body = response.text()?;
+        let response_body = config.cancellation.io(|| response.text())?;
         if retryable_status(status) && attempt + 1 < MAX_API_ATTEMPTS {
-            std::thread::sleep(retry_delay(attempt, retry_after));
+            config
+                .cancellation
+                .wait(retry_delay(attempt, retry_after))?;
             continue;
         }
         bail!("{} API returned {status}: {response_body}", config.provider);
@@ -53,11 +101,13 @@ fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
 /// Read one SSE frame at a time, including multiline data fields. EOF without
 /// a terminal frame is an error in each protocol parser below.
 fn frames(response: Response, mut on_frame: impl FnMut(&str, &str) -> Result<bool>) -> Result<()> {
+    let cancellation = response.cancellation.clone();
     let mut reader = BufReader::new(response);
     let mut line = String::new();
     let mut event = String::new();
     let mut data = String::new();
     loop {
+        cancellation.check()?;
         line.clear();
         let count = reader
             .read_line(&mut line)

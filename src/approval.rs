@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::workspace;
+use crate::{CancellationToken, cancellation::POLL_INTERVAL};
 
 /// How long the engine waits for the UI to answer an approval request before
 /// treating it as denied. Acts as a backstop for a vanished TUI.
@@ -35,17 +36,47 @@ impl ApprovalGate {
     /// Block until the UI approves or denies the given action. Without a UI
     /// (timeout) the request is denied.
     pub fn request(&self, tool: &str, detail: &str) -> bool {
+        self.request_cancellable(tool, detail, &CancellationToken::new())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn request_cancellable(
+        &self,
+        tool: &str,
+        detail: &str,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<bool> {
+        cancellation.check()?;
         let (response, receiver) = std::sync::mpsc::channel();
+        let id = workspace::id();
         {
             let mut queue = self.queue.lock().expect("approval queue poisoned");
             queue.push_back(ApprovalRequest {
-                id: workspace::id(),
+                id: id.clone(),
                 tool: tool.into(),
                 detail: detail.into(),
                 response,
             });
         }
-        receiver.recv_timeout(APPROVAL_TIMEOUT).unwrap_or(false)
+        let started = std::time::Instant::now();
+        let result = loop {
+            if let Err(error) = cancellation.check() {
+                break Err(error);
+            }
+            if started.elapsed() >= APPROVAL_TIMEOUT {
+                break Ok(false);
+            }
+            match receiver.recv_timeout(POLL_INTERVAL) {
+                Ok(answer) => break cancellation.check().map(|()| answer),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(false),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        self.queue
+            .lock()
+            .expect("approval queue poisoned")
+            .retain(|request| request.id != id);
+        result
     }
 
     /// Take every pending request out of the queue (non-blocking).
