@@ -11,6 +11,7 @@ pub mod permissions;
 pub mod policy;
 pub mod resource;
 pub mod sandbox;
+pub mod state;
 pub mod tui;
 pub mod workspace;
 

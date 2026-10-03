@@ -12,7 +12,7 @@ import unittest
 
 from fixtures import files, materialize
 from grade import check
-from run import invoke, recover, snapshot, write_report
+from run import audit_directory, invoke, recover, snapshot, write_report
 
 HERE = Path(__file__).resolve().parent
 
@@ -141,13 +141,13 @@ class OfflineCLI(unittest.TestCase):
         import struct
         import termios
         import time
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as state_temp:
             root = Path(temp)
             (root/'README.md').write_text('TUI cancellation fixture\n')
             master, slave = os.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
             env = os.environ.copy()
-            env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'HYPER_APPROVAL':'ask', 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})
+            env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'HYPER_APPROVAL':'ask', 'HYPER_STATE_DIR':state_temp, 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})
             child = subprocess.Popen([str(self.binary),'--sandbox','workspace-write','tui'],cwd=root,env=env,
                                      stdin=slave,stdout=slave,stderr=slave,close_fds=True)
             os.close(slave)
@@ -167,7 +167,7 @@ class OfflineCLI(unittest.TestCase):
                         self.fail('TUI exited before the expected gate')
                 self.fail('TUI gate timed out')
             def summaries(status):
-                return [p for p in root.glob('.harness/runs/*/summary.json') if json.loads(p.read_text())['status']==status]
+                return [p for p in audit_directory(self.binary,root,env).glob('runs/*/summary.json') if json.loads(p.read_text())['status']==status]
             try:
                 until(lambda data: b'Hyper' in data)
                 os.write(master,b'bash:echo wrong > out.txt\r')
@@ -187,7 +187,7 @@ class OfflineCLI(unittest.TestCase):
                 os.write(master,b'/quit\r')
                 until(lambda data: child.poll() is not None)
                 self.assertEqual(child.wait(timeout=5),0)
-                sessions = list(root.glob('.harness/sessions/*.jsonl'))
+                sessions = list(audit_directory(self.binary,root,env).glob('sessions/*.jsonl'))
                 self.assertEqual(len(sessions),1)
                 self.assertEqual(len(sessions[0].read_text().splitlines()),4)
             finally:
@@ -204,7 +204,7 @@ class OfflineCLI(unittest.TestCase):
             task = root/'task.json'
             task.write_text(json.dumps({'name':'wrong edit','steps':[{'id':'edit','mode':'build',
                             'instruction':f'write:{root/"bounds.py"}\ndef clamp(n, lo, hi): return lo\n'}]}))
-            metrics, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,os.environ.copy(),root/'.harness/raw.jsonl',10)
+            metrics, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,os.environ.copy(),root.parent/('trace-'+root.name+'.jsonl'),10)
             task.unlink()
             self.assertEqual(metrics['exit_code'],0)
             self.assertNotEqual(snapshot(root),before)

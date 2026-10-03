@@ -46,13 +46,15 @@
 
 - [x] **P0-3a 共用工具权限与直接审计路径保护**：CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无处理器时 ask 明确拒绝，显式 `--approval` / `--permissions` / HYPER_APPROVAL 固定来源与优先级，审批仅授权一次。直接文件工具拒绝审计路径、符号链接和 Unix 硬链接，search/context 同步过滤；旧库 API 保持兼容。135 个 Rust 测试和 10 个离线评测测试通过，真实任务回归 28/30、恢复 3/3，保留两次既有约束/策略失败。见 [回归报告](evals/baselines/2026-10-03-permissions/report.md)。完整边界及 shell 风险复现见 [审计边界说明](docs/audit-boundary.md)。
 
+- [x] **P0-3b1 外部审计内容存储与显式迁移**：权威 state 移出 checkout，由 canonical root 的 SHA-256 在宿主状态目录定位，`ha state` 返回位置；不信任仓库定位文件，旧 `.harness`/备份用 `ha migrate-state --from` 明确导入，原始源保留且不覆盖已初始化目标。新 inode、SQLite WAL 在线备份、记录/schema 校验、session registry 修复、checkpoint 路径重绑与原子提交；活动源/坏数据/symlink 拒绝，崩溃尾片段保留 artifact 后恢复。Linux 内容写/删除/rename/hardlink 与父进程 FD 绕过实测阻断，151 个 Rust 测试通过。tmp 独立置于 workspace，artifact 仅 harness 写入。元数据不宣称已隔离。见 [实际边界](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-03 竞品复核）
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `7824c5b`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架、共享取消、共用工具权限和直接审计路径保护已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b shell 审计存储隔离与范围授权（下一项）**：直接工具保护与共用工具级权限已完成，shell 在显式 allow 后仍能改写 `.harness`，已在临时仓库复现。将 events/DB/task/summary/session/checkpoint 放入 shell 可写范围之外，验证迁移、并发、崩溃恢复和定位不可伪造；给 artifact/tmp 独立授权，补路径/命令范围与 Windows 硬链接/并发路径替换保护，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
+- [ ] **P0-3b2 元数据、路径替换与范围授权（下一项）**：外部内容/目录边界已完成，但 Linux 实测 shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。补路径/命令批准范围、Windows 硬链接与并发路径替换保护，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null` 与重复策略拒绝样本；跟踪长会话约束位置遗漏。正式基线已有一次代码正确但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 
@@ -75,4 +77,4 @@
 
 ### 评测与存储口径
 
-之前的约 2 KB trivial run / 10 KB 工具 run 是加入 SSE、历史快照和预算事件前的样本，不能作为当前容量估算。新版本每个 delta 都持久化，历史/system prompt 也固定到事件；输入、SQLite 页、artifact 和 checkpoint 另占空间。正式报告已记录每次运行的 `.harness` 逻辑/分配体积和 `prune --runs --keep 1` 效果；外部 trace 副本另外保留，不计入该体积。
+之前的约 2 KB trivial run / 10 KB 工具 run 是加入 SSE、历史快照和预算事件前的样本，不能作为当前容量估算。新版本每个 delta 都持久化，历史/system prompt 也固定到事件；输入、SQLite 页、artifact 和 checkpoint 另占空间。旧报告记录 `.harness` 逻辑/分配体积，新存储报告按权威外部审计目录统计，工作区 `.hyper-tmp` 不计入；不直接混用两种口径，均记录 `prune --runs --keep 1` 效果；外部 trace 副本另外保留，不计入该体积。

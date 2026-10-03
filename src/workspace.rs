@@ -50,6 +50,7 @@ pub struct RunPaths {
 pub struct Workspace {
     pub paths: WorkspacePaths,
     pub db: Connection,
+    _state_lease: File,
 }
 
 /// Advisory lock held for the lifetime of a run.
@@ -68,7 +69,9 @@ impl Workspace {
             .as_ref()
             .canonicalize()
             .with_context(|| format!("invalid workspace root: {}", root.as_ref().display()))?;
-        let dir = root.join(".harness");
+        let state = crate::state::open(&root)?;
+        let dir = state.dir.clone();
+        let state_lease = crate::state::lease(&dir)?;
         let paths = WorkspacePaths {
             root,
             db: dir.join("harness.db"),
@@ -78,15 +81,12 @@ impl Workspace {
         };
         fs::create_dir_all(&paths.runs)?;
         fs::create_dir_all(&paths.sessions)?;
-        let db = Connection::open(&paths.db)?;
-        // WAL lets readers continue while another process appends events, and
-        // the busy timeout absorbs short write contention between a TUI and a
-        // concurrently running command. These are connection-local settings
-        // except for journal_mode, which is persisted in the database.
-        db.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at); CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, messages INTEGER NOT NULL, runs INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);")?;
-        let workspace = Self { paths, db };
+        let db = initialize_database(&paths.db)?;
+        let workspace = Self {
+            paths,
+            db,
+            _state_lease: state_lease,
+        };
         // The JSONL files are the fact source and the index is derived from
         // them, so anything the index lost is restored first. Only then can a
         // row still saying `running` be judged: the events that would have
@@ -767,7 +767,10 @@ pub fn resolve_tool_path(root: &Path, target: &str) -> Result<PathBuf> {
         {
             // A workspace hardlink to an audit file is the same inode even
             // though canonicalize leaves its spelling outside .harness.
-            let mut pending = vec![audit];
+            let mut pending = vec![crate::state::directory(root)?];
+            if audit.is_dir() {
+                pending.push(audit);
+            }
             while let Some(directory) = pending.pop() {
                 for entry in fs::read_dir(directory)? {
                     let entry = entry?;
@@ -811,7 +814,11 @@ pub fn create_checkpoint(root: &Path, dir: &Path, target: &str) -> Result<Checkp
     }
     let cp = Checkpoint {
         id: id.clone(),
-        target_path: target.into(),
+        target_path: absolute
+            .strip_prefix(root)?
+            .to_str()
+            .context("non-UTF-8 checkpoint target")?
+            .into(),
         snapshot_path: snapshot,
         existed,
         created_at: now(),
@@ -835,4 +842,16 @@ pub fn restore_checkpoint(root: &Path, cp: &Checkpoint) -> Result<()> {
     }
     fs::copy(&cp.snapshot_path, target)?;
     Ok(())
+}
+
+pub(crate) fn initialize_database(path: &Path) -> Result<Connection> {
+    let db = Connection::open(path)?;
+    // WAL lets readers continue while another process appends events, and
+    // the busy timeout absorbs short write contention between a TUI and a
+    // concurrently running command. These are connection-local settings
+    // except for journal_mode, which is persisted in the database.
+    db.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT); CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, step_id TEXT, step_index INTEGER, payload_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id,timestamp); CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at); CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, messages INTEGER NOT NULL, runs INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);")?;
+    Ok(db)
 }

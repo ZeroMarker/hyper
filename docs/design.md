@@ -30,7 +30,7 @@ flowchart LR
 | [`model.rs`](../src/model.rs) | 任务、步骤、事件、摘要及会话的数据结构和校验 |
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
 | [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
-| [`workspace.rs`](../src/workspace.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
+| [`state.rs`](../src/state.rs)、[`workspace.rs`](../src/workspace.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
 | [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock、子进程资源限制 |
 | [`approval.rs`](../src/approval.rs)、[`event_sink.rs`](../src/event_sink.rs) | TUI 与工作线程之间的审批和状态传递 |
 | [`i18n.rs`](../src/i18n.rs) | 界面文案；默认英语，`HYPER_LANG=zh` 或 `zh-CN` 切换中文 |
@@ -57,7 +57,9 @@ flowchart LR
 ## 本地持久化
 
 ```text
-<workspace>/.harness/
+<ha state 返回的 storageDir>/
+  workspace.json             # 外部目录中的工作区身份，仓库不提供定位信息
+  migration.lock             # 已打开工作区的共享 lease
   harness.db                 # runs、events、sessions 的查询索引
   runs/<run-id>/
     task.json                # 原始任务
@@ -67,7 +69,6 @@ flowchart LR
     artifacts/               # Shell 输出等产物
     checkpoints/             # write/edit 前的文件快照
   sessions/<session-id>.jsonl # 用户提示与助手答复
-  tmp/                       # 沙箱 Shell 临时目录
 ```
 
 `events.jsonl` 是事件事实来源，SQLite 是可重建的查询索引。打开工作区时，程序比较事件文件的行数与索引记录数，必要时重放日志；仍标为 `running` 且运行锁已释放的记录会被修复为中断状态。不完整的末行不会作为完整事件。此机制处理索引落后和进程中断，不等于每条事件都已完成磁盘同步。
@@ -78,6 +79,14 @@ flowchart LR
 
 `replay` 根据 `task.json`、事件中的模型输入、助手工具调用和观察结果重建模型消息；新运行还在事件中固定实际发送的历史与系统提示词，删除会话或升级提示词后仍能还原。旧运行回退到会话文件中的历史和当前系统提示词，忘记会话会丢失其前缀；缺少必要输入/助手/观察字段的旧运行会报错。它不调用模型或执行工具，但打开工作区可能修复 SQLite 索引。有预算事件时，replay 停在最后一次通过预算的请求；首次请求超预算则不返回模型步骤，未发送的观察结果只保留在审计中。replay 不重新运行任务，也不恢复当时的文件系统状态。
 
+审计位置按 canonical workspace path 的 SHA-256 在宿主状态目录查找，`HYPER_STATE_DIR`
+只能指定工作区外的绝对目录，工作区没有可写定位文件。`ha state` 返回实际位置；
+`ha migrate-state --from` 明确导入旧目录或备份，拒绝覆盖、symlink 和活动源，使用 SQLite
+在线备份、记录/schema 校验、原子目录提交及新的 inode，源数据不改写。旧 binary/其他写者
+必须停止；新版本所有已打开 Workspace 持共享 lease。原始事件保持历史请求，检查点快照
+重绑至新存储，target 保存为工作区相对路径。session registry 可按 transcript 修复。
+shell tmp 移入 `.hyper-tmp`，artifact 仍由 harness 收集至外部审计目录。
+
 ## 执行边界
 
 - `plan` 模式拒绝 `bash` 和写入；`build` 模式允许经过策略检查的工具。步骤的 `tools` 白名单也约束直接指令和模型工具调用。
@@ -85,7 +94,7 @@ flowchart LR
 - `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；直接文件工具拒绝 `.harness` 及符号链接/Unix 硬链接别名。search 和自动上下文也过滤这些路径；审批后重复检查目标。Windows 硬链接和并发替换的描述符级保护仍待完善。`read-only` 执行模式拒绝写入。
 - Shell 默认使用 `workspace-write` 模式：先经命令策略检查，再在 Linux 子进程应用 Landlock，允许工作区内写入，拒绝 TCP 连接与监听。`read-only` 不授权文件写入；`unrestricted` 显式跳过 Landlock 和该命令策略检查。无可用 Landlock 时，受限模式的 Shell 启动失败。
 - Linux Shell 子进程默认使用约 8 GiB 地址空间、1 GiB 单文件大小、以及与步骤超时相关的 CPU 秒数限制；步骤可以覆盖这些值。墙钟超时默认 120 秒，超时后终止进程组。限制按进程生效，不是整个进程树的总额。
-- Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。工作区内的 `.harness` 也处于可写范围。`unrestricted` 模式具有宿主进程的常规权限。
+- Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。权威审计目录已移出工作区，受限 shell 的写入/删除/跨层级移动/硬链接被阻断；预先准备的审计 inode 硬链接会在 shell 启动前拒绝。旧 `.harness` 仅是非权威遗留数据。Linux 实测 chmod 仍可改变外部审计文件权限，可能导致后续访问失败，元数据隔离仍需交付。`unrestricted` 模式具有宿主进程的常规权限。
 - Shell 的 stdout/stderr 在事件中各保留最多 256 KiB，在产物中各保留最多 4 MiB；超出部分继续读取但不保存。审计和 replay 应按这些截断边界理解。
 
 ## 修改入口与验证

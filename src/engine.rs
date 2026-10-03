@@ -572,6 +572,8 @@ fn workspace_context(root: &Path) -> Result<String> {
             "-g",
             "!.harness/**",
             "-g",
+            "!.hyper-tmp/**",
+            "-g",
             "!target/**",
         ])
         .current_dir(root)
@@ -666,7 +668,7 @@ fn workspace_files(root: &Path, include_hidden: bool, limit: usize) -> Vec<Strin
         }
         !matches!(
             entry.file_name().to_str(),
-            Some(".git" | ".harness" | "target" | "node_modules")
+            Some(".git" | ".harness" | ".hyper-tmp" | "target" | "node_modules")
         )
     });
     builder
@@ -714,6 +716,9 @@ fn bash(
         None,
         Some(command),
     )?;
+    if events.execution_mode != ExecutionMode::Unrestricted {
+        crate::state::validate_shell_boundary(root, &events.workspace.paths.dir)?;
+    }
     let sandbox = if events.execution_mode == ExecutionMode::Unrestricted {
         None
     } else {
@@ -755,8 +760,10 @@ fn bash(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if events.execution_mode != ExecutionMode::Unrestricted {
-        let temp = root.join(".harness").join("tmp");
-        fs::create_dir_all(&temp)?;
+        let temp = root.join(".hyper-tmp");
+        if events.execution_mode == ExecutionMode::WorkspaceWrite {
+            fs::create_dir_all(&temp)?;
+        }
         builder
             .env("TMPDIR", &temp)
             .env("TMP", &temp)
@@ -1521,7 +1528,7 @@ fn run_task_inner(
     };
     events.write(
         "run.started",
-        json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode,"permissions":events.permissions,"permissionSource":events.permissions.source}),
+        json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode,"permissions":events.permissions,"permissionSource":events.permissions.source,"storageDir":workspace.paths.dir}),
         None,
         None,
     )?;

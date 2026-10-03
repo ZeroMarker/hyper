@@ -25,7 +25,7 @@ def digest(path):
 
 def snapshot(root):
     return {str(p.relative_to(root)): digest(p) for p in sorted(root.rglob('*'))
-            if p.is_file() and not any(part in {'.harness', 'target', '__pycache__', '.git'} for part in p.relative_to(root).parts)}
+            if p.is_file() and not any(part in {'.harness', '.hyper-tmp', 'target', '__pycache__', '.git'} for part in p.relative_to(root).parts)}
 
 
 def storage(root):
@@ -109,7 +109,11 @@ def invoke(command, root, env, output, timeout):
     # Check stdout against persisted JSONL, not a provider-dependent summary.
     identical = bool(events)
     for run_id in {e.get('runId') for e in events}:
-        path = root/'.harness/runs'/str(run_id)/'events.jsonl'
+        start = next((e for e in events if e['type']=='run.started' and e['runId']==run_id), None)
+        if not start or not start['payload'].get('storageDir'):
+            identical = False
+            continue
+        path = Path(start['payload']['storageDir'])/'runs'/str(run_id)/'events.jsonl'
         try:
             persisted = [json.loads(line) for line in path.read_text().splitlines()]
             identical &= persisted == [e for e in events if e.get('runId') == run_id]
@@ -134,10 +138,16 @@ def invoke(command, root, env, output, timeout):
     return metrics, '\n'.join(replies)
 
 
+def audit_directory(binary, root, env):
+    result = subprocess.run([str(binary), 'state'], cwd=root, env=env, capture_output=True, text=True, timeout=10)
+    result.check_returncode()
+    return Path(json.loads(result.stdout)['storageDir'])
+
+
 def recover(binary, root, run_ids, env):
     if len(run_ids) != 1:
         return False
-    directory = root/'.harness/runs'/run_ids[0]/'checkpoints'
+    directory = audit_directory(binary, root, env)/'runs'/run_ids[0]/'checkpoints'
     checkpoints = [json.loads(p.read_text()) for p in directory.glob('*.json')]
     if not checkpoints:
         return False
@@ -171,6 +181,8 @@ def attempt(task, repetition, args, env):
     destination = args.output/f"{task['id']}-{repetition}"
     root = destination/'repo'
     root.mkdir(parents=True)
+    env = env.copy()
+    env['HYPER_STATE_DIR'] = str((destination/'state').resolve())
     materialize(task['id'], root)
     before = snapshot(root)
     turns = []
@@ -203,9 +215,10 @@ def attempt(task, repetition, args, env):
     verdict, grade_code = grade_task(task['id'], root, destination/'reply.txt')
     harness_ok = len(turns) == len(task['turns']) and all(t['exit_code'] == 0 and t['finished'] and t['persisted_stream_matches'] and not t['invalid_event_lines'] for t in turns)
     passed = harness_ok and grade_code == 0 and verdict['passed'] and not unexpected and recovery is not False
-    before_prune = storage(root/'.harness')
+    state = audit_directory(args.hyper, root, env)
+    before_prune = storage(state)
     pruning = subprocess.run([str(args.hyper), 'prune', '--runs', '--keep', '1'], cwd=root, env=env, capture_output=True, timeout=20)
-    after_prune = storage(root/'.harness')
+    after_prune = storage(state)
     complete = all(t['usage_complete'] for t in turns)
     usage = {k: sum(t['usage'][k] for t in turns) for k in ['prompt_tokens','completion_tokens','total_tokens']} if complete else None
     error = ('HarnessTimeout' if any(t['timed_out'] for t in turns) else
@@ -295,6 +308,7 @@ def main():
                 'history_tokens': args.history_tokens, 'max_model_turns': 12, 'repetitions': args.repetitions,
                 'jobs': args.jobs, 'turn_timeout_seconds': args.timeout, 'platform': sys.platform,
                 'approval_policy': 'explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply',
+                'audit_storage': 'layout 1; explicit per-attempt external state; workspace .hyper-tmp excluded from audit storage metrics',
                 'tools': ['read','search','bash','write','edit'], 'cost': None,
                 'tool_versions': {tool: subprocess.check_output([tool, '--version'], text=True).splitlines()[0] for tool in ['python3','node','rustc']}}
     results = []

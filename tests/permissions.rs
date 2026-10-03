@@ -35,6 +35,7 @@ fn task(instructions: &[&str]) -> TaskSpec {
 fn file_tools_cannot_read_or_overwrite_audit_paths_even_with_allow() {
     let root = tempdir().unwrap();
     Workspace::open(root.path()).unwrap();
+    fs::create_dir_all(root.path().join(".harness")).unwrap();
     let marker = root.path().join(".harness/marker");
     fs::write(&marker, "original").unwrap();
     let absolute = marker.to_string_lossy().into_owned();
@@ -74,6 +75,7 @@ fn audit_symlink_and_hardlink_aliases_are_rejected() {
     use std::os::unix::fs::symlink;
     let root = tempdir().unwrap();
     Workspace::open(root.path()).unwrap();
+    fs::create_dir_all(root.path().join(".harness")).unwrap();
     let marker = root.path().join(".harness/marker");
     fs::write(&marker, "original").unwrap();
     symlink(root.path().join(".harness"), root.path().join("alias")).unwrap();
@@ -292,6 +294,7 @@ fn cli_permissions_are_explicit_strict_and_record_precedence() {
 fn search_does_not_return_audit_content_through_hardlinks() {
     let root = tempdir().unwrap();
     Workspace::open(root.path()).unwrap();
+    fs::create_dir_all(root.path().join(".harness")).unwrap();
     let marker = root.path().join(".harness/marker");
     fs::write(&marker, "AUDIT_SECRET_SENTINEL").unwrap();
     fs::hard_link(marker, root.path().join("visible.txt")).unwrap();

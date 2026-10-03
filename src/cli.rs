@@ -51,6 +51,13 @@ enum Commands {
     /// Configure the provider API key, base URL and model
     Config,
     Init,
+    /// Print authoritative audit storage paths as JSON
+    State,
+    /// Import legacy .harness or an external state backup into a fresh workspace
+    MigrateState {
+        #[arg(long)]
+        from: PathBuf,
+    },
     #[command(visible_alias = "v")]
     Validate {
         task: PathBuf,
@@ -199,6 +206,22 @@ pub fn run() -> Result<()> {
         Commands::Init => {
             let ws = Workspace::open(&root)?;
             println!("initialized {}", ws.paths.dir.display())
+        }
+        Commands::State => {
+            let workspace = Workspace::open(&root)?;
+            println!(
+                "{}",
+                serde_json::json!({"layoutVersion":1,"workspaceRoot":workspace.paths.root,
+                "storageDir":workspace.paths.dir,"runsDir":workspace.paths.runs,"sessionsDir":workspace.paths.sessions})
+            );
+        }
+        Commands::MigrateState { from } => {
+            let dir = crate::state::migrate(&root, &from)?;
+            let workspace = Workspace::open(&root)?;
+            println!(
+                "{}",
+                serde_json::json!({"storageDir":dir,"runs":workspace.list_runs(usize::MAX)?.len()})
+            );
         }
         Commands::Validate { task } => {
             let task = read_task(&task)?;
@@ -430,7 +453,11 @@ fn diff(root: &std::path::Path, run_id: &str) -> Result<()> {
 }
 
 fn artifacts(root: &std::path::Path, run_id: &str) -> Result<()> {
-    let dir = root.join(".harness/runs").join(run_id).join("artifacts");
+    let dir = Workspace::open(root)?
+        .paths
+        .runs
+        .join(run_id)
+        .join("artifacts");
     let entries = fs::read_dir(&dir)
         .with_context(|| format!("run {run_id} has no artifacts directory"))?
         .filter_map(Result::ok)
@@ -522,7 +549,11 @@ fn read_task(path: &PathBuf) -> Result<TaskSpec> {
 }
 
 fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
-    let dir = root.join(".harness/runs").join(run_id).join("checkpoints");
+    let dir = Workspace::open(root)?
+        .paths
+        .runs
+        .join(run_id)
+        .join("checkpoints");
     let files = fs::read_dir(&dir)
         .with_context(|| format!("run {run_id} has no checkpoint directory"))?
         .filter_map(Result::ok)

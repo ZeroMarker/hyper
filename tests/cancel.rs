@@ -64,7 +64,15 @@ fn assert_cancelled(root: &Path, id: &str) {
         "run.failed" | "run.finished" | "run.interrupted"
     )));
     let summary: Value = serde_json::from_slice(
-        &fs::read(root.join(".harness/runs").join(id).join("summary.json")).unwrap(),
+        &fs::read(
+            Workspace::open(root)
+                .unwrap()
+                .paths
+                .runs
+                .join(id)
+                .join("summary.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(summary["status"], "cancelled");
@@ -512,7 +520,7 @@ fn cli_cancels_while_jsonl_consumer_stops_reading() {
     let _unread_stdout = child.stdout.take().unwrap();
     let mut event_file = None;
     wait_for(|| {
-        event_file = fs::read_dir(root.path().join(".harness/runs"))
+        event_file = fs::read_dir(harness::state::directory(root.path()).unwrap().join("runs"))
             .ok()
             .and_then(|mut dirs| dirs.next())
             .and_then(Result::ok)

@@ -73,8 +73,10 @@ fn cli_jsonl_matches_persisted_events_and_preserves_exit_status() {
         assert_eq!(events.last().unwrap()["type"], terminal);
         let run_id = events[0]["runId"].as_str().unwrap();
         let log = fs::read_to_string(
-            dir.path()
-                .join(".harness/runs")
+            Workspace::open(dir.path())
+                .unwrap()
+                .paths
+                .runs
                 .join(run_id)
                 .join("events.jsonl"),
         )
@@ -736,9 +738,10 @@ fn write_can_be_restored() {
     )
     .unwrap();
     assert_eq!(fs::read_to_string(&file).unwrap(), "after");
-    let cp_dir = dir
-        .path()
-        .join(".harness/runs")
+    let cp_dir = Workspace::open(dir.path())
+        .unwrap()
+        .paths
+        .runs
         .join(summary.run_id)
         .join("checkpoints");
     let cp_file = fs::read_dir(cp_dir)
@@ -998,8 +1001,10 @@ fn crashed_runs_are_repaired_when_the_workspace_is_reopened() {
         "interrupted"
     );
     assert!(
-        dir.path()
-            .join(".harness/runs")
+        Workspace::open(dir.path())
+            .unwrap()
+            .paths
+            .runs
             .join(run_id)
             .join("summary.json")
             .exists(),
@@ -1549,7 +1554,7 @@ fn replay_rebuilds_the_messages_the_model_was_sent() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let run_id = fs::read_dir(dir.path().join(".harness/runs"))
+    let run_id = fs::read_dir(Workspace::open(dir.path()).unwrap().paths.runs)
         .unwrap()
         .next()
         .unwrap()
@@ -1991,10 +1996,13 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
         .expect("the artifact must be named in the event");
     assert_eq!(
         relative,
-        format!(
-            ".harness/runs/{}/artifacts/step-0-bash-stdout.log",
-            summary.run_id
-        )
+        Workspace::open(dir.path())
+            .unwrap()
+            .paths
+            .runs
+            .join(&summary.run_id)
+            .join("artifacts/step-0-bash-stdout.log")
+            .to_string_lossy()
     );
     let kept = fs::read_to_string(dir.path().join(relative)).unwrap();
     assert!(
@@ -2011,8 +2019,12 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
     );
     // An empty stream leaves no zero-byte file behind to wade through.
     assert!(
-        !dir.path()
-            .join(format!(".harness/runs/{}/artifacts", summary.run_id))
+        !Workspace::open(dir.path())
+            .unwrap()
+            .paths
+            .runs
+            .join(&summary.run_id)
+            .join("artifacts")
             .join("step-0-bash-stderr.log")
             .exists()
     );
@@ -2063,8 +2075,12 @@ fn the_index_is_rebuilt_from_the_jsonl_log() {
 
     let events = reopened.events(&summary.run_id).unwrap();
     let logged = fs::read_to_string(
-        dir.path()
-            .join(format!(".harness/runs/{}/events.jsonl", summary.run_id)),
+        Workspace::open(dir.path())
+            .unwrap()
+            .paths
+            .runs
+            .join(&summary.run_id)
+            .join("events.jsonl"),
     )
     .unwrap();
     let lines = logged
@@ -2138,7 +2154,7 @@ fn prune_keeps_the_most_recent_conversations_and_runs() {
 
     // Runs report the same way, and a dry run writes nothing at all — not
     // even the lock file the staleness probe used to leave behind.
-    let runs = dir.path().join(".harness/runs");
+    let runs = Workspace::open(dir.path()).unwrap().paths.runs;
     let (code, stdout) = hy(&["prune", "--runs", "--keep", "0", "--dry-run"]);
     assert_eq!(code, Some(0), "{stdout}");
     assert!(

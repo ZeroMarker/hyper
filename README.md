@@ -310,7 +310,7 @@ with a fresh run token. TUI `/quit` and shutdown wait for the active worker to s
 
 On Unix, CLI JSONL pipe backpressure is also cancellable. If a consumer stops
 reading or the output closes during cancellation, stdout can be incomplete;
-the full cancellation event, summary and session still persist in `.harness`.
+the full cancellation event, summary and session still persist in the external audit store.
 Native Windows pipe backpressure, terminal rendering backpressure, and OS-blocked filesystem I/O do not yet have
 a bounded cancellation guarantee. Custom synchronous event writers must supply
 their own interruptible I/O. Linux gated tests assert completion within two
@@ -345,14 +345,20 @@ compatibility, older `run_task*` helpers retain their prior automatic mutation
 permission or gated approval behavior; their source is `legacy-library-api`.
 Use `run_task_with_control` for explicit decisions and the default ask policy.
 
-Agent file tools deny `.harness` audit/control paths even with `allow`, including
-resolved symlink aliases and Unix hardlinks. Search/context exclude such files;
-repeat file-path checks after approvals. This also excludes direct access to
-artifacts/tmp; administrative artifact, checkpoint, restore and replay commands
-remain available. These checks are not filesystem isolation: approved shell
-commands can still write `.harness` under the current workspace-wide Landlock
-rule. Shell audit storage isolation, Windows hardlink detection and protection
-against concurrent path replacement remain pending P0-3 work.
+Agent file tools deny the retired `.harness` area, including resolved symlink
+aliases and Unix hardlinks; search/context also filter these files. Authoritative
+audit storage now lives outside the workspace. Restricted Linux shell commands
+cannot write, delete, rename or hardlink these external records. Pre-existing
+hardlink aliases fail closed before shell execution. Artifact output is collected
+by the harness into the external store; shell temporary files use `.hyper-tmp`
+inside the workspace, with the configured workspace write boundary.
+
+This protects file content and directory entries, not all metadata: on the tested
+Linux kernel a shell can still chmod an external audit file, potentially denying
+future access. Metadata isolation, Windows hardlink detection, concurrent path
+replacement and path/command permission scopes remain pending. `unrestricted`
+shells retain host permissions, including access to external state. See the
+[measured boundaries](docs/audit-boundary.md).
 Shell tool stdin is closed; supply command input with pipes or redirection,
 so a tool cannot consume TUI keyboard events.
 
@@ -372,7 +378,8 @@ ha --approval allow --sandbox unrestricted "build this project"
 
 `HYPER_SANDBOX` sets the default for either interface; `--sandbox` overrides
 it. The effective mode is recorded in `run.started` and shown in the TUI.
-Sandboxed shell commands use `.harness/tmp` for temporary files. A kernel
+Workspace-write shell commands use `.hyper-tmp` for temporary files; read-only
+runs do not create this directory. A kernel
 without Landlock ABI 4, or a non-Linux host, rejects sandboxed `bash` instead
 of silently running it without isolation. To run shell commands there, select
 `unrestricted` explicitly.
@@ -431,10 +438,41 @@ limit remains in force. Explicit `limits` on non-Linux hosts are rejected.
 
 ## Workspace
 
-Runs are stored beneath `.harness/` using the existing compatible layout:
+Runs are stored outside the checkout. `ha state` prints the authoritative paths
+as JSON. Linux defaults to `$XDG_STATE_HOME/hyper/workspaces/<workspace-key>`
+(or `~/.local/state/hyper/...`); other platforms use the user data directory when
+no state directory is available. `HYPER_STATE_DIR` selects an absolute base outside
+the workspace; symlinked registries and storage inside the workspace fail closed.
+The key is SHA-256 of the canonical workspace path. Unix registry/store directories
+are owner-only. The checkout supplies no locator, symlink or state identity.
+
+```bash
+ha state
+# In a legacy checkout, before other commands and after stopping old runs:
+ha migrate-state --from .harness
+# In a fresh moved/restored checkout, before initializing destination state:
+ha migrate-state --from /absolute/path/to/previous-storage-or-backup
+```
+
+Migration is explicit: existing `.harness` data is never imported automatically.
+It copies fresh inodes, snapshots SQLite including committed WAL data, validates
+records/schema, rebinds checkpoint paths and commits by atomic directory rename.
+The source remains unchanged; temporary legacy files are excluded. Invalid data,
+symlinks, active run locks and open source workspaces are refused. Stop older
+binaries and other source writers before copying/importing, since they do not
+participate in the new shared lease. Imports never overwrite initialized state.
+For backups and workspace moves, save the path from `ha state`, stop writers,
+copy that complete external directory and the checkout, then import explicitly
+before running in the destination. Checkpoints use relative target paths; model
+request history retains the original messages for replay. State is intentionally
+not carried by Git or located through a writable checkout file.
+
+The external directory keeps the familiar layout:
 
 ```text
-.harness/
+<storageDir>/
+  workspace.json
+  migration.lock
   harness.db
   runs/<run-id>/
     events.jsonl

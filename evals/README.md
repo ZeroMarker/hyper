@@ -57,4 +57,4 @@ API Key 来自 `DEEPSEEK_API_KEY` 或 `--config` 指定的 Hyper 配置；默认
 
 缺失 usage 为未知，部分已知用量单列；不以零替代，也不臆测价格，成本目前为 `null`。任何任务失败都返回非零退出码，汇总仍保留。评测结果与离线 stub 测试分开统计。
 
-每个 attempt 完成后测量 `.harness` 的文件数量、逻辑字节和磁盘分配字节，再运行 `prune --runs --keep 1` 并复测。保留策略只作用于该 attempt 的新仓库；会话和最终修改仍保留。单 run 任务本就没有可删除的旧 run，多轮任务可展示事件/checkpoint 清理效果。外部原始 JSONL 副本不计入 `.harness` 容量，也不由 prune 删除。
+每个 attempt 使用 repo 外独立 `HYPER_STATE_DIR`，根据权威 state 位置验证持久化事件，并在完成后测量外部审计目录的文件数量、逻辑字节和磁盘分配字节，再运行 `prune --runs --keep 1` 并复测。保留策略只作用于该 attempt 的新仓库；会话和最终修改仍保留。单 run 任务本就没有可删除的旧 run，多轮任务可展示事件/checkpoint 清理效果。外部原始 JSONL 副本不计入审计容量，也不由 prune 删除。`.hyper-tmp`/编译产物留在工作区，不计入外部审计存储；这与旧 `.harness/tmp` 的存储口径不同，不直接比较容量。
