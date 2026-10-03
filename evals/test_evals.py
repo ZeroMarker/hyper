@@ -12,7 +12,7 @@ import unittest
 
 from fixtures import files, materialize
 from grade import check
-from run import invoke, snapshot, write_report
+from run import invoke, recover, snapshot, write_report
 
 HERE = Path(__file__).resolve().parent
 
@@ -133,6 +133,21 @@ class OfflineCLI(unittest.TestCase):
             self.assertTrue(metrics['timed_out'])
             self.assertFalse(metrics['finished'])
             self.assertLess(metrics['duration_seconds'],3)
+
+    def test_restore_accepts_absolute_checkpoint_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            materialize('checkpoint-recovery',root)
+            before = snapshot(root)
+            task = root/'task.json'
+            task.write_text(json.dumps({'name':'wrong edit','steps':[{'id':'edit','mode':'build',
+                            'instruction':f'write:{root/"bounds.py"}\ndef clamp(n, lo, hi): return lo\n'}]}))
+            metrics, _ = invoke([str(self.binary),'--jsonl','run',str(task)],root,os.environ.copy(),root/'.harness/raw.jsonl',10)
+            task.unlink()
+            self.assertEqual(metrics['exit_code'],0)
+            self.assertNotEqual(snapshot(root),before)
+            self.assertTrue(recover(self.binary,root,metrics['run_ids'],os.environ.copy()))
+            self.assertEqual(snapshot(root),before)
 
     def test_partial_usage_and_failed_tools_are_distinct(self):
         with tempfile.TemporaryDirectory() as temp, self.provider(usage=False, tool_first=True) as server:

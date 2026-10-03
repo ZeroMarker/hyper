@@ -143,7 +143,10 @@ def recover(binary, root, run_ids, env):
         return False
     # The scenario asks for a single direct edit. Restore the earliest snapshot,
     # not the latest, so multiple edits cannot accidentally become the oracle.
-    checkpoints = [c for c in checkpoints if c['targetPath'] == 'bounds.py']
+    def target(checkpoint):
+        path = Path(checkpoint['targetPath'])
+        return (path if path.is_absolute() else root/path).resolve()
+    checkpoints = [c for c in checkpoints if target(c) == (root/'bounds.py').resolve()]
     if not checkpoints:
         return False
     checkpoint = min(checkpoints, key=lambda c: (c['createdAt'], c['id']))
@@ -206,7 +209,7 @@ def attempt(task, repetition, args, env):
     complete = all(t['usage_complete'] for t in turns)
     usage = {k: sum(t['usage'][k] for t in turns) for k in ['prompt_tokens','completion_tokens','total_tokens']} if complete else None
     error = ('HarnessTimeout' if any(t['timed_out'] for t in turns) else
-             'HarnessFailure' if not harness_ok else 'RecoveryFailure' if recovery is False else
+             'RecoveryFailure' if recovery is False else 'HarnessFailure' if not harness_ok else
              'UnexpectedFileChange' if unexpected else verdict['error'])
     result = {'task': task['id'], 'repetition': repetition, 'passed': passed,
               'error': None if passed else error, 'grader': verdict, 'harness_ok': harness_ok,
