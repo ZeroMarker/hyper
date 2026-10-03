@@ -1,24 +1,50 @@
 use std::{
     collections::VecDeque,
+    io::Write,
     sync::{Arc, Mutex},
 };
+
+use anyhow::{Context, Result};
 
 use crate::model::HarnessEvent;
 
 const MAX_PENDING: usize = 128;
 const MAX_PENDING_TEXT: usize = 128 * 1024;
 
-/// A bounded handoff from the task worker to the TUI. The audit log remains
-/// authoritative; the UI can safely skip old updates if it falls behind.
+/// A persisted-event destination: bounded TUI updates by default, or a
+/// lossless JSONL writer. The audit log remains authoritative in both modes.
 #[derive(Clone, Default)]
 pub struct EventSink {
     queue: Arc<Mutex<VecDeque<String>>>,
     text: Arc<Mutex<String>>,
+    jsonl: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
 }
 
 impl EventSink {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A lossless synchronous event stream. Flush each persisted event so
+    /// consumers see progress while the task runs; slow consumers apply
+    /// backpressure instead of dropping audit events.
+    pub fn jsonl(writer: impl Write + Send + 'static) -> Self {
+        Self {
+            jsonl: Some(Arc::new(Mutex::new(Box::new(writer)))),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn publish(&self, event: &HarnessEvent) -> Result<()> {
+        if let Some(writer) = &self.jsonl {
+            let mut writer = writer.lock().expect("JSONL output poisoned");
+            serde_json::to_writer(&mut **writer, event).context("failed to write JSONL event")?;
+            writeln!(writer).context("failed to write JSONL newline")?;
+            writer.flush().context("failed to flush JSONL event")?;
+        } else {
+            self.push(event);
+        }
+        Ok(())
     }
 
     pub fn push(&self, event: &HarnessEvent) {

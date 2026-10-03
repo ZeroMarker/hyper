@@ -4,6 +4,10 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-03（第三轮）：完成 CLI 实时 JSONL。`--jsonl` 支持 run/plan/build/直接 prompt 及会话，每条事件在 JSONL 文件与 SQLite 写入后立即输出并 flush；stdout 与审计日志完全一致。运行成功/失败终结事件保留 summary/failure，失败退出码为 1，诊断在 stderr；不打开配置向导。慢消费者施加背压；输出/flush 失败返回错误，已写审计事件保留，未完成运行在下次打开工作区时恢复为 interrupted。TUI 继续使用原有有界队列。
+
+本轮验证：54 单元 + 54 run 集成 + 5 task 集成，共 113 测试通过；fmt、Clippy（warnings 视为错误）和 release 构建通过。门控 SSE 测试确认 CLI 在提供商完成前收到 delta，另覆盖完整日志一致性、四种入口、会话、任务失败退出码、缺少配置、非运行命令拒绝，以及 flush 故障阻止工具执行并保留审计。
+
 2026-10-03（第二轮）：完成总请求预算。`HYPER_CONTEXT_TOKENS`（默认 128000）预留 `HYPER_OUTPUT_TOKENS`（默认 8192），三种协议均发送输出上限。每轮按实际协议 JSON 请求体的 UTF-8 字节数估算，覆盖工具定义、参数和观察结果；首次请求可继续裁掉完整旧会话，必要上下文超预算时在发送前以 `ContextBudgetError` 失败。每轮预算事件可审计，TUI 显示用量；replay 排除超预算而未发送的后续消息。模型能力探测与精确 tokenizer 仍在待办。
 
 本轮验证：54 单元 + 48 run 集成 + 5 task 集成，共 107 测试通过；fmt、Clippy（warnings 视为错误）和 release 构建通过。新测试覆盖输出预留和配置校验、三协议流式/非流式输出上限、首次超预算、完整历史裁剪及工具输出增长后的准确 replay。stub 服务现在按 Content-Length 读完整请求，避免网络分片造成请求体记录不完整。

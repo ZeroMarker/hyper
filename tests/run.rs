@@ -46,6 +46,275 @@ fn task_with_tools(name: &str, tools: Vec<String>, instruction: &str) -> TaskSpe
 }
 
 #[test]
+fn cli_jsonl_matches_persisted_events_and_preserves_exit_status() {
+    for (instruction, status, terminal) in [
+        ("write:out.txt\nhello", 0, "run.finished"),
+        ("read:missing.txt", 1, "run.failed"),
+    ] {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("task.json"),
+            serde_json::to_vec(&task("jsonl", AgentMode::Build, instruction)).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(["run", "--jsonl", "task.json"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(status));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let events: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events[0]["type"], "run.started");
+        assert_eq!(events.last().unwrap()["type"], terminal);
+        let run_id = events[0]["runId"].as_str().unwrap();
+        let log = fs::read_to_string(
+            dir.path()
+                .join(".harness/runs")
+                .join(run_id)
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            stdout, log,
+            "JSONL must stream every persisted event in order"
+        );
+    }
+}
+
+#[test]
+fn cli_jsonl_rejects_non_run_commands_without_opening_workspace() {
+    let dir = tempdir().unwrap();
+    for args in [
+        vec!["--jsonl", "runs"],
+        vec!["--jsonl", "tui"],
+        vec!["--jsonl"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--jsonl requires"));
+        assert!(!dir.path().join(".harness").exists());
+    }
+}
+
+#[test]
+fn cli_jsonl_records_missing_provider_configuration_as_a_run_failure() {
+    let dir = tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "plan", "hello"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("empty-config"))
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[0]["type"], "run.started");
+    let failed = events.last().unwrap();
+    assert_eq!(failed["type"], "run.failed");
+    assert!(
+        failed["payload"]["failure"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("API key is not configured")
+    );
+}
+
+#[test]
+fn cli_jsonl_build_and_direct_prompt_emit_events_without_plain_text() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"hello"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![reply, reply]);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+    for args in [
+        vec!["--jsonl", "build", "say hello"],
+        vec!["--jsonl", "say hello"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .args(args)
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("DEEPSEEK_BASE_URL")
+            .env_remove("DEEPSEEK_MODEL")
+            .env_remove("DEEPSEEK_PROTOCOL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let finished = events
+            .iter()
+            .find(|event| event["type"] == "model.finished")
+            .unwrap();
+        assert_eq!(finished["payload"]["response"]["content"], "hello");
+        assert_eq!(events.last().unwrap()["type"], "run.finished");
+    }
+    server.join().unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn jsonl_flush_failure_stops_before_tools_and_keeps_the_audit_event() {
+    struct FailingOutput;
+    impl std::io::Write for FailingOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "consumer closed",
+            ))
+        }
+    }
+    let dir = tempdir().unwrap();
+    let error = harness::run_task_with_event_sink(
+        &task("jsonl", AgentMode::Build, "write:out.txt\nhello"),
+        dir.path(),
+        None,
+        EventSink::jsonl(FailingOutput),
+        ExecutionMode::default(),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("failed to flush JSONL event"));
+    assert!(!dir.path().join("out.txt").exists());
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let run = &workspace.list_runs(1).unwrap()[0];
+    assert_eq!(run.status, "interrupted");
+    assert_eq!(
+        workspace.events(&run.run_id).unwrap()[0].event_type,
+        "run.started"
+    );
+}
+
+#[test]
+fn cli_jsonl_delivers_model_delta_before_provider_completion() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if body.len() >= length {
+                    break;
+                }
+            }
+        }
+        let first =
+            "data: {\"model\":\"stub\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+        let rest = "data: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}", first.len() + rest.len()).unwrap();
+        stream.flush().unwrap();
+        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        stream.write_all(rest.as_bytes()).unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "plan", "--session", "live", "say hello"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (line_tx, line_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            line_tx.send(line.unwrap()).unwrap();
+        }
+    });
+    let mut lines = Vec::new();
+    loop {
+        let line = line_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let delta = event["type"] == "model.delta";
+        lines.push(line);
+        if delta {
+            assert_eq!(event["payload"]["content"], "hello");
+            break;
+        }
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "delta must arrive during the run"
+    );
+    release_tx.send(()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    reader.join().unwrap();
+    lines.extend(line_rx.try_iter());
+    let first: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    let last: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(last["type"], "run.finished");
+    let workspace = Workspace::open(dir.path()).unwrap();
+    assert_eq!(workspace.session_messages("live").unwrap().len(), 2);
+    let log = fs::read_to_string(
+        workspace
+            .paths
+            .runs
+            .join(first["runId"].as_str().unwrap())
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(format!("{}\n", lines.join("\n")), log);
+}
+
+#[test]
 fn shell_run_records_events() {
     let dir = tempdir().unwrap();
     let summary = run_task(&task("hello", AgentMode::Build, "bash:echo ok"), dir.path()).unwrap();

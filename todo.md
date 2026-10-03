@@ -40,7 +40,8 @@
 
 ### 可观测性
 - [x] **实时展示运行中的 event stream**：`EventWriter::write` 在事件持久化后推送简短状态到有界 `EventSink`，TUI 每帧 drain 并保留最近 12 条；重复状态合并。聊天 markdown 只在新消息加入时解析并缓存；模型文本分片另进入有上限的显示缓冲。
-- [x] streaming 响应（SSE）：agent loop 的 Chat、Responses、Messages 请求现在使用流式响应；文本分片写入 `model.delta` 事件并实时显示在 TUI。Chat 的 `tool_calls` 和 Messages 的 `tool_use` 参数按分片累积，Responses 从完成事件取完整 `function_call`；缺少协议完成标记时失败，不执行残缺的工具调用。服务端返回普通 JSON 时兼容读取。CLI 的机器可读实时 JSONL 模式仍是独立后续工作。
+- [x] streaming 响应（SSE）：agent loop 的 Chat、Responses、Messages 请求现在使用流式响应；文本分片写入 `model.delta` 事件并实时显示在 TUI。Chat 的 `tool_calls` 和 Messages 的 `tool_use` 参数按分片累积，Responses 从完成事件取完整 `function_call`；缺少协议完成标记时失败，不执行残缺的工具调用。服务端返回普通 JSON 时兼容读取。
+- [x] CLI 机器可读实时 JSONL：`--jsonl` 支持 run/plan/build/直接 prompt（含会话），每条完整事件在文件与索引持久化后立即写入并 flush stdout，与 events.jsonl 完全一致；不混入普通回答、summary 或配置向导。失败保留退出码 1，stderr 放诊断；慢消费者背压，输出失败停止执行且保留审计。门控 SSE 测试证明 delta 在提供商完成前到达，另覆盖失败、会话、四种入口及 flush 错误。
 
 ### 工程健壮性
 - [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。

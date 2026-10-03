@@ -5,9 +5,10 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
-    AgentMode, Checkpoint, ExecutionMode, RunSummary, TaskSpec, Workspace,
+    AgentMode, Checkpoint, EventSink, ExecutionMode, RunSummary, TaskSpec, Workspace,
     deepseek::ensure_api_key, get_run_details, latest_model_reply, list_runs, prompt_to_task,
-    replay_messages, restore_checkpoint, run_task_in_session_with_mode, run_task_with_mode, tui,
+    replay_messages, restore_checkpoint, run_task_in_session_with_mode, run_task_with_event_sink,
+    run_task_with_mode, tui,
 };
 
 #[derive(Parser)]
@@ -17,6 +18,9 @@ use crate::{
     about = "Terminal-first agent harness for local coding workflows"
 )]
 struct Cli {
+    /// Stream complete persisted events as JSONL (run/plan/build/direct prompt)
+    #[arg(long, global = true)]
+    jsonl: bool,
     /// Shell isolation: workspace-write (default), read-only, or unrestricted
     #[arg(long, global = true, value_enum)]
     sandbox: Option<ExecutionMode>,
@@ -127,13 +131,23 @@ enum Commands {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    let supports_jsonl = match cli.command.as_ref() {
+        Some(Commands::Run { .. } | Commands::Plan { .. } | Commands::Build { .. }) => true,
+        None => !cli.prompt.is_empty(),
+        _ => false,
+    };
+    if cli.jsonl && !supports_jsonl {
+        bail!("--jsonl requires run, plan, build, or a direct prompt");
+    }
     let root = std::env::current_dir()?;
     let execution_mode = match cli.sandbox {
         Some(mode) => mode,
         None => ExecutionMode::from_env()?,
     };
     if cli.command.is_none() {
-        ensure_api_key(false)?;
+        if !cli.jsonl {
+            ensure_api_key(false)?;
+        }
         if cli.prompt.is_empty() {
             return tui::run_with_mode(root, None, execution_mode);
         }
@@ -143,7 +157,14 @@ pub fn run() -> Result<()> {
         } else {
             AgentMode::Build
         };
-        print_prompt_result(&root, &prompt, mode, cli.session.as_deref(), execution_mode)?;
+        print_prompt_result(
+            &root,
+            &prompt,
+            mode,
+            cli.session.as_deref(),
+            execution_mode,
+            cli.jsonl,
+        )?;
         return Ok(());
     }
     match cli.command.expect("command checked above") {
@@ -157,28 +178,47 @@ pub fn run() -> Result<()> {
             println!("valid task: {} ({} steps)", task.name, task.steps.len())
         }
         Commands::Run { task } => {
-            let summary = run_task_with_mode(&read_task(&task)?, &root, execution_mode)?;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            let task = read_task(&task)?;
+            let summary = if cli.jsonl {
+                run_task_with_event_sink(
+                    &task,
+                    &root,
+                    None,
+                    EventSink::jsonl(std::io::stdout()),
+                    execution_mode,
+                )?
+            } else {
+                run_task_with_mode(&task, &root, execution_mode)?
+            };
+            if !cli.jsonl {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
             ensure_success(&summary)?;
         }
         Commands::Plan { prompt, session } => {
-            ensure_api_key(false)?;
+            if !cli.jsonl {
+                ensure_api_key(false)?;
+            }
             print_prompt_result(
                 &root,
                 &prompt.join(" "),
                 AgentMode::Plan,
                 session.as_deref(),
                 execution_mode,
+                cli.jsonl,
             )?
         }
         Commands::Build { prompt, session } => {
-            ensure_api_key(false)?;
+            if !cli.jsonl {
+                ensure_api_key(false)?;
+            }
             print_prompt_result(
                 &root,
                 &prompt.join(" "),
                 AgentMode::Build,
                 session.as_deref(),
                 execution_mode,
+                cli.jsonl,
             )?
         }
         Commands::Runs { limit } => {
@@ -365,8 +405,19 @@ fn print_prompt_result(
     mode: AgentMode,
     session_id: Option<&str>,
     execution_mode: ExecutionMode,
+    jsonl: bool,
 ) -> Result<()> {
     let task = prompt_to_task(prompt, mode);
+    if jsonl {
+        let summary = run_task_with_event_sink(
+            &task,
+            root,
+            session_id,
+            EventSink::jsonl(std::io::stdout()),
+            execution_mode,
+        )?;
+        return ensure_success(&summary);
+    }
     let summary = match session_id {
         Some(session_id) => run_task_in_session_with_mode(&task, root, session_id, execution_mode)?,
         None => run_task_with_mode(&task, root, execution_mode)?,

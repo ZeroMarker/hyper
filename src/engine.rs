@@ -65,7 +65,7 @@ impl EventWriter<'_> {
         writeln!(file)?;
         self.workspace.insert_event(&event)?;
         if let Some(sink) = &self.sink {
-            sink.push(&event);
+            sink.publish(&event)?;
         }
         Ok(event)
     }
@@ -1170,6 +1170,17 @@ pub fn run_task_with_mode(
     execution_mode: ExecutionMode,
 ) -> Result<RunSummary> {
     run_task_inner(task, root, None, None, None, execution_mode)
+}
+
+/// Run a CLI task with a lossless stream of persisted events.
+pub fn run_task_with_event_sink(
+    task: &TaskSpec,
+    root: impl AsRef<Path>,
+    session_id: Option<&str>,
+    sink: EventSink,
+    execution_mode: ExecutionMode,
+) -> Result<RunSummary> {
+    run_task_inner(task, root, None, session_id, Some(sink), execution_mode)
 }
 
 /// Run a task with an interactive approval gate: `bash`, `write` and `edit`

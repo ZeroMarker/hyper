@@ -272,6 +272,30 @@ While a task runs, the TUI shows streamed model text and its recent event stream
 (up to 12 brief updates). The complete events, including `model.delta` text
 chunks, remain in `events.jsonl`.
 
+Use `--jsonl` for a machine-readable live event stream from `run`, `plan`,
+`build`, or a direct prompt:
+
+```bash
+ha --jsonl run examples/hello.json
+ha --jsonl plan --session review "inspect this project"
+ha --jsonl "fix the failing tests" > events.jsonl
+```
+
+Stdout contains one complete event per line, identical to the run's audit log,
+in persistence order. Each line is flushed immediately, including streamed
+`model.delta` text. Plain answers and pretty-printed summaries are omitted;
+successful runs end with `run.finished` (its payload includes the summary),
+and failed runs with `run.failed` (its payload includes the failure).
+Diagnostics go to stderr and failed runs still exit with status `1`.
+JSONL mode never opens the configuration wizard; missing or invalid provider
+settings are recorded as run failures. Use `ha config` separately.
+
+Slow consumers apply backpressure without dropping events. An output or flush
+error stops the command with a non-zero exit status; events already persisted
+remain available, and a run left unfinished is repaired as interrupted on the
+next workspace open. `--jsonl` requires a run command or prompt and cannot be
+used with the TUI or inspection commands.
+
 In the TUI, `bash`, `write` and `edit` actions ask for **interactive
 approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
 loop waits for the answer). Command-line runs do not prompt.
