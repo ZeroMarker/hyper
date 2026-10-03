@@ -6,6 +6,8 @@
 
 2026-10-03（第八轮）：交付 P0-3b2a Linux 直接文件工具描述符边界。openat2 逐层约束工作区目标，拒绝校验后 symlink/magic link/mount crossing，打开 inode 后检查审计硬链接；read/快照/修改共用同一描述符，search/context 也安全读取。搜索改为遵守 ignore 的原生文本匹配。六个确定性测试覆盖最终/父目录替换、打开后替换、后插入审计硬链接、正常内部链接与 FIFO；157 个 Rust 测试通过。元数据、非 Linux、行政恢复、宿主目录整体移动及内容陈旧编辑仍未完成；完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
 
+本轮验证：157 个 Rust 测试（64 单元、9 取消、9 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。正式代码 `0fc6dad` 的固定任务集真实回归 30/30，长会话与错误修改恢复各 3/3；45 轮 usage 完整且 stdout 与持久化 JSONL 一致，30 次 prune 全部成功。保留原任务/模型/预算/授权及外部 state 口径，未重跑替换；小样本不宣称质量或性能提升，成本未知。见 [描述符回归报告](evals/baselines/2026-10-03-descriptor/report.md)。
+
 2026-10-03（第七轮）：交付 P0-3b1 外部审计内容存储与显式迁移。审计路径从 canonical workspace root 派生，状态保存在 checkout 外的宿主目录，仓库不提供定位文件。`ha state` 报告实际路径，`ha migrate-state --from` 明确导入旧 `.harness`/备份；拒绝自动导入、覆盖、活动源、symlink、坏记录/schema 或越界 checkpoint。复制新 inode、SQLite 在线备份捕获 WAL、session registry 按 transcript 修复、checkpoint snapshot 重绑/target 相对化，再原子提交；源历史保留，崩溃尾片段转 artifact 避免恢复事件粘连。tmp 移入 `.hyper-tmp`，artifact 由 harness 收集至外部。
 
 本轮验证：151 个 Rust 测试（58 单元、9 取消、9 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。Linux 实测对 events/DB/task/summary/session/checkpoint 的写、删除、rename、hardlink 阻断，预制硬链接、继承/父进程 FD 绕过拒绝；8 并发运行共享状态，4 并发导入仅一次提交；WAL/原始源、绝对 checkpoint 迁移后恢复、真实请求 replay、同会话续聊、坏数据回滚和迁移后崩溃结算均覆盖。另实测 chmod 可把外部 marker 从 0600 改为 0400；内容保护不等于元数据隔离。当前用户 mount namespace uid_map 被拒绝，下一项 P0-3b2 元数据、并发路径替换和范围权限，完整 P0-3 保持未完成。见 [边界与实测](docs/audit-boundary.md)。
