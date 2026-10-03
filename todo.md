@@ -44,11 +44,11 @@
 
 - [x] **P0-2 CLI/TUI 共享取消**：共享运行令牌覆盖响应头、SSE/JSON 正文、重试、审批和 shell；CLI 信号取消退出 130，TUI Ctrl-C/运行中 Esc 与 `/cancel` 取消，审批 Esc 仅拒绝当前动作。取消记录独立的 run.cancelled，summary/DB/session 结算一次，保留已完成修改、输出与 checkpoint，并停止后续工具；外部信号直接传递到后台，退出等待 worker。Unix JSONL 背压可取消；125 个 Rust 测试与 10 个评测测试通过，含真实 Linux PTY 取消后续聊；固定任务集 30/30 通过，Responses/Messages 真实端点冒烟各 1/1。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。
 
-- [x] **P0-3a 共用工具权限与直接审计路径保护**：CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无处理器时 ask 明确拒绝，显式 `--approval` / `--permissions` / HYPER_APPROVAL 固定来源与优先级，审批仅授权一次。直接文件工具拒绝审计路径、符号链接和 Unix 硬链接，search/context 同步过滤；旧库 API 保持兼容。135 个 Rust 测试通过。完整边界及 shell 风险复现见 [审计边界说明](docs/audit-boundary.md)。
+- [x] **P0-3a 共用工具权限与直接审计路径保护**：CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无处理器时 ask 明确拒绝，显式 `--approval` / `--permissions` / HYPER_APPROVAL 固定来源与优先级，审批仅授权一次。直接文件工具拒绝审计路径、符号链接和 Unix 硬链接，search/context 同步过滤；旧库 API 保持兼容。135 个 Rust 测试和 10 个离线评测测试通过，真实任务回归 28/30、恢复 3/3，保留两次既有约束/策略失败。见 [回归报告](evals/baselines/2026-10-03-permissions/report.md)。完整边界及 shell 风险复现见 [审计边界说明](docs/audit-boundary.md)。
 
 ## 下一步（2026-10-03 竞品复核）
 
-对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `77858a1`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架和共享取消已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `7824c5b`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架、共享取消、共用工具权限和直接审计路径保护已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 

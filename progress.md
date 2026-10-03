@@ -8,6 +8,8 @@
 
 直接 read/write/edit 拒绝 `.harness` 及符号链接/Unix 硬链接别名，search 和自动上下文同步过滤，审批后重复校验文件目标。135 个 Rust 测试（58 单元、9 取消、9 权限、54 run、5 task）、10 个离线评测测试通过，fmt、Clippy 与 release 构建通过。在一次性仓库实测：明确 allow 后，workspace-write shell 仍能写 `.harness/probe.txt`；没有把命令过滤或直接工具保护当成完整审计防伪。下一项是 P0-3b shell 审计存储隔离、独立 artifact/tmp 授权与范围规则，另保留 Windows 硬链接和并发路径替换保护。见 [边界说明与复现](docs/audit-boundary.md)。
 
+正式代码 `7824c5b` 的固定任务集回归 28/30，错误编辑恢复 3/3、长会话 2/3；使用明确 `--approval allow` 保持前轮 CLI 的写工具授权范围，完整 usage、持久化流一致性及 prune 均验证。保留两次失败：首行注释约束遗漏，以及代码正确但遇到已有 `2>/dev/null` 误拒绝、耗尽 12 轮。没有剔除或重跑替换，也不据小样本推断权限实现改变成功率。见 [真实回归报告](evals/baselines/2026-10-03-permissions/report.md)。
+
 2026-10-03（第五轮）：完成 P0-2 CLI/TUI 共享取消。共享令牌覆盖模型响应头、三协议 SSE/JSON、重试、审批与 shell；CLI 信号取消返回 130，TUI Ctrl-C/运行中 Esc 或 `/cancel` 取消，审批 Esc 只拒绝当前操作。取消独立结算为 cancelled，保留已完成修改、输出、检查点与可 replay 的实际请求；退出等待后台 worker，外部信号直接传递到后台。Unix CLI JSONL 背压可取消。Windows stdout、终端渲染背压、OS 阻塞文件 I/O 及脱离进程组的 daemon 仍列后续，不宣称所有平台 I/O 有界。
 
 本轮验证：125 个 Rust 测试（57 单元、9 取消集成、54 run 集成、5 task 集成）、10 个评测测试、fmt、Clippy 与 release 构建通过。门控测试覆盖网络/审批/shell/Unix 背压取消在 2 秒内结算，真实 Linux PTY 验证取消审批后同会话续聊与退出。正式代码 `77858a1` 上 OpenCode Go / deepseek-v4-flash / Chat 固定任务集 30/30 通过，错误修改恢复与长会话各 3/3，完整 usage、持久化流一致性和 prune 已检查。Responses / grok-4.6、Messages / minimax-m2.5 真实端点 readonly-plan 冒烟各 1/1；仅是单任务联通验证。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。前轮 28/30 与本轮小样本不足以把成功率变化归因于取消实现，成本未知。下一项为 P0-3 审计区保护与统一审批策略。
