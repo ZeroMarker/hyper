@@ -2,6 +2,7 @@ target/
 node_modules/
 dist/
 .harness/
+.hyper-tmp/
 .DS_Store
 # Staging directory for the npm packages built by npm/scripts/publish.mjs
 npm-dist/

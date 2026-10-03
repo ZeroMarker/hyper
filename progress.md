@@ -8,6 +8,8 @@
 
 本轮验证：151 个 Rust 测试（58 单元、9 取消、9 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。Linux 实测对 events/DB/task/summary/session/checkpoint 的写、删除、rename、hardlink 阻断，预制硬链接、继承/父进程 FD 绕过拒绝；8 并发运行共享状态，4 并发导入仅一次提交；WAL/原始源、绝对 checkpoint 迁移后恢复、真实请求 replay、同会话续聊、坏数据回滚和迁移后崩溃结算均覆盖。另实测 chmod 可把外部 marker 从 0600 改为 0400；内容保护不等于元数据隔离。当前用户 mount namespace uid_map 被拒绝，下一项 P0-3b2 元数据、并发路径替换和范围权限，完整 P0-3 保持未完成。见 [边界与实测](docs/audit-boundary.md)。
 
+正式代码 `fa6101d` 的固定任务集真实回归 30/30，错误修改恢复与长会话各 3/3；45 轮 usage 完整且 stdout 与外部持久化 JSONL 一致，30 次 prune 全部成功。使用同一模型、预算、并发与明确授权，未重跑替换；存储体积现在统计实际外部 state、排除 workspace tmp，与旧 `.harness` 口径不直接比较。不据小样本推断存储改动提升成功率，成本未知。见 [外部存储回归报告](evals/baselines/2026-10-03-external-state/report.md)。
+
 2026-10-03（第六轮）：交付 P0-3a 共用工具权限与直接审计路径保护，完整 P0-3 保持未完成。CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无交互处理器时 ask 明确拒绝，自动化需显式 `--approval allow`。`--permissions FILE`、HYPER_APPROVAL 与参数优先级、有效权限及来源固定到事件，未知配置失败关闭。审批只授权当前调用，allow 不扩大 plan、白名单、工作区或 OS 边界。旧库 API 保持原审批行为，新 RunOptions 使用共用策略。
 
 直接 read/write/edit 拒绝 `.harness` 及符号链接/Unix 硬链接别名，search 和自动上下文同步过滤，审批后重复校验文件目标。135 个 Rust 测试（58 单元、9 取消、9 权限、54 run、5 task）、10 个离线评测测试通过，fmt、Clippy 与 release 构建通过。在一次性仓库实测：明确 allow 后，workspace-write shell 仍能写 `.harness/probe.txt`；没有把命令过滤或直接工具保护当成完整审计防伪。下一项是 P0-3b shell 审计存储隔离、独立 artifact/tmp 授权与范围规则，另保留 Windows 硬链接和并发路径替换保护。见 [边界说明与复现](docs/audit-boundary.md)。
