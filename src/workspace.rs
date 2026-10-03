@@ -758,15 +758,20 @@ pub fn resolve_tool_path(root: &Path, target: &str) -> Result<PathBuf> {
     {
         bail!("protected audit path is unavailable to agent file tools: {target}");
     }
+    if let Ok(metadata) = fs::metadata(&resolved) {
+        check_tool_inode(root, &metadata)?;
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn check_tool_inode(root: &Path, metadata: &fs::Metadata) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let Ok(metadata) = fs::metadata(&resolved)
-            && metadata.is_file()
-            && metadata.nlink() > 1
-        {
+        if metadata.is_file() && metadata.nlink() > 1 {
             // A workspace hardlink to an audit file is the same inode even
             // though canonicalize leaves its spelling outside .harness.
+            let audit = root.canonicalize()?.join(".harness");
             let mut pending = vec![crate::state::directory(root)?];
             if audit.is_dir() {
                 pending.push(audit);
@@ -780,16 +785,16 @@ pub fn resolve_tool_path(root: &Path, target: &str) -> Result<PathBuf> {
                     } else if file_type.is_file() {
                         let protected = entry.metadata()?;
                         if protected.dev() == metadata.dev() && protected.ino() == metadata.ino() {
-                            bail!(
-                                "protected audit hardlink is unavailable to agent file tools: {target}"
-                            );
+                            bail!("protected audit hardlink is unavailable to agent file tools");
                         }
                     }
                 }
             }
         }
     }
-    Ok(resolved)
+    #[cfg(not(unix))]
+    let _ = (root, metadata);
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

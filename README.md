@@ -355,8 +355,14 @@ inside the workspace, with the configured workspace write boundary.
 
 This protects file content and directory entries, not all metadata: on the tested
 Linux kernel a shell can still chmod an external audit file, potentially denying
-future access. Metadata isolation, Windows hardlink detection, concurrent path
-replacement and path/command permission scopes remain pending. `unrestricted`
+future access. Linux direct read/write/edit, search and context now use anchored
+`openat2` descriptors; snapshots and modifications share the opened inode.
+Symlink substitutions, magic links and nested mount crossings are refused.
+Existing internal symlinks are resolved before opening. Unsupported Linux
+kernels or syscall restrictions fail closed; other platforms retain path checks.
+Search enumerates ignored-filtered text files and reads them through this same
+entry point. Metadata isolation, non-Linux descriptor confinement, administrative
+restore races and path/command permission scopes remain pending. `unrestricted`
 shells retain host permissions, including access to external state. See the
 [measured boundaries](docs/audit-boundary.md).
 Shell tool stdin is closed; supply command input with pipes or redirection,

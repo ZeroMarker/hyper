@@ -12,6 +12,7 @@ pub mod policy;
 pub mod resource;
 pub mod sandbox;
 pub mod state;
+mod tool_file;
 pub mod tui;
 pub mod workspace;
 

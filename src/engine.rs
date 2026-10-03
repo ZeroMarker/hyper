@@ -26,7 +26,8 @@ use crate::{
     policy,
     resource::ResourceBudget,
     sandbox::{ExecutionMode, Sandbox},
-    workspace::{self, RunPaths, Workspace, create_checkpoint, now},
+    tool_file::ToolFile,
+    workspace::{self, RunPaths, Workspace, now},
 };
 
 struct EventWriter<'a> {
@@ -452,7 +453,7 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search",
-            description: "Search for a fixed string across the workspace using rg.",
+            description: "Search for a fixed string across workspace text files.",
             parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
         },
         ToolSpec {
@@ -612,7 +613,9 @@ fn workspace_context(root: &Path) -> Result<String> {
         if context.len() >= MAX_TOTAL {
             break;
         }
-        let Ok(content) = fs::read_to_string(workspace::resolve_tool_path(root, relative)?) else {
+        let Ok(content) =
+            ToolFile::open(root, relative, false, false).and_then(|mut file| file.read_text())
+        else {
             continue;
         };
         let remaining = MAX_TOTAL.saturating_sub(context.len());
@@ -1100,7 +1103,7 @@ fn read(
         Some(&step.id),
         Some(index),
     )?;
-    let bytes = fs::read(workspace::resolve_tool_path(root, path)?)?;
+    let bytes = ToolFile::open(root, path, false, false)?.read()?;
     let max = 64_000.min(bytes.len());
     let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()});
     events.write("tool.finished",json!({"tool":"read","path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()}),Some(&step.id),Some(index))?;
@@ -1121,56 +1124,10 @@ fn search(
         Some(&step.id),
         Some(index),
     )?;
-    let out = Command::new("rg")
-        // `--` ends flag parsing so a query beginning with `-` (e.g. `--pre=...`)
-        // is matched literally instead of being parsed as an rg option.
-        .args([
-            "--json",
-            "--fixed-strings",
-            "-g",
-            "!.harness/**",
-            "--",
-            query,
-            ".",
-        ])
-        .current_dir(root)
-        .output();
-    let (code, lines) = match out {
-        Ok(out) => {
-            let mut lines = Vec::new();
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let record: Value = serde_json::from_str(line).context("invalid rg JSON output")?;
-                if record["type"] != "match" {
-                    continue;
-                }
-                let data = &record["data"];
-                let Some(path) = data["path"]["text"].as_str() else {
-                    continue;
-                };
-                if workspace::resolve_tool_path(root, path).is_err() {
-                    continue;
-                }
-                let Some(content) = data["lines"]["text"].as_str() else {
-                    continue;
-                };
-                let Some(number) = data["line_number"].as_u64() else {
-                    continue;
-                };
-                if lines.len() < limit {
-                    lines.push(format!(
-                        "{path}:{number}:{}",
-                        content.trim_end_matches(['\r', '\n'])
-                    ));
-                }
-            }
-            (out.status.code().unwrap_or(2), lines)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let lines = search_workspace_files(root, query, limit);
-            (i32::from(lines.is_empty()), lines)
-        }
-        Err(error) => return Err(error).context("failed to run rg"),
-    };
+    // Enumeration respects ignore rules; every matching byte comes from an
+    // anchored descriptor rather than a subprocess that reopens checked paths.
+    let lines = search_workspace_files(root, query, limit);
+    let code = i32::from(lines.is_empty());
     let payload = json!({"query":query,"lines":lines,"exitCode":code});
     events.write(
         "tool.finished",
@@ -1182,12 +1139,14 @@ fn search(
 }
 
 fn search_workspace_files(root: &Path, query: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut matches = Vec::new();
     for relative in workspace_files(root, false, usize::MAX) {
-        let Ok(path) = workspace::resolve_tool_path(root, &relative) else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(path) else {
+        let Ok(content) =
+            ToolFile::open(root, &relative, false, false).and_then(|mut file| file.read_text())
+        else {
             continue;
         };
         for (index, line) in content.lines().enumerate() {
@@ -1229,13 +1188,10 @@ fn write_file(
         Some(&step.id),
         Some(index),
     )?;
-    let target = workspace::resolve_tool_path(root, path)?;
-    let before = fs::read_to_string(&target).unwrap_or_default();
-    let cp = create_checkpoint(root, &run.checkpoints, path)?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(target, content)?;
+    let mut file = ToolFile::open(root, path, true, true)?;
+    let before = String::from_utf8_lossy(&file.read()?).into_owned();
+    let cp = file.checkpoint(root, &run.checkpoints)?;
+    file.replace(content.as_bytes())?;
     let diff = create_patch(&before, content).to_string();
     events.write(
         "checkpoint.created",
@@ -1273,14 +1229,14 @@ fn edit_file(
         Some(&step.id),
         Some(index),
     )?;
-    let target = workspace::resolve_tool_path(root, path)?;
-    let before = fs::read_to_string(&target)?;
+    let mut file = ToolFile::open(root, path, true, false)?;
+    let before = file.read_text()?;
     if !before.contains(search) {
         bail!("search text not found in {path}")
     }
     let after = before.replacen(search, replace, 1);
-    let cp = create_checkpoint(root, &run.checkpoints, path)?;
-    fs::write(target, &after)?;
+    let cp = file.checkpoint(root, &run.checkpoints)?;
+    file.replace(after.as_bytes())?;
     let diff = create_patch(&before, &after).to_string();
     events.write(
         "checkpoint.created",

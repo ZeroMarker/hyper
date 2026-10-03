@@ -48,13 +48,15 @@
 
 - [x] **P0-3b1 外部审计内容存储与显式迁移**：权威 state 移出 checkout，由 canonical root 的 SHA-256 在宿主状态目录定位，`ha state` 返回位置；不信任仓库定位文件，旧 `.harness`/备份用 `ha migrate-state --from` 明确导入，原始源保留且不覆盖已初始化目标。新 inode、SQLite WAL 在线备份、记录/schema 校验、session registry 修复、checkpoint 路径重绑与原子提交；活动源/坏数据/symlink 拒绝，崩溃尾片段保留 artifact 后恢复。Linux 内容写/删除/rename/hardlink 与父进程 FD 绕过实测阻断，151 个 Rust 测试通过。tmp 独立置于 workspace，artifact 仅 harness 写入。元数据不宣称已隔离。见 [实际边界](docs/audit-boundary.md)。
 
+- [x] **P0-3b2a Linux 直接工具描述符边界**：read/write/edit、search 与上下文经工作区目录描述符和 openat2 读取；校验后 symlink/审计硬链接拒绝，快照和修改绑定实际打开的同一 inode，FIFO 非阻塞拒绝。157 个 Rust 测试通过，含 6 个确定性路径替换/兼容性测试。原生文本搜索不再由 rg 重开路径；非 Linux、admin restore、宿主目录移动和并发内容写者仍另列边界。见 [验证范围](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-03 竞品复核）
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `fa6101d`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架、共享取消、共用工具权限、直接审计路径保护及外部审计内容存储/显式迁移已完成。[本轮真实回归](evals/baselines/2026-10-03-external-state/report.md) 30/30 通过，错误修改恢复及长会话各 3/3；外部 state 的磁盘统计排除 workspace tmp，不与旧口径直接比较。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b2 元数据、路径替换与范围授权（下一项）**：外部内容/目录边界已完成，但 Linux 实测 shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。补路径/命令批准范围、Windows 硬链接与并发路径替换保护，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
+- [ ] **P0-3b2b 元数据、剩余路径竞争与范围授权（下一项）**：外部内容/目录边界已完成，但 Linux 实测 shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。补路径/命令批准范围、Windows 硬链接、非 Linux 描述符保护、admin restore 和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null` 与重复策略拒绝样本；跟踪长会话约束位置遗漏。正式基线已有一次代码正确但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 

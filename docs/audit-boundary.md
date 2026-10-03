@@ -14,7 +14,7 @@ CLI 没有交互审批处理器，ask 明确拒绝并返回失败；TUI 每次�
 read/write/edit 拒绝 `.harness` 审计/控制路径、解析后的符号链接别名和 Unix 硬链接；
 search 及自动上下文也过滤这些文件，文件工具在审批之后重复检查目标。
 直接工具暂时拒绝整个 `.harness`，包括 artifacts/tmp。用户仍可通过专门命令查看产物、
-恢复检查点和 replay。Windows 硬链接与并发路径替换的描述符级保护尚未交付。
+恢复检查点和 replay。Linux 直接工具的描述符级保护已交付；Windows 硬链接及非 Linux 描述符边界尚未交付。
 工具权限不是整个进程的文件读取隔离，模型还会收到受过滤和预算约束的工作区上下文。
 
 验收由 [权限集成测试](../tests/permissions.rs)、既有取消/运行测试和 Linux PTY 测试覆盖。
@@ -64,6 +64,27 @@ artifact 仅由 harness 将捕获输出写入外部目录，没有把外部 arti
 一次提交、活动源拒绝、WAL/会话保存、失败回滚、绝对 checkpoint 迁移后恢复、真实请求
 replay 完全一致和同会话续聊。原有取消、索引重建、崩溃恢复与 prune 回归也保留。
 
+## Linux 直接工具的路径替换保护（P0-3b2a）
+
+[tool_file.rs](../src/tool_file.rs) 在 Linux 用工作区目录描述符逐层打开目标，
+`openat2` 使用 BENEATH、NO_SYMLINKS、NO_MAGICLINKS、NO_XDEV；新目录用 mkdirat
+及描述符再次打开，新文件用 O_EXCL，避免缺失检查与创建之间被插入文件/link。
+策略先解析已有内部 symlink，再打开规范路径；校验后替换的 symlink 会拒绝。
+检查实际已打开 inode 是否为审计硬链接，再读取、快照及修改；写工具不开启 O_TRUNC，
+通过校验后才写入。O_NONBLOCK 加 regular-file 检查避免 FIFO 等特殊文件阻塞。
+依据 [openat2 官方手册](https://man7.org/linux/man-pages/man2/openat2.2.html)，
+NO_XDEV 也拒绝 nested bind mount；本环境无法创建挂载，未宣称实际挂载攻击测试完成。
+
+read/write/edit、search 和自动上下文共享此入口。search 使用 respect-ignore 的原生
+文件枚举和固定字符串匹配，每条内容通过安全描述符读取，不再让 rg 子进程重新打开
+已校验的路径。内部 symlink 和普通硬链接保持可用，审计硬链接拒绝；未提供 Linux
+不支持 openat2 时的降级打开。其他平台仍保留原路径校验，不宣称同等边界。
+
+六个确定性测试覆盖最终 link、父目录 link、打开后路径替换、校验后审计硬链接、
+正常内部链接以及无写者 FIFO。打开后替换路径不会重定向读/快照/写，操作绑定原 inode；
+这不保证路径名称仍指向该 inode，也不防并发内容写者造成陈旧编辑。
+宿主移动整个目录到工作区外、admin restore/undo 的路径竞争与非 Linux 原生保护仍待验收。
+
 ## 已验证的剩余限制与下一项
 
 在一次性 Linux workspace，通过受限 shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
@@ -72,7 +93,7 @@ replay 完全一致和同会话续聊。原有取消、索引重建、崩溃恢�
 元数据隔离需另外的 OS 边界；不能用命令字符串规则代替。当前环境的 `unshare -Urnm`
 因 uid_map 权限失败，不能把挂载 namespace 当作已可用能力。
 
-下一项为 P0-3b2：元数据与并发路径替换保护、路径/命令范围授权；显式 unrestricted 仍有
+P0-3b2a 已交付 Linux 直接工具描述符边界；下一项为 P0-3b2b：元数据、剩余路径竞争与路径/命令范围授权；显式 unrestricted 仍有
 宿主权限。Windows 硬链接及 macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
 本轮仅在 Linux 实测，不宣称跨平台原生验证完成。
