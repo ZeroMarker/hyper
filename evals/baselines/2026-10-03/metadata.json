@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "suite_version": 1,
+  "started_at": "2026-10-03T12:38:10.988311+00:00",
+  "revision": "369a415d9579f2324ec3d8b1a831d09a8c345ffc",
+  "dirty": false,
+  "binary_sha256": "6f30d6e8f63781d129ab7e922f284f3dca9e1eca280f519d5db805caba8e61c1",
+  "suite_sha256": "a50693c3683300f30cd2d84206f953d0f9bb410f29719f9a755bee1eef19f1c1",
+  "grader_sha256": "45df6817a20aec7a602a4ccfb606974603ee61ddf5c1c44b06cb744293c0bde9",
+  "fixtures_sha256": "006e153d32a89b1e25a4f7c6b22eef343c4ba30201e30d08e7cd3608d73583f5",
+  "runner_sha256": "d84868855724e9f5a9fc6eadd25455d50fab4d50e7b10b67c440e95128e76c65",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://opencode.ai/zen/go/v1",
+  "protocol": "chat",
+  "context_tokens": 128000,
+  "output_tokens": 8192,
+  "history_tokens": 16000,
+  "max_model_turns": 12,
+  "repetitions": 3,
+  "jobs": 3,
+  "turn_timeout_seconds": 180.0,
+  "platform": "linux",
+  "approval_policy": "CLI default; no interactive approvals; tool policy and sandbox still apply",
+  "tools": [
+    "read",
+    "search",
+    "bash",
+    "write",
+    "edit"
+  ],
+  "cost": null,
+  "tool_versions": {
+    "python3": "Python 3.12.3",
+    "node": "v22.23.2",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+  }
+}

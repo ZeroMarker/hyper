@@ -4,6 +4,10 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-03（第四轮）：完成 P0-1 固定任务评测。`evals/suite.json` 定义 10 个 Rust/Python/JS 离线任务，`fixtures.py` 生成全新仓库，`grade.py` 在模型工作区外判定行为与约束，`run.py` 固定模型/端点/协议/预算并记录延迟、usage、策略事件、恢复及 prune 前后磁盘体积。原始错误实现与已知正确实现都有测试；本地 HTTP stub 驱动真实 CLI，覆盖未知/部分用量、失败、超时清理、绝对路径 checkpoint 恢复和配置覆盖。离线评测已接入 CI。
+
+本轮验证：113 个 Rust 测试、9 个离线评测测试和 debug/release 构建通过。正式基线固定评测代码 `369a415`、OpenCode Go / deepseek-v4-flash / Chat，每项 3 次，共 28/30 通过，错误编辑恢复 3/3 通过。两次失败分别为长会话首行注释要求遗漏，以及独立代码判定通过但策略拒绝后耗尽 12 轮；均保留在 [正式报告](evals/baselines/2026-10-03/report.md) 中，不剔除或重跑替换。30 次均验证 stdout 与持久化事件一致，完整 usage 见逐次 JSONL，成本未知。宿主 PATH/Cargo 配置/编译 wrapper 尚未隔离，已新增后续待办。待办下一项为 P0-2 CLI/TUI 共享取消。
+
 2026-10-03（第三轮）：完成 CLI 实时 JSONL。`--jsonl` 支持 run/plan/build/直接 prompt 及会话，每条事件在 JSONL 文件与 SQLite 写入后立即输出并 flush；stdout 与审计日志完全一致。运行成功/失败终结事件保留 summary/failure，失败退出码为 1，诊断在 stderr；不打开配置向导。慢消费者施加背压；输出/flush 失败返回错误，已写审计事件保留，未完成运行在下次打开工作区时恢复为 interrupted。TUI 继续使用原有有界队列。
 
 本轮验证：54 单元 + 54 run 集成 + 5 task 集成，共 113 测试通过；fmt、Clippy（warnings 视为错误）和 release 构建通过。门控 SSE 测试确认 CLI 在提供商完成前收到 delta，另覆盖完整日志一致性、四种入口、会话、任务失败退出码、缺少配置、非运行命令拒绝，以及 flush 故障阻止工具执行并保留审计。

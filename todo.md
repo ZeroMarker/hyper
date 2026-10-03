@@ -40,17 +40,18 @@
 - [x] 会话历史的上下文预算：`HYPER_HISTORY_TOKENS`（默认 16000，0 禁用历史）按 UTF-8 字节数 + 每条 8 的保守 token 估算，滑窗保留最近完整用户轮次；不拆分超大轮次，也不回填更旧轮次。原 transcript 保留，`model.started` 固定实际 history、systemPrompt 与预算/保留/丢弃计数；忘记会话后仍能准确 replay，新旧事件兼容。当前 prompt、workspace context、工具定义与本轮工具输出不在该预算内。
 - [x] 总请求上下文预算：`HYPER_CONTEXT_TOKENS`（默认 128000）减去 `HYPER_OUTPUT_TOKENS`（默认 8192）作为输入预算；每次按三种协议实际 JSON 请求体的 UTF-8 字节数保守估算，覆盖 system/input/tools、参数和观察结果。首次请求进一步裁掉整轮旧会话；不可省略的输入或工具循环超预算时，在发送前以 `ContextBudgetError` 失败，完整审计保留。三种协议发送输出上限，`model.context_budget` 记录每轮用量和判断，replay 停在最后一次通过预算的请求。预算需按所用模型手动配置，尚不探测真实模型能力，也未接入 provider tokenizer。
 - [x] 删除死代码：`deepseek::chat`（一次性、无工具）全仓库无调用点，已删除。
+- [x] **P0-1 固定任务集和评测脚手架**：10 个 Rust/Python/JS 离线 fixture、工作区外独立行为判定、全新仓库/会话与固定模型配置，每项真实运行 3 次；逐轮延迟、usage、错误、审批、恢复和 prune 前后磁盘体积落 JSONL/Markdown。正式基线 `369a415` 上 28/30 通过，3/3 错误编辑恢复通过，缺失 usage/成本标未知；113 个 Rust 测试与 9 个评测测试通过，离线评测已接入 CI。见 [脚手架](evals/README.md) 与 [正式报告](evals/baselines/2026-10-03/report.md)。
 
 ## 下一步（2026-10-03 竞品复核）
 
-对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。基线为 `92fe90d`：streaming、CLI JSONL、历史滑窗、总请求预算和输出预留已完成。本清单只列未完成交付；优先级是产品判断，竞品性能与 Hyper 真实任务收益尚未对跑。
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。评测基线为 `369a415`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留和固定任务脚手架已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-1 固定任务集和评测脚手架（下一项）**：10 个 Rust/Python/JS 离线小仓库 fixture，独立成功判定，覆盖跨文件、深文件、重复块、测试修复、规划、长会话与恢复；固定真实模型/输入/预算，每项 3 次，导出逐次 JSONL/Markdown 结果。usage 缺失标未知，成本需价格来源与日期。协议 stub 测试与真实编码任务评测分别统计。
-- [ ] **P0-2 CLI/TUI 共享取消**：统一取消源，覆盖模型等待、SSE、重试、审批与 shell 进程组；明确 cancelled/failed/interrupted，终结事件、summary、session 只结算一次，停止后续工具，保留已完成修改与准确 replay。
+- [ ] **P0-2 CLI/TUI 共享取消（下一项）**：统一取消源，覆盖模型等待、SSE、重试、审批与 shell 进程组；明确 cancelled/failed/interrupted，终结事件、summary、session 只结算一次，停止后续工具，保留已完成修改与准确 replay。
 - [ ] **P0-3 保护审计区并统一审批策略**：验证直接工具和 shell 对 `.harness` 的伪造/删除风险，隔离 events/DB/task/summary/checkpoint，给 artifact/tmp 独立授权；CLI/TUI 共用 allow/ask/deny、批准范围与非交互 ask 语义，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
+- [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null` 与重复策略拒绝样本；跟踪长会话约束位置遗漏。正式基线已有一次代码正确但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 
 ### P1：提高任务完成率
 
@@ -69,4 +70,4 @@
 
 ### 评测与存储口径
 
-之前的约 2 KB trivial run / 10 KB 工具 run 是加入 SSE、历史快照和预算事件前的样本，不能作为当前容量估算。新版本每个 delta 都持久化，历史/system prompt 也固定到事件；输入、SQLite 页、artifact 和 checkpoint 另占空间。P0-1 同时记录每次运行的实际磁盘体积和保留策略效果。
+之前的约 2 KB trivial run / 10 KB 工具 run 是加入 SSE、历史快照和预算事件前的样本，不能作为当前容量估算。新版本每个 delta 都持久化，历史/system prompt 也固定到事件；输入、SQLite 页、artifact 和 checkpoint 另占空间。正式报告已记录每次运行的 `.harness` 逻辑/分配体积和 `prune --runs --keep 1` 效果；外部 trace 副本另外保留，不计入该体积。
