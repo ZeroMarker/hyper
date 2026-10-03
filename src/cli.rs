@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
-    AgentMode, CancellationToken, Checkpoint, EventSink, ExecutionMode, RunOptions, RunSummary,
-    TaskSpec, Workspace,
+    AgentMode, CancellationToken, Checkpoint, EventSink, ExecutionMode, Permission, RunOptions,
+    RunSummary, TaskSpec, ToolPermissions, Workspace,
     cancellation::{self, Cancelled},
     deepseek::ensure_api_key,
     get_run_details, latest_model_reply, list_runs, prompt_to_task, replay_messages,
@@ -26,6 +26,13 @@ struct Cli {
     /// Shell isolation: workspace-write (default), read-only, or unrestricted
     #[arg(long, global = true, value_enum)]
     sandbox: Option<ExecutionMode>,
+    /// Decisions for bash/write/edit: allow, ask (default), or deny.
+    /// CLI ask fails closed; use the TUI to answer per-invocation questions.
+    #[arg(long, global = true, value_enum)]
+    approval: Option<Permission>,
+    /// Explicit JSON tool decisions; missing entries retain safe defaults
+    #[arg(long, global = true, value_name = "FILE")]
+    permissions: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
     /// Run a natural-language task directly (defaults to build mode)
@@ -146,12 +153,29 @@ pub fn run() -> Result<()> {
         Some(mode) => mode,
         None => ExecutionMode::from_env()?,
     };
+    let mut permissions = if cli.permissions.is_some() || cli.approval.is_some() {
+        ToolPermissions::default()
+    } else {
+        ToolPermissions::from_env()?
+    };
+    if let Some(path) = &cli.permissions {
+        permissions = serde_json::from_slice(
+            &fs::read(path)
+                .with_context(|| format!("cannot read permissions: {}", path.display()))?,
+        )
+        .context("invalid permissions file")?;
+        permissions.source = format!("file:{}", path.display());
+    }
+    if let Some(decision) = cli.approval {
+        permissions.set_mutations(decision);
+        permissions.source.push_str(" + --approval");
+    }
     if cli.command.is_none() {
         if !cli.jsonl {
             ensure_api_key(false)?;
         }
         if cli.prompt.is_empty() {
-            return tui::run_with_mode(root, None, execution_mode);
+            return tui::run_with_permissions(root, None, execution_mode, permissions.clone());
         }
         let prompt = cli.prompt.join(" ");
         let mode = if cli.plan {
@@ -166,6 +190,7 @@ pub fn run() -> Result<()> {
             cli.session.as_deref(),
             execution_mode,
             cli.jsonl,
+            permissions.clone(),
         )?;
         return Ok(());
     }
@@ -189,6 +214,7 @@ pub fn run() -> Result<()> {
                 RunOptions {
                     cancellation: cancellation.clone(),
                     execution_mode,
+                    permissions: permissions.clone(),
                     sink: if cli.jsonl {
                         Some(EventSink::cancellable_stdout(cancellation.clone())?)
                     } else {
@@ -213,6 +239,7 @@ pub fn run() -> Result<()> {
                 session.as_deref(),
                 execution_mode,
                 cli.jsonl,
+                permissions.clone(),
             )?
         }
         Commands::Build { prompt, session } => {
@@ -226,6 +253,7 @@ pub fn run() -> Result<()> {
                 session.as_deref(),
                 execution_mode,
                 cli.jsonl,
+                permissions.clone(),
             )?
         }
         Commands::Runs { limit } => {
@@ -280,7 +308,7 @@ pub fn run() -> Result<()> {
         }
         Commands::Tui => {
             ensure_api_key(false)?;
-            tui::run_with_mode(root, None, execution_mode)?
+            tui::run_with_permissions(root, None, execution_mode, permissions.clone())?
         }
         Commands::Resume { session_id } => {
             ensure_api_key(false)?;
@@ -288,7 +316,12 @@ pub fn run() -> Result<()> {
             let session = workspace
                 .session(&session_id)?
                 .with_context(|| format!("session not found: {session_id}"))?;
-            tui::run_with_mode(root, Some(session.session_id), execution_mode)?
+            tui::run_with_permissions(
+                root,
+                Some(session.session_id),
+                execution_mode,
+                permissions.clone(),
+            )?
         }
         Commands::Diff { run_id } => diff(&root, &run_id)?,
         Commands::Artifacts { run_id } => artifacts(&root, &run_id)?,
@@ -424,6 +457,7 @@ fn print_prompt_result(
     session_id: Option<&str>,
     execution_mode: ExecutionMode,
     jsonl: bool,
+    permissions: ToolPermissions,
 ) -> Result<()> {
     let task = prompt_to_task(prompt, mode);
     let cancellation = CancellationToken::new();
@@ -434,6 +468,7 @@ fn print_prompt_result(
         RunOptions {
             cancellation: cancellation.clone(),
             execution_mode,
+            permissions,
             session_id: session_id.map(str::to_owned),
             sink: if jsonl {
                 Some(EventSink::cancellable_stdout(cancellation.clone())?)

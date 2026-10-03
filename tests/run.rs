@@ -58,6 +58,7 @@ fn cli_jsonl_matches_persisted_events_and_preserves_exit_status() {
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(["run", "--jsonl", "task.json"])
             .current_dir(dir.path())
             .output()
@@ -94,6 +95,7 @@ fn cli_jsonl_rejects_non_run_commands_without_opening_workspace() {
         vec!["--jsonl"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(args)
             .current_dir(dir.path())
             .output()
@@ -109,6 +111,7 @@ fn cli_jsonl_rejects_non_run_commands_without_opening_workspace() {
 fn cli_jsonl_records_missing_provider_configuration_as_a_run_failure() {
     let dir = tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["--jsonl", "plan", "hello"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join("empty-config"))
@@ -146,6 +149,7 @@ fn cli_jsonl_build_and_direct_prompt_emit_events_without_plain_text() {
         vec!["--jsonl", "say hello"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(args)
             .current_dir(dir.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -255,6 +259,7 @@ fn cli_jsonl_delivers_model_delta_before_provider_completion() {
     let dir = tempdir().unwrap();
     let config_home = stub_config(dir.path(), &url);
     let mut child = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["--jsonl", "plan", "--session", "live", "say hello"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1017,6 +1022,7 @@ fn running_runs_are_not_repaired() {
     )
     .unwrap();
     let mut harness_process = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .arg("run")
         .arg(&task_path)
         .current_dir(dir.path())
@@ -1064,6 +1070,7 @@ fn killing_the_harness_kills_running_commands() {
     )
     .unwrap();
     let mut harness_process = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .arg("run")
         .arg(&task_path)
         .current_dir(dir.path())
@@ -1109,6 +1116,7 @@ fn cli_exit_status_follows_the_run_status() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .arg("run")
         .arg(&failing)
         .current_dir(dir.path())
@@ -1132,6 +1140,7 @@ fn cli_exit_status_follows_the_run_status() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .arg("run")
         .arg(&passing)
         .current_dir(dir.path())
@@ -1185,6 +1194,7 @@ fn cli_uses_the_stored_provider_configuration() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["plan", "summarize this project"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1240,6 +1250,7 @@ fn cli_reports_configuration_errors_without_prompting_for_a_key() {
     ] {
         fs::write(&config_file, contents).unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(["plan", "hello"])
             .current_dir(dir.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -1344,6 +1355,7 @@ fn sessions_keep_the_conversation_and_replay_it() {
 
     let run = |prompt: &str, session: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(["plan", prompt, "--session", session])
             .current_dir(dir.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -1453,6 +1465,7 @@ fn session_commands_list_read_and_forget() {
 
     let hy = |args: &[&str]| {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(args)
             .current_dir(dir.path())
             .env_remove("DEEPSEEK_API_KEY")
@@ -1520,6 +1533,7 @@ fn replay_rebuilds_the_messages_the_model_was_sent() {
     let dir = tempdir().unwrap();
     let config_home = stub_config(dir.path(), &base_url);
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["plan", "find the answer"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1581,6 +1595,7 @@ fn replay_rebuilds_the_messages_the_model_was_sent() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["replay", &run_id])
         .current_dir(dir.path())
         .output()
@@ -1681,6 +1696,7 @@ fn bounded_session_history_replays_after_forgetting_the_session() {
     drop(workspace);
     // The newest pair costs 44 estimated tokens, including framing.
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["plan", "--session", "bounded", "follow up"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1733,6 +1749,7 @@ fn invalid_history_budget_fails_before_contacting_provider() {
     let dir = tempdir().unwrap();
     let config_home = stub_config(dir.path(), "http://127.0.0.1:1/v1");
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["plan", "hello"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1767,6 +1784,7 @@ fn oversized_model_input_is_rejected_before_contacting_provider() {
     let dir = tempdir().unwrap();
     let config_home = stub_config(dir.path(), "http://127.0.0.1:1/v1");
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["plan", "hello"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -1800,14 +1818,16 @@ fn oversized_model_input_is_rejected_before_contacting_provider() {
 #[test]
 fn tool_context_growth_stops_before_an_oversized_followup_and_replays_last_request() {
     let final_round = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
-    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"reading","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\".harness/large.txt\"}"}}]}}]}"#;
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"reading","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"target/large.txt\"}"}}]}}]}"#;
     let (base_url, bodies, server) = stub_model(vec![final_round, tool_round]);
     let dir = tempdir().unwrap();
     let config_home = stub_config(dir.path(), &base_url);
     let workspace = Workspace::open(dir.path()).unwrap();
-    fs::write(workspace.paths.dir.join("large.txt"), "x".repeat(5000)).unwrap();
+    fs::create_dir_all(dir.path().join("target")).unwrap();
+    fs::write(dir.path().join("target/large.txt"), "x".repeat(5000)).unwrap();
     drop(workspace);
     let mut command = Command::new(env!("CARGO_BIN_EXE_hyper"));
+    command.env("HYPER_APPROVAL", "allow");
     command
         .args(["plan", "read the file"])
         .current_dir(dir.path())
@@ -1864,6 +1884,7 @@ fn total_request_budget_trims_whole_old_session_turns() {
     let config_home = stub_config(dir.path(), &base_url);
     let command = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_hyper"));
+        command.env("HYPER_APPROVAL", "allow");
         command
             .current_dir(dir.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -1997,6 +2018,7 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .args(["artifacts", &summary.run_id])
         .current_dir(dir.path())
         .output()
@@ -2090,6 +2112,7 @@ fn prune_keeps_the_most_recent_conversations_and_runs() {
 
     let hy = |args: &[&str]| {
         let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .env("HYPER_APPROVAL", "allow")
             .args(args)
             .current_dir(dir.path())
             .env_remove("DEEPSEEK_API_KEY")

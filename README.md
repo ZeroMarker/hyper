@@ -59,7 +59,7 @@ line names the command you actually typed.
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
 cargo run -- init
-cargo run -- run examples/hello.json
+cargo run -- --approval allow run examples/hello.json
 cargo run -- runs
 cargo run -- tui
 ```
@@ -68,7 +68,7 @@ After installing or copying either binary, the shortest workflow is:
 
 ```bash
 ha                       # open TUI
-ha "implement login"     # build mode
+ha --approval allow "implement login"  # explicitly allow mutation tools
 ha -p "analyze the bug"  # plan mode
 ```
 
@@ -279,9 +279,9 @@ Use `--jsonl` for a machine-readable live event stream from `run`, `plan`,
 `build`, or a direct prompt:
 
 ```bash
-ha --jsonl run examples/hello.json
+ha --jsonl --approval allow run examples/hello.json
 ha --jsonl plan --session review "inspect this project"
-ha --jsonl "fix the failing tests" > events.jsonl
+ha --jsonl --approval allow "fix the failing tests" > events.jsonl
 ```
 
 Stdout contains one complete event per line, identical to the run's audit log,
@@ -320,9 +320,39 @@ Synchronous library users can pass `RunOptions` and a shared `CancellationToken`
 to `run_task_with_control`; cancel its clone from another thread. Library calls
 do not install process signal handlers. The existing run APIs remain available.
 
-In the TUI, `bash`, `write` and `edit` actions ask for **interactive
-approval** before running: press `y` to allow, `n`/`Esc` to deny (the agent
-loop waits for the answer). Command-line runs do not prompt.
+### Tool permissions
+
+CLI and TUI share `allow` / `ask` / `deny` decisions. By default `read` and
+`search` are allowed; `bash`, `write` and `edit` ask. The TUI answers each
+invocation with `y` or `n`/`Esc`. CLI runs have no interactive approval handler:
+`ask` fails closed with exit 1, including when stdout is a terminal. For an
+authorized unattended task, set `--approval allow` explicitly; `--approval deny`
+disables mutation tools. The flag applies to CLI and TUI and overrides
+`HYPER_APPROVAL` (`allow`, `ask`, or `deny`).
+
+An explicit `--permissions FILE` accepts JSON such as
+`{"read":"allow","search":"allow","write":"ask","edit":"ask","bash":"deny"}`.
+Missing entries keep the defaults; unknown fields/values fail before a run.
+Precedence is `--approval` for mutation tools, then the explicit file, then
+`HYPER_APPROVAL`, then defaults. Repository files are never loaded as permission
+configuration automatically. `run.started` fixes the effective decisions and
+source; `tool.policy` records each decision. A TUI approval permits one call,
+including reads if configured to ask. Approval never expands the plan mode,
+step tool whitelist, workspace path checks or shell OS boundary.
+
+`RunOptions.permissions` exposes the same policy to embedders. For API
+compatibility, older `run_task*` helpers retain their prior automatic mutation
+permission or gated approval behavior; their source is `legacy-library-api`.
+Use `run_task_with_control` for explicit decisions and the default ask policy.
+
+Agent file tools deny `.harness` audit/control paths even with `allow`, including
+resolved symlink aliases and Unix hardlinks. Search/context exclude such files;
+repeat file-path checks after approvals. This also excludes direct access to
+artifacts/tmp; administrative artifact, checkpoint, restore and replay commands
+remain available. These checks are not filesystem isolation: approved shell
+commands can still write `.harness` under the current workspace-wide Landlock
+rule. Shell audit storage isolation, Windows hardlink detection and protection
+against concurrent path replacement remain pending P0-3 work.
 Shell tool stdin is closed; supply command input with pipes or redirection,
 so a tool cannot consume TUI keyboard events.
 
@@ -332,12 +362,12 @@ so a tool cannot consume TUI keyboard events.
 on Linux, shell commands and their child processes use Landlock to confine
 filesystem writes to the workspace and deny TCP connections. `read-only`
 also denies `write`/`edit` tools and shell writes. `unrestricted` explicitly
-removes shell isolation and the dangerous-command check; the TUI still asks
-before `bash`, `write`, and `edit`. For example:
+removes shell isolation and the dangerous-command check; tool permission
+decisions still apply. For example:
 
 ```bash
 ha --sandbox read-only run examples/hello.json
-ha --sandbox unrestricted "build this project"
+ha --approval allow --sandbox unrestricted "build this project"
 ```
 
 `HYPER_SANDBOX` sets the default for either interface; `--sandbox` overrides
@@ -469,8 +499,8 @@ an event that reached the files cannot stay unrecorded.
   level down inside `sh -c '…'`, `sudo`, `env`, `timeout` or `xargs`. Quoting and
   command substitution are parsed rather than string-matched, so `rm -rf target`
   and `curl -o f.tar.gz` still pass the parser. The parser itself is **not** a
-  containment boundary. Command-line runs apply the check without an approval
-  prompt; the TUI additionally asks before every `bash` call. The explicit
+  containment boundary. CLI and TUI apply the same tool permissions on top
+  of the execution boundary. The explicit
   `unrestricted` mode skips this check.
 - The workspace context sent to the model contains repository file contents, so a
   repository can influence the model's actions (prompt injection). Run Hyper on

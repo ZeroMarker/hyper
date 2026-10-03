@@ -7,6 +7,7 @@ pub mod engine;
 pub mod event_sink;
 pub mod i18n;
 pub mod model;
+pub mod permissions;
 pub mod policy;
 pub mod resource;
 pub mod sandbox;
@@ -24,5 +25,6 @@ pub use engine::{
 };
 pub use event_sink::EventSink;
 pub use model::*;
+pub use permissions::{Permission, ToolPermissions};
 pub use sandbox::ExecutionMode;
 pub use workspace::{Checkpoint, Workspace, restore_checkpoint};

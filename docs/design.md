@@ -31,7 +31,7 @@ flowchart LR
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
 | [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
 | [`workspace.rs`](../src/workspace.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
-| [`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) | 命令检查、Linux Landlock、子进程资源限制 |
+| [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock、子进程资源限制 |
 | [`approval.rs`](../src/approval.rs)、[`event_sink.rs`](../src/event_sink.rs) | TUI 与工作线程之间的审批和状态传递 |
 | [`i18n.rs`](../src/i18n.rs) | 界面文案；默认英语，`HYPER_LANG=zh` 或 `zh-CN` 切换中文 |
 
@@ -81,7 +81,8 @@ flowchart LR
 ## 执行边界
 
 - `plan` 模式拒绝 `bash` 和写入；`build` 模式允许经过策略检查的工具。步骤的 `tools` 白名单也约束直接指令和模型工具调用。
-- `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；`search` 从工作区根目录查找。`read-only` 执行模式拒绝写入。
+- CLI/TUI 共用工具级 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无审批处理器时 ask 明确拒绝，TUI 每次调用确认一次。显式权限文件与参数不从项目说明推导授权。旧库 API 保留先前行为，新 `RunOptions.permissions` 默认 ask。判定和来源固定到事件。
+- `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；直接文件工具拒绝 `.harness` 及符号链接/Unix 硬链接别名。search 和自动上下文也过滤这些路径；审批后重复检查目标。Windows 硬链接和并发替换的描述符级保护仍待完善。`read-only` 执行模式拒绝写入。
 - Shell 默认使用 `workspace-write` 模式：先经命令策略检查，再在 Linux 子进程应用 Landlock，允许工作区内写入，拒绝 TCP 连接与监听。`read-only` 不授权文件写入；`unrestricted` 显式跳过 Landlock 和该命令策略检查。无可用 Landlock 时，受限模式的 Shell 启动失败。
 - Linux Shell 子进程默认使用约 8 GiB 地址空间、1 GiB 单文件大小、以及与步骤超时相关的 CPU 秒数限制；步骤可以覆盖这些值。墙钟超时默认 120 秒，超时后终止进程组。限制按进程生效，不是整个进程树的总额。
 - Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。工作区内的 `.harness` 也处于可写范围。`unrestricted` 模式具有宿主进程的常规权限。

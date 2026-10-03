@@ -147,7 +147,7 @@ class OfflineCLI(unittest.TestCase):
             master, slave = os.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
             env = os.environ.copy()
-            env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})
+            env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'HYPER_APPROVAL':'ask', 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})
             child = subprocess.Popen([str(self.binary),'--sandbox','workspace-write','tui'],cwd=root,env=env,
                                      stdin=slave,stdout=slave,stderr=slave,close_fds=True)
             os.close(slave)
@@ -204,7 +204,7 @@ class OfflineCLI(unittest.TestCase):
             task = root/'task.json'
             task.write_text(json.dumps({'name':'wrong edit','steps':[{'id':'edit','mode':'build',
                             'instruction':f'write:{root/"bounds.py"}\ndef clamp(n, lo, hi): return lo\n'}]}))
-            metrics, _ = invoke([str(self.binary),'--jsonl','run',str(task)],root,os.environ.copy(),root/'.harness/raw.jsonl',10)
+            metrics, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,os.environ.copy(),root/'.harness/raw.jsonl',10)
             task.unlink()
             self.assertEqual(metrics['exit_code'],0)
             self.assertNotEqual(snapshot(root),before)
@@ -224,7 +224,7 @@ class OfflineCLI(unittest.TestCase):
             self.assertIsNotNone(metrics['first_tool_result_seconds'])
             task = root/'failure.json'
             task.write_text(json.dumps({'name':'failure','steps':[{'id':'fail','mode':'build','instruction':'bash:exit 7'}]}))
-            failure, _ = invoke([str(self.binary),'--jsonl','run',str(task)],root,env,root/'failed.jsonl',10)
+            failure, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,env,root/'failed.jsonl',10)
             self.assertEqual(failure['exit_code'],1)
             self.assertFalse(failure['finished'])
             self.assertEqual(len(failure['errors']),1)

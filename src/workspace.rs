@@ -746,6 +746,49 @@ pub fn resolve_path(root: &Path, target: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+/// Agent file tools cannot access the harness audit/control area, including
+/// symlink aliases. Administrative checkpoint/recovery APIs use resolve_path.
+pub fn resolve_tool_path(root: &Path, target: &str) -> Result<PathBuf> {
+    let resolved = resolve_path(root, target)?;
+    let audit = root.canonicalize()?.join(".harness");
+    if resolved.starts_with(&audit)
+        || audit
+            .canonicalize()
+            .is_ok_and(|canonical| resolved.starts_with(canonical))
+    {
+        bail!("protected audit path is unavailable to agent file tools: {target}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = fs::metadata(&resolved)
+            && metadata.is_file()
+            && metadata.nlink() > 1
+        {
+            // A workspace hardlink to an audit file is the same inode even
+            // though canonicalize leaves its spelling outside .harness.
+            let mut pending = vec![audit];
+            while let Some(directory) = pending.pop() {
+                for entry in fs::read_dir(directory)? {
+                    let entry = entry?;
+                    let file_type = entry.file_type()?;
+                    if file_type.is_dir() {
+                        pending.push(entry.path());
+                    } else if file_type.is_file() {
+                        let protected = entry.metadata()?;
+                        if protected.dev() == metadata.dev() && protected.ino() == metadata.ino() {
+                            bail!(
+                                "protected audit hardlink is unavailable to agent file tools: {target}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Checkpoint {

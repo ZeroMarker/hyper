@@ -22,10 +22,11 @@ use crate::{
     deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt},
     event_sink::EventSink,
     model::*,
+    permissions::{Permission, ToolPermissions},
     policy,
     resource::ResourceBudget,
     sandbox::{ExecutionMode, Sandbox},
-    workspace::{self, RunPaths, Workspace, create_checkpoint, now, resolve_path},
+    workspace::{self, RunPaths, Workspace, create_checkpoint, now},
 };
 
 struct EventWriter<'a> {
@@ -34,6 +35,7 @@ struct EventWriter<'a> {
     path: &'a Path,
     workspace: &'a Workspace,
     gate: Option<ApprovalGate>,
+    permissions: ToolPermissions,
     sink: Option<EventSink>,
     execution_mode: ExecutionMode,
     /// Earlier turns of the session this run belongs to, oldest first. Empty
@@ -93,7 +95,7 @@ fn assert_allowed(
         bail!("read-only execution mode denies writes")
     }
     if let Some(target) = target {
-        resolve_path(root, target)?;
+        workspace::resolve_tool_path(root, target)?;
     }
     if action == "bash" && execution_mode != ExecutionMode::Unrestricted {
         policy::check_command(command.unwrap_or_default(), root)?;
@@ -123,13 +125,35 @@ fn authorize(
     ) {
         events.write(
             "tool.denied",
-            json!({"tool":tool,"target":target,"command":command,"reason":error.to_string()}),
+            json!({"tool":tool,"target":target,"command":command,"reason":error.to_string(),"source":"execution-boundary"}),
             Some(&step.id),
             Some(index),
         )?;
         return Err(error);
     }
-    Ok(())
+    let decision = events.permissions.decision(tool);
+    let detail = target.or(command).unwrap_or("workspace search");
+    events.write(
+        "tool.policy",
+        json!({"tool":tool,"target":target,"command":command,"decision":decision,
+            "source":events.permissions.source,"scope":"invocation"}),
+        Some(&step.id),
+        Some(index),
+    )?;
+    match decision {
+        Permission::Allow => Ok(()),
+        Permission::Ask => require_approval(events, step, index, tool, detail),
+        Permission::Deny => {
+            events.write(
+                "tool.denied",
+                json!({"tool":tool,"target":detail,
+                "reason":"tool permission is deny","source":events.permissions.source}),
+                Some(&step.id),
+                Some(index),
+            )?;
+            bail!("tool permission denies {tool} action: {detail}")
+        }
+    }
 }
 
 fn require_approval(
@@ -141,7 +165,23 @@ fn require_approval(
 ) -> Result<()> {
     events.cancellation.check()?;
     let Some(gate) = &events.gate else {
-        return Ok(());
+        events.write(
+            "tool.approval",
+            json!({"tool":tool,"target":detail,"approved":false,
+            "reason":"ask requires an interactive approval handler","scope":"invocation"}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        events.write(
+            "tool.denied",
+            json!({"tool":tool,"target":detail,
+            "reason":"ask requires an interactive approval handler","source":"approval-handler"}),
+            Some(&step.id),
+            Some(index),
+        )?;
+        bail!(
+            "tool permission ask requires an interactive approval handler for {tool}; configure allow or deny explicitly"
+        )
     };
     let approved = match gate.request_cancellable(tool, detail, &events.cancellation) {
         Ok(approved) => approved,
@@ -551,6 +591,10 @@ fn workspace_context(root: &Path) -> Result<String> {
         }
         Err(error) => return Err(error).context("failed to enumerate workspace files with rg"),
     };
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|path| workspace::resolve_tool_path(root, path).is_ok())
+        .collect();
     let mut context = format!(
         "Workspace: {}\n\nFiles:\n{}\n",
         root.display(),
@@ -566,7 +610,7 @@ fn workspace_context(root: &Path) -> Result<String> {
         if context.len() >= MAX_TOTAL {
             break;
         }
-        let Ok(content) = fs::read_to_string(root.join(relative)) else {
+        let Ok(content) = fs::read_to_string(workspace::resolve_tool_path(root, relative)?) else {
             continue;
         };
         let remaining = MAX_TOTAL.saturating_sub(context.len());
@@ -684,7 +728,6 @@ fn bash(
         ResourceBudget::for_step(step).context("could not prepare bash resource limits")?;
     #[cfg(not(target_os = "linux"))]
     let _ = &resource_budget;
-    require_approval(events, step, index, "bash", command)?;
     events.write(
         "tool.started",
         json!({"tool":"bash","command":command,"resourceLimits":resource_budget}),
@@ -1050,7 +1093,7 @@ fn read(
         Some(&step.id),
         Some(index),
     )?;
-    let bytes = fs::read(resolve_path(root, path)?)?;
+    let bytes = fs::read(workspace::resolve_tool_path(root, path)?)?;
     let max = 64_000.min(bytes.len());
     let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()});
     events.write("tool.finished",json!({"tool":"read","path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()}),Some(&step.id),Some(index))?;
@@ -1074,18 +1117,47 @@ fn search(
     let out = Command::new("rg")
         // `--` ends flag parsing so a query beginning with `-` (e.g. `--pre=...`)
         // is matched literally instead of being parsed as an rg option.
-        .args(["--line-number", "--fixed-strings", "--", query, "."])
+        .args([
+            "--json",
+            "--fixed-strings",
+            "-g",
+            "!.harness/**",
+            "--",
+            query,
+            ".",
+        ])
         .current_dir(root)
         .output();
     let (code, lines) = match out {
-        Ok(out) => (
-            out.status.code().unwrap_or(2),
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .take(limit)
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        ),
+        Ok(out) => {
+            let mut lines = Vec::new();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let record: Value = serde_json::from_str(line).context("invalid rg JSON output")?;
+                if record["type"] != "match" {
+                    continue;
+                }
+                let data = &record["data"];
+                let Some(path) = data["path"]["text"].as_str() else {
+                    continue;
+                };
+                if workspace::resolve_tool_path(root, path).is_err() {
+                    continue;
+                }
+                let Some(content) = data["lines"]["text"].as_str() else {
+                    continue;
+                };
+                let Some(number) = data["line_number"].as_u64() else {
+                    continue;
+                };
+                if lines.len() < limit {
+                    lines.push(format!(
+                        "{path}:{number}:{}",
+                        content.trim_end_matches(['\r', '\n'])
+                    ));
+                }
+            }
+            (out.status.code().unwrap_or(2), lines)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let lines = search_workspace_files(root, query, limit);
             (i32::from(lines.is_empty()), lines)
@@ -1105,7 +1177,10 @@ fn search(
 fn search_workspace_files(root: &Path, query: &str, limit: usize) -> Vec<String> {
     let mut matches = Vec::new();
     for relative in workspace_files(root, false, usize::MAX) {
-        let Ok(content) = fs::read_to_string(root.join(&relative)) else {
+        let Ok(path) = workspace::resolve_tool_path(root, &relative) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
         for (index, line) in content.lines().enumerate() {
@@ -1141,14 +1216,13 @@ fn write_file(
         Some(path),
         None,
     )?;
-    require_approval(events, step, index, "write", path)?;
     events.write(
         "tool.started",
         json!({"tool":"write","path":path}),
         Some(&step.id),
         Some(index),
     )?;
-    let target = resolve_path(root, path)?;
+    let target = workspace::resolve_tool_path(root, path)?;
     let before = fs::read_to_string(&target).unwrap_or_default();
     let cp = create_checkpoint(root, &run.checkpoints, path)?;
     if let Some(parent) = target.parent() {
@@ -1186,14 +1260,13 @@ fn edit_file(
         bail!("edit: path must not be empty")
     }
     authorize(events, root, step, index, "edit", "write", Some(path), None)?;
-    require_approval(events, step, index, "edit", path)?;
     events.write(
         "tool.started",
         json!({"tool":"edit","path":path}),
         Some(&step.id),
         Some(index),
     )?;
-    let target = resolve_path(root, path)?;
+    let target = workspace::resolve_tool_path(root, path)?;
     let before = fs::read_to_string(&target)?;
     if !before.contains(search) {
         bail!("search text not found in {path}")
@@ -1235,6 +1308,7 @@ pub fn run_task_with_mode(
         None,
         execution_mode,
         CancellationToken::new(),
+        legacy_permissions(false),
     )
 }
 
@@ -1254,6 +1328,7 @@ pub fn run_task_with_event_sink(
         Some(sink),
         execution_mode,
         CancellationToken::new(),
+        legacy_permissions(false),
     )
 }
 
@@ -1272,6 +1347,7 @@ pub fn run_task_with_approval(
         None,
         ExecutionMode::from_env()?,
         CancellationToken::new(),
+        legacy_permissions(true),
     )
 }
 
@@ -1299,6 +1375,7 @@ pub fn run_task_in_session_with_mode(
         None,
         execution_mode,
         CancellationToken::new(),
+        legacy_permissions(false),
     )
 }
 
@@ -1317,6 +1394,7 @@ pub fn run_task_in_session_with_approval(
         None,
         ExecutionMode::from_env()?,
         CancellationToken::new(),
+        legacy_permissions(true),
     )
 }
 
@@ -1354,6 +1432,7 @@ pub fn run_task_in_session_with_updates_mode(
         Some(sink),
         execution_mode,
         CancellationToken::new(),
+        legacy_permissions(true),
     )
 }
 
@@ -1365,6 +1444,7 @@ pub struct RunOptions {
     pub sink: Option<EventSink>,
     pub execution_mode: ExecutionMode,
     pub cancellation: CancellationToken,
+    pub permissions: ToolPermissions,
 }
 
 pub fn run_task_with_control(
@@ -1380,9 +1460,21 @@ pub fn run_task_with_control(
         options.sink,
         options.execution_mode,
         options.cancellation,
+        options.permissions,
     )
 }
 
+fn legacy_permissions(interactive: bool) -> ToolPermissions {
+    let mut policy = ToolPermissions::with_mutations(if interactive {
+        Permission::Ask
+    } else {
+        Permission::Allow
+    });
+    policy.source = "legacy-library-api".into();
+    policy
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_task_inner(
     task: &TaskSpec,
     root: impl AsRef<Path>,
@@ -1391,6 +1483,7 @@ fn run_task_inner(
     sink: Option<EventSink>,
     execution_mode: ExecutionMode,
     cancellation: CancellationToken,
+    permissions: ToolPermissions,
 ) -> Result<RunSummary> {
     task.validate()?;
     let workspace = Workspace::open(root)?;
@@ -1420,6 +1513,7 @@ fn run_task_inner(
         path: &run.events,
         workspace: &workspace,
         gate,
+        permissions,
         sink,
         execution_mode,
         history,
@@ -1427,7 +1521,7 @@ fn run_task_inner(
     };
     events.write(
         "run.started",
-        json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode}),
+        json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode,"permissions":events.permissions,"permissionSource":events.permissions.source}),
         None,
         None,
     )?;
@@ -1620,6 +1714,8 @@ fn classify_error(message: &str) -> &'static str {
         || message.contains("escapes workspace root")
         || message.contains("not allowed for step")
         || message.contains("user denied")
+        || message.contains("protected audit")
+        || message.contains("tool permission")
     {
         "PolicyError"
     } else if message.contains("timed out") || message.contains("could not be terminated") {
@@ -2008,6 +2104,7 @@ mod tests {
             task: &task,
             path: &run.events,
             workspace: &workspace,
+            permissions: ToolPermissions::default(),
             gate: None,
             sink: None,
             execution_mode: ExecutionMode::default(),

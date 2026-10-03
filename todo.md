@@ -44,13 +44,15 @@
 
 - [x] **P0-2 CLI/TUI 共享取消**：共享运行令牌覆盖响应头、SSE/JSON 正文、重试、审批和 shell；CLI 信号取消退出 130，TUI Ctrl-C/运行中 Esc 与 `/cancel` 取消，审批 Esc 仅拒绝当前动作。取消记录独立的 run.cancelled，summary/DB/session 结算一次，保留已完成修改、输出与 checkpoint，并停止后续工具；外部信号直接传递到后台，退出等待 worker。Unix JSONL 背压可取消；125 个 Rust 测试与 10 个评测测试通过，含真实 Linux PTY 取消后续聊；固定任务集 30/30 通过，Responses/Messages 真实端点冒烟各 1/1。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。
 
+- [x] **P0-3a 共用工具权限与直接审计路径保护**：CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无处理器时 ask 明确拒绝，显式 `--approval` / `--permissions` / HYPER_APPROVAL 固定来源与优先级，审批仅授权一次。直接文件工具拒绝审计路径、符号链接和 Unix 硬链接，search/context 同步过滤；旧库 API 保持兼容。135 个 Rust 测试通过。完整边界及 shell 风险复现见 [审计边界说明](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-03 竞品复核）
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `77858a1`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架和共享取消已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3 保护审计区并统一审批策略（下一项）**：验证直接工具和 shell 对 `.harness` 的伪造/删除风险，隔离 events/DB/task/summary/checkpoint，给 artifact/tmp 独立授权；CLI/TUI 共用 allow/ask/deny、批准范围与非交互 ask 语义，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
+- [ ] **P0-3b shell 审计存储隔离与范围授权（下一项）**：直接工具保护与共用工具级权限已完成，shell 在显式 allow 后仍能改写 `.harness`，已在临时仓库复现。将 events/DB/task/summary/session/checkpoint 放入 shell 可写范围之外，验证迁移、并发、崩溃恢复和定位不可伪造；给 artifact/tmp 独立授权，补路径/命令范围与 Windows 硬链接/并发路径替换保护，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null` 与重复策略拒绝样本；跟踪长会话约束位置遗漏。正式基线已有一次代码正确但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 

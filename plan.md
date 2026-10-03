@@ -6,7 +6,7 @@
 
 Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地终端编码 Agent。下一阶段目标是可靠完成真实仓库任务，并在取消、编辑和长会话失败时提供清楚的恢复路径。
 
-最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架与共享取消；这些功能从待办基线中移除。125 个 Rust 测试及 10 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
+最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架与共享取消；这些功能从待办基线中移除。135 个 Rust 测试及 10 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
 
 [前一轮基线](evals/baselines/2026-10-03/report.md)（`369a415`）：10 个 Rust/Python/JS 任务各跑 3 次，固定 OpenCode Go / deepseek-v4-flash / Chat、预算与并发参数，28/30 通过。3/3 错误编辑恢复通过；两次失败分别为长会话注释位置约束遗漏，以及代码正确但反复遇到策略拒绝、耗尽 12 轮。所有原始事件仅留本地，提交的逐次汇总与元数据可审阅。宿主编译环境仍被继承，后续比较须保持或隔离该环境。
 
@@ -24,7 +24,7 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 | 产品 | 本轮确认的能力与来源 | Hyper 对应差距与计划 |
 | --- | --- | --- |
 | Codex CLI | [`exec --json` 与 schema 输出、非交互会话续接](https://learn.chatgpt.com/docs/non-interactive-mode)；[按目录加载 AGENTS.md 与 override](https://learn.chatgpt.com/docs/agent-configuration/agents-md)。 | 实时 JSONL 已有；项目说明没有专门加载语义，最终结果没有 schema 校验。先做 P1-4 项目说明，再做 P2-1 稳定自动化契约。 |
-| OpenCode | [按工具、路径和命令设 allow/ask/deny，重复调用及外部目录权限，默认敏感文件读取规则](https://opencode.ai/docs/permissions/)；[自动压缩、旧工具输出裁剪与预留空间](https://opencode.ai/docs/config/#compaction)。 | Hyper 有模式与工具白名单，但审批策略依赖 CLI/TUI 入口；没有摘要压缩或重复调用检测。对应 P0-3、P1-1、P1-5。权限规则与 OS 隔离分别验收。 |
+| OpenCode | [按工具、路径和命令设 allow/ask/deny，重复调用及外部目录权限，默认敏感文件读取规则](https://opencode.ai/docs/permissions/)；[自动压缩、旧工具输出裁剪与预留空间](https://opencode.ai/docs/config/#compaction)。 | Hyper 有模式与工具白名单，且已有共用工具级 allow/ask/deny；没有摘要压缩或重复调用检测。对应 P0-3、P1-1、P1-5。权限规则与 OS 隔离分别验收。 |
 | Claude Code | [项目说明、按需 skills、MCP、hooks、独立 subagents 与代码智能](https://code.claude.com/docs/en/features-overview)；[会话/代码恢复及其限制](https://code.claude.com/docs/en/checkpointing)。 | 先补项目约定和验证反馈，随后小范围 skills/MCP。官方明确 shell 修改等不在所有 checkpoint 覆盖内，Hyper 也应说明自己的快照范围，不能把 replay 当作完整文件系统恢复。对应 P1-3、P1-4、P2-2。 |
 | DeepSeek Harness | [插件化 model/tool/session/loop 与 web/headless/sdk/acp 组合](https://deepseek-harness.github.io/deepseek-harness/en/reference/)；[维护者标注 developer preview 与兼容性风险](https://github.com/deepseek-ai/deepseek-harness)。 | 借鉴明确的组件边界和事件契约。其 profile 是应用/插件组合，不等于 Hyper 待实现的 provider profile；暂不复制完整插件内核。对应 P1-6、P2-1、P2-2。 |
 | Pi | [树形会话、分支与保留原始条目的摘要压缩](https://pi.dev/docs/latest/how-pi-works)；[压缩摘要及来源边界记录](https://pi.dev/docs/latest/compaction)；[JSONL 双向 RPC](https://pi.dev/docs/latest/rpc)。 | Hyper 的历史裁剪没有摘要，JSONL 是输出流而非双向控制接口。共享取消已完成；下一步做可审计压缩，分支、RPC 待稳定生命周期后推进。对应 P1-1、P2-1。 |
@@ -37,11 +37,11 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 
 | 维度 | 当前实现 | 剩余差距 |
 | --- | --- | --- |
-| 质量 | 125 个 Rust 测试、10 个评测测试、10 个固定任务及两轮各 30 次真实基线；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
+| 质量 | 135 个 Rust 测试、10 个评测测试、10 个固定任务及两轮各 30 次真实基线；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
 | 运行控制 | 12 轮上限、共享取消、shell 超时/组清理、审批释放、独立取消结算和崩溃恢复；Linux 门控与 PTY 验证 | Windows stdout/终端渲染背压、OS 阻塞 I/O 及脱离组的 daemon 尚无完整有界取消验证 |
 | 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
 | 工具 | read/search/bash/write/edit，artifact、diff、快照 | read 只有前 64000 字节，edit 只改第一个匹配；缺陈旧文件校验、范围读取与验证命令闭环 |
-| 执行策略 | 模式、路径校验、命令规则、TUI 写入审批 | CLI/TUI 的审批行为不同；无统一 allow/ask/deny 配置、受保护审计区或完整跨平台隔离 |
+| 执行策略 | 模式、路径校验、命令规则、共用工具级 allow/ask/deny 和直接审计路径保护 | shell 可写审计区；无路径/命令范围授权、并发路径替换保护或完整跨平台隔离 |
 | 自动化 | 实时 JSONL、失败退出码、会话与 replay | 无显式事件版本/兼容性契约、结果 schema、双向控制或会话分支 |
 | 配置与扩展 | 单组 provider 参数、协议覆盖、任务工具白名单 | 无命名 provider profile、连接诊断、专门项目说明或 skills/MCP 生命周期 |
 
@@ -59,7 +59,9 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 
 验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。已有门控测试检查网络/审批/shell/Unix JSONL 等待取消在 2 秒内结算，真实 Linux PTY 验证审批 Ctrl-C 取消、同会话续聊与退出。Windows stdout、终端渲染背压和 OS 阻塞文件 I/O 列为后续，不将协作取消视为 daemon 隔离。
 
-**P0-3 审计区保护与执行策略。** 先验证 shell/直接工具对 `.harness` 中 events、DB、task、summary、checkpoint 的写入风险，设计受保护存储或挂载边界并给 artifact/tmp 单独授权。明确 CLI/TUI 共用的 allow/ask/deny、批准范围和非交互 ask 的行为。
+**P0-3 审计区保护与执行策略（部分交付，未完成）。** 工具级 allow/ask/deny、来源记录、逐次审批、CLI 非交互 ask 拒绝与直接工具/搜索/上下文的审计路径保护已交付。默认写工具均 ask，自动化需明确 `--approval allow`。shell 在明确 allow 后仍能改写 `.harness`，已经在临时仓库复现；细节和边界设计见 [审计边界说明](docs/audit-boundary.md)。下一阶段为 P0-3b shell 审计存储隔离与范围授权。
+
+ 先验证 shell/直接工具对 `.harness` 中 events、DB、task、summary、checkpoint 的写入风险，设计受保护存储或挂载边界并给 artifact/tmp 单独授权。明确 CLI/TUI 共用的 allow/ask/deny、批准范围和非交互 ask 的行为。
 
 验收：伪造/删除审计、符号链接逃逸、子 shell、重定向和重复调用均有针对性测试；策略日志固定来源与原因。仓库上下文中的 prompt injection 按不可信输入验证，提示词声明不能代替执行隔离。批准与命令规则不能扩大 OS 边界；无法隔离的平台继续明确拒绝受限 shell。UDP/Unix socket、metadata、macOS/Windows 原生隔离作为分平台后续交付，不用一个 checkbox 宣称完成。
 
@@ -101,6 +103,6 @@ P2 共用门槛：至少一个实际任务或集成消费者证明需求；已�
 
 ## 接下来执行什么
 
-下一项推进 P0-3 审计区保护与统一审批策略。P0-2 共享取消及 Linux 门控/PTY 验证已交付。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
+下一项推进 P0-3b shell 审计存储隔离与范围授权；P0-3a 共用工具权限和直接工具保护已交付，完整 P0-3 保持未完成。P0-2 共享取消及 Linux 门控/PTY 验证已交付。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
 
 这是一份可执行顺序，不是所有阶段都必须等待前一阶段完整结束；P0 的评测和边界验证伴随每轮交付，收益未实测时保留为假设。

@@ -4,6 +4,10 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-03（第六轮）：交付 P0-3a 共用工具权限与直接审计路径保护，完整 P0-3 保持未完成。CLI/TUI 共用 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无交互处理器时 ask 明确拒绝，自动化需显式 `--approval allow`。`--permissions FILE`、HYPER_APPROVAL 与参数优先级、有效权限及来源固定到事件，未知配置失败关闭。审批只授权当前调用，allow 不扩大 plan、白名单、工作区或 OS 边界。旧库 API 保持原审批行为，新 RunOptions 使用共用策略。
+
+直接 read/write/edit 拒绝 `.harness` 及符号链接/Unix 硬链接别名，search 和自动上下文同步过滤，审批后重复校验文件目标。135 个 Rust 测试（58 单元、9 取消、9 权限、54 run、5 task）、10 个离线评测测试通过，fmt、Clippy 与 release 构建通过。在一次性仓库实测：明确 allow 后，workspace-write shell 仍能写 `.harness/probe.txt`；没有把命令过滤或直接工具保护当成完整审计防伪。下一项是 P0-3b shell 审计存储隔离、独立 artifact/tmp 授权与范围规则，另保留 Windows 硬链接和并发路径替换保护。见 [边界说明与复现](docs/audit-boundary.md)。
+
 2026-10-03（第五轮）：完成 P0-2 CLI/TUI 共享取消。共享令牌覆盖模型响应头、三协议 SSE/JSON、重试、审批与 shell；CLI 信号取消返回 130，TUI Ctrl-C/运行中 Esc 或 `/cancel` 取消，审批 Esc 只拒绝当前操作。取消独立结算为 cancelled，保留已完成修改、输出、检查点与可 replay 的实际请求；退出等待后台 worker，外部信号直接传递到后台。Unix CLI JSONL 背压可取消。Windows stdout、终端渲染背压、OS 阻塞文件 I/O 及脱离进程组的 daemon 仍列后续，不宣称所有平台 I/O 有界。
 
 本轮验证：125 个 Rust 测试（57 单元、9 取消集成、54 run 集成、5 task 集成）、10 个评测测试、fmt、Clippy 与 release 构建通过。门控测试覆盖网络/审批/shell/Unix 背压取消在 2 秒内结算，真实 Linux PTY 验证取消审批后同会话续聊与退出。正式代码 `77858a1` 上 OpenCode Go / deepseek-v4-flash / Chat 固定任务集 30/30 通过，错误修改恢复与长会话各 3/3，完整 usage、持久化流一致性和 prune 已检查。Responses / grok-4.6、Messages / minimax-m2.5 真实端点 readonly-plan 冒烟各 1/1；仅是单任务联通验证。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。前轮 28/30 与本轮小样本不足以把成功率变化归因于取消实现，成本未知。下一项为 P0-3 审计区保护与统一审批策略。

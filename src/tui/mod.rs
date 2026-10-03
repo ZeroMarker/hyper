@@ -26,6 +26,7 @@ pub struct App {
     pub input: String,
     pub mode: AgentMode,
     pub execution_mode: ExecutionMode,
+    pub permissions: crate::ToolPermissions,
     pub model: String,
     pub output: Vec<String>,
     pub rendered: Vec<Line<'static>>,
@@ -70,6 +71,7 @@ impl App {
             input: String::new(),
             mode: AgentMode::Build,
             execution_mode,
+            permissions: crate::ToolPermissions::default(),
             model,
             output: vec![
                 i18n::text(
@@ -205,6 +207,7 @@ impl App {
                 let root = self.root.clone();
                 let mode = self.mode;
                 let execution_mode = self.execution_mode;
+                let permissions = self.permissions.clone();
                 let tx = self.tx.clone();
                 // The first message opens a conversation, and every later one
                 // continues it, which is what gives the model the earlier turns
@@ -217,7 +220,7 @@ impl App {
                     let result = run_task_with_control(
                         &prompt_to_task(&value, mode), &root, RunOptions {
                             cancellation, execution_mode, session_id: Some(session),
-                            gate: Some(gate), sink: Some(sink),
+                            gate: Some(gate), sink: Some(sink), permissions,
                         }
                     )
                     .and_then(|summary| {
@@ -418,10 +421,25 @@ pub fn run_with_mode(
     session: Option<String>,
     execution_mode: ExecutionMode,
 ) -> Result<()> {
+    run_with_permissions(
+        root,
+        session,
+        execution_mode,
+        crate::ToolPermissions::from_env()?,
+    )
+}
+
+pub fn run_with_permissions(
+    root: PathBuf,
+    session: Option<String>,
+    execution_mode: ExecutionMode,
+    permissions: crate::ToolPermissions,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture)?;
     let result = (|| {
         let mut app = App::new(root, session, execution_mode);
+        app.permissions = permissions;
         let _signals = cancellation::signals(&app.process_cancellation)?;
         while !app.quit {
             app.tick = app.tick.wrapping_add(1);

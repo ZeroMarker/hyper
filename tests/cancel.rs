@@ -148,6 +148,7 @@ fn cancellation_kills_shell_group_keeps_completed_changes_and_stops_later_steps(
             &path,
             RunOptions {
                 cancellation: token,
+                permissions: harness::ToolPermissions::with_mutations(harness::Permission::Allow),
                 session_id: Some("cancel-session".into()),
                 ..RunOptions::default()
             },
@@ -203,6 +204,7 @@ fn cancellation_kills_shell_group_keeps_completed_changes_and_stops_later_steps(
         root.path(),
         RunOptions {
             session_id: Some("cancel-session".into()),
+            permissions: harness::ToolPermissions::with_mutations(harness::Permission::Allow),
             ..RunOptions::default()
         },
     )
@@ -277,6 +279,7 @@ fn cli(
 ) {
     fs::write(root.join("README.md"), "Cancellation fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .current_dir(root)
         .args([
             "--jsonl",
@@ -496,6 +499,7 @@ fn cli_cancels_while_jsonl_consumer_stops_reading() {
     let file = root.path().join("task.json");
     fs::write(&file, serde_json::to_vec(&specification).unwrap()).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .env("HYPER_APPROVAL", "allow")
         .current_dir(root.path())
         .args(["--jsonl", "run"])
         .arg(&file)

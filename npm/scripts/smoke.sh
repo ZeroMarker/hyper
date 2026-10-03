@@ -92,7 +92,7 @@ cat > task.json <<'JSON'
 {"name":"smoke","steps":[{"id":"s","mode":"build","instruction":"bash:exit 7"}]}
 JSON
 status=0
-"$bin/hyper" run task.json >out.json 2>err.txt || status=$?
+"$bin/hyper" --approval allow run task.json >out.json 2>err.txt || status=$?
 if [ "$status" -ne 1 ]; then
   echo "smoke: a failing run must exit 1 through the shim, got $status" >&2
   exit 1

@@ -53,6 +53,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             format!("  •  {}", app.execution_mode.as_str()),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::styled(
+            format!(
+                "  •  write {:?} / edit {:?} / bash {:?}",
+                app.permissions.write, app.permissions.edit, app.permissions.bash
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
         // Which conversation the next message joins, so a follow-up is never
         // silently answered by a fresh context.
         Span::styled(

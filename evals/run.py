@@ -180,7 +180,7 @@ def attempt(task, repetition, args, env):
     started = time.monotonic()
     for index, turn in enumerate(task['turns']):
         mode = 'read-only' if turn['mode'] == 'plan' else 'workspace-write'
-        command = [str(args.hyper), '--jsonl', '--sandbox', mode, turn['mode'], '--session', 'eval', prompt(turn)]
+        command = [str(args.hyper), '--jsonl', '--approval', 'allow', '--sandbox', mode, turn['mode'], '--session', 'eval', prompt(turn)]
         metrics, reply = invoke(command, root, env, destination/f'turn-{index+1}.jsonl', args.timeout)
         metrics['mode'] = turn['mode']
         turns.append(metrics)
@@ -294,7 +294,7 @@ def main():
                 'context_tokens': args.context_tokens, 'output_tokens': args.output_tokens,
                 'history_tokens': args.history_tokens, 'max_model_turns': 12, 'repetitions': args.repetitions,
                 'jobs': args.jobs, 'turn_timeout_seconds': args.timeout, 'platform': sys.platform,
-                'approval_policy': 'CLI default; no interactive approvals; tool policy and sandbox still apply',
+                'approval_policy': 'explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply',
                 'tools': ['read','search','bash','write','edit'], 'cost': None,
                 'tool_versions': {tool: subprocess.check_output([tool, '--version'], text=True).splitlines()[0] for tool in ['python3','node','rustc']}}
     results = []
