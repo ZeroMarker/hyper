@@ -4,6 +4,10 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-03（第五轮）：完成 P0-2 CLI/TUI 共享取消。共享令牌覆盖模型响应头、三协议 SSE/JSON、重试、审批与 shell；CLI 信号取消返回 130，TUI Ctrl-C/运行中 Esc 或 `/cancel` 取消，审批 Esc 只拒绝当前操作。取消独立结算为 cancelled，保留已完成修改、输出、检查点与可 replay 的实际请求；退出等待后台 worker，外部信号直接传递到后台。Unix CLI JSONL 背压可取消。Windows stdout、终端渲染背压、OS 阻塞文件 I/O 及脱离进程组的 daemon 仍列后续，不宣称所有平台 I/O 有界。
+
+本轮验证：125 个 Rust 测试（57 单元、9 取消集成、54 run 集成、5 task 集成）、10 个评测测试、fmt、Clippy 与 release 构建通过。门控测试覆盖网络/审批/shell/Unix 背压取消在 2 秒内结算，真实 Linux PTY 验证取消审批后同会话续聊与退出。正式代码 `77858a1` 上 OpenCode Go / deepseek-v4-flash / Chat 固定任务集 30/30 通过，错误修改恢复与长会话各 3/3，完整 usage、持久化流一致性和 prune 已检查。Responses / grok-4.6、Messages / minimax-m2.5 真实端点 readonly-plan 冒烟各 1/1；仅是单任务联通验证。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。前轮 28/30 与本轮小样本不足以把成功率变化归因于取消实现，成本未知。下一项为 P0-3 审计区保护与统一审批策略。
+
 2026-10-03（第四轮）：完成 P0-1 固定任务评测。`evals/suite.json` 定义 10 个 Rust/Python/JS 离线任务，`fixtures.py` 生成全新仓库，`grade.py` 在模型工作区外判定行为与约束，`run.py` 固定模型/端点/协议/预算并记录延迟、usage、策略事件、恢复及 prune 前后磁盘体积。原始错误实现与已知正确实现都有测试；本地 HTTP stub 驱动真实 CLI，覆盖未知/部分用量、失败、超时清理、绝对路径 checkpoint 恢复和配置覆盖。离线评测已接入 CI。
 
 本轮验证：113 个 Rust 测试、9 个离线评测测试和 debug/release 构建通过。正式基线固定评测代码 `369a415`、OpenCode Go / deepseek-v4-flash / Chat，每项 3 次，共 28/30 通过，错误编辑恢复 3/3 通过。两次失败分别为长会话首行注释要求遗漏，以及独立代码判定通过但策略拒绝后耗尽 12 轮；均保留在 [正式报告](evals/baselines/2026-10-03/report.md) 中，不剔除或重跑替换。30 次均验证 stdout 与持久化事件一致，完整 usage 见逐次 JSONL，成本未知。宿主 PATH/Cargo 配置/编译 wrapper 尚未隔离，已新增后续待办。待办下一项为 P0-2 CLI/TUI 共享取消。

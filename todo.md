@@ -42,21 +42,24 @@
 - [x] 删除死代码：`deepseek::chat`（一次性、无工具）全仓库无调用点，已删除。
 - [x] **P0-1 固定任务集和评测脚手架**：10 个 Rust/Python/JS 离线 fixture、工作区外独立行为判定、全新仓库/会话与固定模型配置，每项真实运行 3 次；逐轮延迟、usage、错误、审批、恢复和 prune 前后磁盘体积落 JSONL/Markdown。正式基线 `369a415` 上 28/30 通过，3/3 错误编辑恢复通过，缺失 usage/成本标未知；113 个 Rust 测试与 9 个评测测试通过，离线评测已接入 CI。见 [脚手架](evals/README.md) 与 [正式报告](evals/baselines/2026-10-03/report.md)。
 
+- [x] **P0-2 CLI/TUI 共享取消**：共享运行令牌覆盖响应头、SSE/JSON 正文、重试、审批和 shell；CLI 信号取消退出 130，TUI Ctrl-C/运行中 Esc 与 `/cancel` 取消，审批 Esc 仅拒绝当前动作。取消记录独立的 run.cancelled，summary/DB/session 结算一次，保留已完成修改、输出与 checkpoint，并停止后续工具；外部信号直接传递到后台，退出等待 worker。Unix JSONL 背压可取消；125 个 Rust 测试与 10 个评测测试通过，含真实 Linux PTY 取消后续聊；固定任务集 30/30 通过，Responses/Messages 真实端点冒烟各 1/1。见 [回归报告](evals/baselines/2026-10-03-cancellation/report.md)。
+
 ## 下一步（2026-10-03 竞品复核）
 
-对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。评测基线为 `369a415`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留和固定任务脚手架已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `77858a1`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架和共享取消已完成。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-2 CLI/TUI 共享取消（下一项）**：统一取消源，覆盖模型等待、SSE、重试、审批与 shell 进程组；明确 cancelled/failed/interrupted，终结事件、summary、session 只结算一次，停止后续工具，保留已完成修改与准确 replay。
-- [ ] **P0-3 保护审计区并统一审批策略**：验证直接工具和 shell 对 `.harness` 的伪造/删除风险，隔离 events/DB/task/summary/checkpoint，给 artifact/tmp 独立授权；CLI/TUI 共用 allow/ask/deny、批准范围与非交互 ask 语义，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
+- [ ] **P0-3 保护审计区并统一审批策略（下一项）**：验证直接工具和 shell 对 `.harness` 的伪造/删除风险，隔离 events/DB/task/summary/checkpoint，给 artifact/tmp 独立授权；CLI/TUI 共用 allow/ask/deny、批准范围与非交互 ask 语义，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null` 与重复策略拒绝样本；跟踪长会话约束位置遗漏。正式基线已有一次代码正确但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
+
+- [ ] **取消的原生 I/O 后续**：Windows stdout 背压、终端渲染背压和 OS 阻塞文件 I/O 的有界取消；自定义同步 event writer 需自行可中断。Unix shell 仍按进程组清理，脱离该组的 daemon/继承管道场景需另测并纳入平台隔离交付。
 
 ### P1：提高任务完成率
 
 - [ ] **P1-1 可审计压缩**：手动后自动；摘要保留目标、约束、改动和剩余工作，记录来源边界、模型、usage 和实际消息投影；保留原始会话/事件，保证 call/result 成对和 replay 一致，失败或取消时保留可用历史并限制重试。
-- [ ] **P1-2 相关上下文与范围读取**：先显式文件选择、read 行/字节范围，再按 prompt/路径/语言选择摘录；覆盖 Python/JS，记录范围和截断，遵守预算与敏感路径排除。repo map/语法索引以固定任务集比较收益。
+- [ ] **P1-2 相关上下文与范围读取**：先显式文件选择、read 行/字节范围，再按 prompt/路径/语言选择摘录；覆盖 Python/JS，记录范围和截断，遵守预算与敏感路径排除；空仓库的 rg --files 退出码 1 应视为空集合，而不是启动失败。repo map/语法索引以固定任务集比较收益。
 - [ ] **P1-3 编辑和验证闭环**：唯一匹配/显式 occurrence、陈旧文件 hash 检查、原子写入与可定位错误；显式 lint/test 命令走执行策略与审批、有限重试，记录首轮编辑成功率。重复块、并发变更、快照与 Unicode 必须验证，再选 Hashline/patch。
 - [ ] **P1-4 项目说明**：根 AGENTS.md 起步，随后目录作用域和 override；固定加载顺序、来源、预算及实际 prompt，说明不能改变宿主授权/工具权限。不在读取时执行脚本；按需 skills 后续接入。
 - [ ] **P1-5 模型能力与完成语义**：可配置 provider/model 上限、协议路径与能力，支持可用的 tokenizer/服务端计数及明确回退；检测输出长度截断与残缺工具调用，不把截断当成功。为重复失败调用设置可审计阈值，避免误伤分页/测试重跑。

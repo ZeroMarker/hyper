@@ -1,14 +1,16 @@
 # Hyper 竞品对标与执行计划
 
-更新：2026-10-03；代码/评测基线：`369a415`。本轮核对七个产品的官方文档或维护者仓库。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
+更新：2026-10-03；代码/评测基线：`77858a1`。本轮核对七个产品的官方文档或维护者仓库。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
 
 ## 定位与已完成基线
 
 Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地终端编码 Agent。下一阶段目标是可靠完成真实仓库任务，并在取消、编辑和长会话失败时提供清楚的恢复路径。
 
-最近已完成历史滑窗、总请求预算、CLI 实时 JSONL 与固定任务评测脚手架；这些功能从待办基线中移除。113 个 Rust 测试及 9 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
+最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架与共享取消；这些功能从待办基线中移除。125 个 Rust 测试及 10 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
 
-[正式基线](evals/baselines/2026-10-03/report.md)：10 个 Rust/Python/JS 任务各跑 3 次，固定 OpenCode Go / deepseek-v4-flash / Chat、预算与并发参数，28/30 通过。3/3 错误编辑恢复通过；两次失败分别为长会话注释位置约束遗漏，以及代码正确但反复遇到策略拒绝、耗尽 12 轮。所有原始事件仅留本地，提交的逐次汇总与元数据可审阅。宿主编译环境仍被继承，后续比较须保持或隔离该环境。
+[前一轮基线](evals/baselines/2026-10-03/report.md)（`369a415`）：10 个 Rust/Python/JS 任务各跑 3 次，固定 OpenCode Go / deepseek-v4-flash / Chat、预算与并发参数，28/30 通过。3/3 错误编辑恢复通过；两次失败分别为长会话注释位置约束遗漏，以及代码正确但反复遇到策略拒绝、耗尽 12 轮。所有原始事件仅留本地，提交的逐次汇总与元数据可审阅。宿主编译环境仍被继承，后续比较须保持或隔离该环境。
+
+[共享取消回归基线](evals/baselines/2026-10-03-cancellation/report.md)（`77858a1`）：相同 10 项任务各 3 次，30/30 通过，错误编辑恢复与长会话均 3/3；完整 usage、stdout/持久化一致性与 prune 均已检查。Responses / grok-4.6、Messages / minimax-m2.5 真实端点各完成一次 readonly-plan 冒烟，不能据此比较模型或宣称完整协议基准。两轮小样本不证明取消功能带来编码成功率提升；主动取消由本地门控与 PTY 测试单独验证。
 
 - CLI/TUI 共用执行模式；Linux shell 有 Landlock 写入/TCP 边界和进程资源限制，其他平台的受限 shell 默认拒绝。
 - Chat、Responses、Messages 均支持 SSE；TUI 显示增量文本，CLI `--jsonl` 输出完整持久化事件。
@@ -25,7 +27,7 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 | OpenCode | [按工具、路径和命令设 allow/ask/deny，重复调用及外部目录权限，默认敏感文件读取规则](https://opencode.ai/docs/permissions/)；[自动压缩、旧工具输出裁剪与预留空间](https://opencode.ai/docs/config/#compaction)。 | Hyper 有模式与工具白名单，但审批策略依赖 CLI/TUI 入口；没有摘要压缩或重复调用检测。对应 P0-3、P1-1、P1-5。权限规则与 OS 隔离分别验收。 |
 | Claude Code | [项目说明、按需 skills、MCP、hooks、独立 subagents 与代码智能](https://code.claude.com/docs/en/features-overview)；[会话/代码恢复及其限制](https://code.claude.com/docs/en/checkpointing)。 | 先补项目约定和验证反馈，随后小范围 skills/MCP。官方明确 shell 修改等不在所有 checkpoint 覆盖内，Hyper 也应说明自己的快照范围，不能把 replay 当作完整文件系统恢复。对应 P1-3、P1-4、P2-2。 |
 | DeepSeek Harness | [插件化 model/tool/session/loop 与 web/headless/sdk/acp 组合](https://deepseek-harness.github.io/deepseek-harness/en/reference/)；[维护者标注 developer preview 与兼容性风险](https://github.com/deepseek-ai/deepseek-harness)。 | 借鉴明确的组件边界和事件契约。其 profile 是应用/插件组合，不等于 Hyper 待实现的 provider profile；暂不复制完整插件内核。对应 P1-6、P2-1、P2-2。 |
-| Pi | [树形会话、分支与保留原始条目的摘要压缩](https://pi.dev/docs/latest/how-pi-works)；[压缩摘要及来源边界记录](https://pi.dev/docs/latest/compaction)；[JSONL 双向 RPC](https://pi.dev/docs/latest/rpc)。 | Hyper 的历史裁剪没有摘要，JSONL 是输出流而非双向控制接口。先做可审计压缩和主动取消；分支、RPC 待稳定生命周期后推进。对应 P0-2、P1-1、P2-1。 |
+| Pi | [树形会话、分支与保留原始条目的摘要压缩](https://pi.dev/docs/latest/how-pi-works)；[压缩摘要及来源边界记录](https://pi.dev/docs/latest/compaction)；[JSONL 双向 RPC](https://pi.dev/docs/latest/rpc)。 | Hyper 的历史裁剪没有摘要，JSONL 是输出流而非双向控制接口。共享取消已完成；下一步做可审计压缩，分支、RPC 待稳定生命周期后推进。对应 P1-1、P2-1。 |
 | oh-my-pi | [维护者 README 列出内容 hash 锚点编辑、LSP、调试器和隔离 worktree 子 Agent](https://github.com/can1357/oh-my-pi)。 | 当前 edit 替换首个匹配，read 固定截取文件前部。优先验证唯一定位、陈旧文件检查和按范围读取；Hashline、LSP、调试器与并行工作需有 Hyper 实测收益后再选。对应 P1-2、P1-3、P2-3。README 的性能宣传不视为独立评测。 |
 | Aider（本轮新增） | [按依赖图与相关性选择仓库 map，受 token 预算影响](https://aider.chat/docs/repomap.html)；[可配置 lint/test 与修改后的反馈](https://aider.chat/docs/usage/lint-test.html)。 | Hyper 默认摘要优先 README/Cargo/Rust 文件，其他语言上下文不足；模型自主 bash 尚不是统一验证闭环。先做提示相关的文件选择及显式验证命令，再衡量 repo map 的增益。对应 P1-2、P1-3。 |
 
@@ -35,8 +37,8 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 
 | 维度 | 当前实现 | 剩余差距 |
 | --- | --- | --- |
-| 质量 | 113 个 Rust 测试、9 个评测测试、10 个固定任务及 30 次真实基线；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
-| 运行控制 | 12 轮上限、shell 超时、进程组清理、崩溃恢复 | 没有共享取消入口；TUI Esc 退出不等于主动取消整个运行 |
+| 质量 | 125 个 Rust 测试、10 个评测测试、10 个固定任务及两轮各 30 次真实基线；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
+| 运行控制 | 12 轮上限、共享取消、shell 超时/组清理、审批释放、独立取消结算和崩溃恢复；Linux 门控与 PTY 验证 | Windows stdout/终端渲染背压、OS 阻塞 I/O 及脱离组的 daemon 尚无完整有界取消验证 |
 | 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
 | 工具 | read/search/bash/write/edit，artifact、diff、快照 | read 只有前 64000 字节，edit 只改第一个匹配；缺陈旧文件校验、范围读取与验证命令闭环 |
 | 执行策略 | 模式、路径校验、命令规则、TUI 写入审批 | CLI/TUI 的审批行为不同；无统一 allow/ask/deny 配置、受保护审计区或完整跨平台隔离 |
@@ -53,9 +55,9 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 
 后续扩展：固定或记录宿主 PATH、Cargo 配置及编译 wrapper；补充良性重定向和重复策略拒绝样本。基线中的 `2>/dev/null` 拒绝与 12 轮耗尽分别进入 P0-3/P1-5 验收；长会话首行约束遗漏进入 P1-1 回归。不为改善分数放宽外部路径边界。
 
-**P0-2 共享取消生命周期。** 定义 running → cancelled 与现有 failed/interrupted 的区别；CLI 信号与 TUI 取消键使用同一取消源，覆盖等待模型、SSE 读取、重试等待、审批和 shell 子进程。
+**P0-2 共享取消生命周期（已交付）。** running → cancelled 独立于 failed/interrupted；CLI 信号和 TUI 取消键共用令牌，覆盖等待模型、三协议 SSE/JSON 读取、重试等待、审批和 shell 进程组。Unix CLI JSONL 背压可取消，外部信号无需 UI 轮询即可停止后台；关闭 TUI 等待 worker 结算。
 
-验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。
+验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。已有门控测试检查网络/审批/shell/Unix JSONL 等待取消在 2 秒内结算，真实 Linux PTY 验证审批 Ctrl-C 取消、同会话续聊与退出。Windows stdout、终端渲染背压和 OS 阻塞文件 I/O 列为后续，不将协作取消视为 daemon 隔离。
 
 **P0-3 审计区保护与执行策略。** 先验证 shell/直接工具对 `.harness` 中 events、DB、task、summary、checkpoint 的写入风险，设计受保护存储或挂载边界并给 artifact/tmp 单独授权。明确 CLI/TUI 共用的 allow/ask/deny、批准范围和非交互 ask 的行为。
 
@@ -99,6 +101,6 @@ P2 共用门槛：至少一个实际任务或集成消费者证明需求；已�
 
 ## 接下来执行什么
 
-下一项推进 P0-2 共享取消，随后 P0-3 审计区保护。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
+下一项推进 P0-3 审计区保护与统一审批策略。P0-2 共享取消及 Linux 门控/PTY 验证已交付。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
 
 这是一份可执行顺序，不是所有阶段都必须等待前一阶段完整结束；P0 的评测和边界验证伴随每轮交付，收益未实测时保留为假设。
