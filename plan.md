@@ -1,75 +1,100 @@
-# Hyper 竞品分析与下一阶段计划
+# Hyper 竞品对标与执行计划
 
-更新：2026-09-29。以下是基于官方资料和当前代码的产品判断，不是性能实测或市场份额分析。
+更新：2026-10-03；代码基线：`92fe90d`。本轮核对七个产品的官方文档或维护者仓库。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。未安装竞品跑同一任务，未比较市场份额、成功率或实际成本。
 
-## 定位与最近目标
+## 定位与已完成基线
 
-Hyper 应成为**可审计、可恢复、默认安全的本地终端编码 Agent**。下一阶段先让现有 CLI/TUI 可靠地完成真实项目任务，再扩大模型与工具生态。Rust 单二进制、本地 JSONL 日志、SQLite 索引、回放、检查点和会话是已具备的基础。
+Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地终端编码 Agent。下一阶段目标是可靠完成真实仓库任务，并在取消、编辑和长会话失败时提供清楚的恢复路径。
 
-**最近里程碑：可信的日常使用版。** 用户能看到模型和工具的实时进度；CLI 与 TUI 使用同一套执行边界；失败后可从事件和检查点解释、恢复结果。P0 和 P1 的验收条件定义了该里程碑。
+最近三轮已完成历史滑窗、总请求预算和 CLI 实时 JSONL；这些功能从待办基线中移除。现有 113 个自动化测试证明相应行为，尚不能代表真实编码任务的成功率。
 
-里程碑记分卡：10 个任务各重复 3 次，30 次运行均有完整事件与可重建的回放；隔离测试中工作区外写入成功数为 0；本地流式 stub 发出首块后，TUI 在下一次正常刷新时显示它；任务成功率不低于 P0 测得的基线。实际提供商的首字时间另行记录，不设未经测量的绝对阈值。
+- CLI/TUI 共用执行模式；Linux shell 有 Landlock 写入/TCP 边界和进程资源限制，其他平台的受限 shell 默认拒绝。
+- Chat、Responses、Messages 均支持 SSE；TUI 显示增量文本，CLI `--jsonl` 输出完整持久化事件。
+- 历史按完整轮次滑窗；每轮按实际协议 JSON 字节保守估算输入成本并预留输出空间，超预算在发送前失败。
+- 运行固定实际历史、系统提示词和观察结果；新运行删除会话后仍能 replay。检查点覆盖直接 write/edit，shell 修改尚无同等快照覆盖。
 
-## 六个竞品分别说明了什么
+代码依据：[运行与 replay](src/engine.rs)、[预算](src/context.rs)、[协议与配置](src/deepseek.rs)、[事件与 CLI](src/event_sink.rs)、[命令入口](src/cli.rs)、[TUI](src/tui/mod.rs)、[隔离](src/sandbox.rs)。
 
-| 产品 | 官方资料确认的能力 | 对 Hyper 的启示 |
+## 竞品证据与直接差距
+
+| 产品 | 本轮确认的能力与来源 | Hyper 对应差距与计划 |
 | --- | --- | --- |
-| [OpenCode](https://opencode.ai/docs/providers) | 多提供商和模型选择；[Agent 权限](https://opencode.ai/docs/agents)可按工具设为允许、询问或拒绝。 | 明确的 provider profile 与 CLI/TUI 统一权限语义是日常使用的基础。 |
-| [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) | 官方 OpenAI 文档列出交互任务、`codex exec` 自动化、会话恢复、权限与沙箱、技能和插件。 | 一个编码 Agent 应同时服务交互与自动化，并让执行边界可见。 |
-| [Claude Code](https://code.claude.com/docs/en/features-overview) | 项目说明、skills、MCP、hooks、隔离的 subagents 和代码智能组成扩展层。 | 扩展点要有明确职责；先建立稳定工具与权限边界，再加可复用工作流。 |
-| [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/en/reference/) | 模型适配、工具、会话日志和循环都可通过插件替换；有 Web、headless、SDK 等 profile。[项目仍处开发者预览](https://github.com/deepseek-ai/deepseek-harness)。 | 借鉴可替换边界，暂不复制完整插件内核。 |
-| [Pi](https://pi.dev/docs/latest/how-pi-works) | 树形会话、分支、压缩、流式事件，以及交互、JSON、RPC 接口；[扩展](https://pi.dev/docs/latest/extensions)可加工具与提供商。 | 长会话与可编程接口值得规划；先做好上下文预算和稳定事件格式。 |
-| [oh-my-pi](https://github.com/can1357/oh-my-pi) | 基于 Pi 的编码 Agent，提供 LSP、调试、子 Agent 等深度工具。 | 优先测量编辑成功率和反馈质量；复杂工具由真实任务收益驱动。 |
+| Codex CLI | [`exec --json` 与 schema 输出、非交互会话续接](https://learn.chatgpt.com/docs/non-interactive-mode)；[按目录加载 AGENTS.md 与 override](https://learn.chatgpt.com/docs/agent-configuration/agents-md)。 | 实时 JSONL 已有；项目说明没有专门加载语义，最终结果没有 schema 校验。先做 P1-4 项目说明，再做 P2-1 稳定自动化契约。 |
+| OpenCode | [按工具、路径和命令设 allow/ask/deny，重复调用及外部目录权限，默认敏感文件读取规则](https://opencode.ai/docs/permissions/)；[自动压缩、旧工具输出裁剪与预留空间](https://opencode.ai/docs/config/#compaction)。 | Hyper 有模式与工具白名单，但审批策略依赖 CLI/TUI 入口；没有摘要压缩或重复调用检测。对应 P0-3、P1-1、P1-5。权限规则与 OS 隔离分别验收。 |
+| Claude Code | [项目说明、按需 skills、MCP、hooks、独立 subagents 与代码智能](https://code.claude.com/docs/en/features-overview)；[会话/代码恢复及其限制](https://code.claude.com/docs/en/checkpointing)。 | 先补项目约定和验证反馈，随后小范围 skills/MCP。官方明确 shell 修改等不在所有 checkpoint 覆盖内，Hyper 也应说明自己的快照范围，不能把 replay 当作完整文件系统恢复。对应 P1-3、P1-4、P2-2。 |
+| DeepSeek Harness | [插件化 model/tool/session/loop 与 web/headless/sdk/acp 组合](https://deepseek-harness.github.io/deepseek-harness/en/reference/)；[维护者标注 developer preview 与兼容性风险](https://github.com/deepseek-ai/deepseek-harness)。 | 借鉴明确的组件边界和事件契约。其 profile 是应用/插件组合，不等于 Hyper 待实现的 provider profile；暂不复制完整插件内核。对应 P1-6、P2-1、P2-2。 |
+| Pi | [树形会话、分支与保留原始条目的摘要压缩](https://pi.dev/docs/latest/how-pi-works)；[压缩摘要及来源边界记录](https://pi.dev/docs/latest/compaction)；[JSONL 双向 RPC](https://pi.dev/docs/latest/rpc)。 | Hyper 的历史裁剪没有摘要，JSONL 是输出流而非双向控制接口。先做可审计压缩和主动取消；分支、RPC 待稳定生命周期后推进。对应 P0-2、P1-1、P2-1。 |
+| oh-my-pi | [维护者 README 列出内容 hash 锚点编辑、LSP、调试器和隔离 worktree 子 Agent](https://github.com/can1357/oh-my-pi)。 | 当前 edit 替换首个匹配，read 固定截取文件前部。优先验证唯一定位、陈旧文件检查和按范围读取；Hashline、LSP、调试器与并行工作需有 Hyper 实测收益后再选。对应 P1-2、P1-3、P2-3。README 的性能宣传不视为独立评测。 |
+| Aider（本轮新增） | [按依赖图与相关性选择仓库 map，受 token 预算影响](https://aider.chat/docs/repomap.html)；[可配置 lint/test 与修改后的反馈](https://aider.chat/docs/usage/lint-test.html)。 | Hyper 默认摘要优先 README/Cargo/Rust 文件，其他语言上下文不足；模型自主 bash 尚不是统一验证闭环。先做提示相关的文件选择及显式验证命令，再衡量 repo map 的增益。对应 P1-2、P1-3。 |
 
-表中“启示”是产品推断，不是竞品实测结论。
+上表只比较已读取的能力文档，不推断某产品未提供其他功能；同名功能不代表范围、默认值或可靠性相同。
 
-## Hyper 现状与缺口
+## 现状复核
 
-| 维度 | 已具备 | 当前缺口或风险 |
+| 维度 | 当前实现 | 剩余差距 |
 | --- | --- | --- |
-| 运行可追溯 | 事件、摘要、回放、会话、检查点 | 尚无固定任务集来量化成功率、耗时和恢复效果 |
-| 执行边界 | plan 只读；TUI 对写入和 shell 询问；危险命令规则；Linux shell 默认用 Landlock 限制写入范围与 TCP；运行模式写入事件 | Landlock 不限制外部读取、UDP、Unix socket 和部分 metadata 操作；macOS/Windows 默认拒绝 sandboxed shell，尚无原生隔离 |
-| 模型体验 | Chat、Responses、Messages 三协议与重试；agent loop 使用 SSE，TUI 显示增量文本 | CLI 的 `--jsonl` 实时输出完整持久化事件，门控 SSE 测试覆盖首次分片提前到达；真实服务的首字时间尚未测量 |
-| 上下文 | 会话续接、工作区文件摘要、最多 12 轮工具调用 | 文件摘要按固定顺序截取，没有显式 token 预算、压缩或相关性检索 |
-| 模型配置 | API key、base URL、model、protocol 的单组配置 | 没有命名 profile、会话内切换、连接诊断；`DEEPSEEK_*` 名称不适合多提供商 |
-| 扩展 | 五个内置工具与任务级允许列表 | 尚无项目说明文件、skills 或外部工具接入规范 |
+| 质量 | 113 个单元/集成测试，覆盖预算、三协议、JSONL、检查点与隔离 | 无固定真实任务集；无实际提供商首字时间和成本基线 |
+| 运行控制 | 12 轮上限、shell 超时、进程组清理、崩溃恢复 | 没有共享取消入口；TUI Esc 退出不等于主动取消整个运行 |
+| 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
+| 工具 | read/search/bash/write/edit，artifact、diff、快照 | read 只有前 64000 字节，edit 只改第一个匹配；缺陈旧文件校验、范围读取与验证命令闭环 |
+| 执行策略 | 模式、路径校验、命令规则、TUI 写入审批 | CLI/TUI 的审批行为不同；无统一 allow/ask/deny 配置、受保护审计区或完整跨平台隔离 |
+| 自动化 | 实时 JSONL、失败退出码、会话与 replay | 无显式事件版本/兼容性契约、结果 schema、双向控制或会话分支 |
+| 配置与扩展 | 单组 provider 参数、协议覆盖、任务工具白名单 | 无命名 provider profile、连接诊断、专门项目说明或 skills/MCP 生命周期 |
 
-代码证据：[模型循环与工作区上下文](src/engine.rs)、[请求构造](src/deepseek.rs)、[命令策略](src/policy.rs)、[TUI 事件](src/event_sink.rs)、[配置与命令](src/cli.rs)。没有实测的数据维度均视为待验证。
+## 执行队列与验收
 
-## 按顺序实施
+### P0：先让质量和运行控制可验证
 
-### P0：建立质量基线并统一执行边界
+**P0-1 固定任务集与结果报告。** 建立 10 个离线可复现的 Rust/Python/JS 小仓库任务，包含定位、跨文件修改、深文件读取、重复文本编辑、测试修复、只读规划、长会话和失败恢复。测试 fixture 与模型评测分开；真实模型用固定 provider/model、输入、轮数和预算，每项 3 次。
 
-1. 建立 10 个可重跑的仓库任务，覆盖定位、单文件修复、跨文件修改、测试修复、只读规划和失败恢复。固定同一模型、输入、轮数和预算，每项至少重复 3 次；记录成功率、首次有效输出时间、总耗时、token/成本、审批次数、越界尝试和恢复结果。先记录基线，再定提升阈值。
-2. 将工具执行策略从 UI 中抽出：`read-only`、`workspace-write`、`unrestricted` 为显式运行模式；CLI 与 TUI 经同一策略入口。默认模式限制写入到工作区，并对危险行为拒绝或请求审批；无交互场景需要审批时明确失败并记录原因。
-3. 在受支持的平台引入真正的进程与文件系统隔离；验证符号链接、重定向、子进程和网络边界。无法提供隔离的平台应报告能力并采取保守默认值。现有拒绝规则保留为附加防护。
+验收：产出 manifest、独立成功判定脚本和 JSONL/Markdown 结果报告。报告逐次列出通过条件、错误类型、首次 delta/工具结果时间、总耗时、usage、审批和恢复结果；缺失 usage 标为未知，成本只在有价格来源与日期时计算。对齐任务、工具权限和预算后才作竞品对跑，分别报告 harness 与模型因素。
 
-**验收：** 评测可在干净工作树复现；CLI/TUI 对同一动作给出同一决策；测试证明 shell 在默认模式无法写到工作区外；拒绝和审批记录包含工具、目标与原因；现有回放和检查点仍正确。
+**P0-2 共享取消生命周期。** 定义 running → cancelled 与现有 failed/interrupted 的区别；CLI 信号与 TUI 取消键使用同一取消源，覆盖等待模型、SSE 读取、重试等待、审批和 shell 子进程。
 
-### P1：缩短等待并让长任务可控
+验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。
 
-1. 三种协议均支持增量响应，模型文本和工具调用持续写入事件流；TUI 展示实时输出，CLI 提供可机器读取的 JSONL 事件模式。对断流、重试和部分工具参数做 stub 测试。
-2. 增加取消运行、上下文用量与预算提示；长会话使用可审计的压缩记录，保留原始事件。比较简单的文件匹配与现有固定截取在评测集上的效果。
-3. 为编辑失败、测试失败提供清楚的诊断和重试入口，避免在历史中重复塞入大块工具输出。
+**P0-3 审计区保护与执行策略。** 先验证 shell/直接工具对 `.harness` 中 events、DB、task、summary、checkpoint 的写入风险，设计受保护存储或挂载边界并给 artifact/tmp 单独授权。明确 CLI/TUI 共用的 allow/ask/deny、批准范围和非交互 ask 的行为。
 
-**验收：** TUI 首次文本出现时间可测且优于当前完整响应返回后才显示的行为；取消能终止子进程；恢复会话后能解释上下文来源；固定任务集成功率不下降。
+验收：伪造/删除审计、符号链接逃逸、子 shell、重定向和重复调用均有针对性测试；策略日志固定来源与原因。仓库上下文中的 prompt injection 按不可信输入验证，提示词声明不能代替执行隔离。批准与命令规则不能扩大 OS 边界；无法隔离的平台继续明确拒绝受限 shell。UDP/Unix socket、metadata、macOS/Windows 原生隔离作为分平台后续交付，不用一个 checkbox 宣称完成。
 
-### P2：模型与服务配置产品化
+### P1：提高真实任务完成率
 
-1. 将单组 `DEEPSEEK_*` 配置迁移为兼容旧配置的命名 profile，包含服务、模型、协议和认证来源；支持 `config list/use/test`，并在每次运行事件中固定有效 profile。
-2. 为三种协议建立独立本地契约测试和少量可选在线烟测。`config test` 区分认证、端点与协议错误，不输出密钥。
+**P1-1 可审计的会话与循环压缩。** 先支持手动压缩，再基于预算阈值自动触发。保留目标、约束、已修改文件、未完成事项与近期完整工具轮次；摘要记录来源消息边界、生成模型、输入/输出用量及实际消息投影。
 
-**验收：** 旧配置可读；可在 DeepSeek 与 OpenCode Go profile 间切换；失败可定位至认证、模型或协议；审计日志不含凭据。
+验收：原始记录不被删除；连续压缩和会话恢复后约束仍在，工具 call/result 成对，replay 与实际请求一致。摘要生成失败或被取消有终结事件，保留可用历史，避免无界重试。预算不足的单次必要输入仍给明确错误。
 
-### P3：按需求增加扩展，再考虑并行 Agent
+**P1-2 项目上下文与范围读取。** 先实现显式文件选择和 read 的行/字节范围，再按 prompt、路径和文件类型选择上下文；覆盖 Rust/Python/JS，减少固定前部截取与 Rust 偏好。repo map/语法索引列为同任务对照实验。
 
-1. 先支持项目级说明文件和按需加载的 skills，定义来源、权限继承与事件记录。真实任务需要外部系统时再加 MCP，默认逐项授权。
-2. 只有评测显示串行流程受阻时才试验子 Agent：先做只读调查，隔离会话和工作树，记录交接、成本与合并结果。LSP、调试器、Web UI 和完整插件内核保持在候选池，按实测收益排序。
+验收：同预算下能定位深文件与跨语言入口，所有摘录记录路径、范围、内容来源和截断；总请求预算继续生效，rg 与内置回退结果可解释。敏感路径排除规则覆盖自动上下文、read 和 search；文件过滤与 shell 读取隔离分别报告。
 
-**验收：** 扩展不能绕过 P0 执行策略；每次工具动作可追溯；子 Agent 试验需证明成功率或总耗时的可重复改进，并报告额外成本。
+**P1-3 编辑与验证闭环。** 增加唯一匹配或明确 occurrence、预期内容 hash/版本检查、原子写入和失败定位。项目可显式配置 lint/test 命令，经正常执行策略、审批、超时与预算约束运行，将失败反馈送回有限重试。
 
-## 决策门槛
+验收：重复块和陈旧文件会安全拒绝或明确定位；缺内容、空替换、换行与 Unicode 行为兼容，快照在成功修改前创建。失败验证不会被宣布成功，无限重复工具调用会停止；记录首轮编辑成功率、重试次数与任务成功率，再决定是否引入 Hashline/patch。
 
-- **立即启动 P0。** 先补评测和默认执行边界，避免扩大未经隔离的 CLI 自动化能力。
-- **P0 验收后启动 P1。** 每次迭代使用同一任务集比较，保留事件样本与失败案例。
-- **P2、P3 按真实使用信号推进。** 配置失败若是主要阻碍，P2 可提前；长任务等待时间若更突出，优先 P1。优先级调整须附对应样本。
+**P1-4 项目说明加载。** 先支持项目根 AGENTS.md，再定义目录作用域与 override 的加载顺序、字节预算和来源展示；之后再加按需 skills。项目说明是模型指导，不能改变宿主授权或工具边界。
+
+验收：相同代码与说明生成确定的加载记录；路径/优先级/缺失/超大文件均有测试，固定实际 prompt 以便 replay。读取项目说明本身不执行脚本；按任务触及目录加载的规则须有明确范围。
+
+**P1-5 模型能力、精确计数和重复行为。** provider/model 可配置上下文、输出、协议路径与能力；官方目录/服务端计数存在时可采用，未知时保守回退并标注。处理输出截断、缺终结标记及重复失败调用。
+
+验收：三协议分别覆盖正常完成、长度截断、工具参数残缺、预算及未知模型；不能把实际 max_tokens 截断当作成功。重复判断固定输入/结果和阈值，避免误伤正常分页或测试重跑。统计估算与服务端 usage 差异，不把字节预算称为精确 token 数。
+
+**P1-6 命名 provider profile 与诊断。** 兼容旧配置和 `DEEPSEEK_*`；新增命名 profile、list/use/test、明确认证来源及三协议 endpoint 覆盖。每次运行固定有效 profile 与能力配置。
+
+验收：离线 stub 区分认证、错误路径、协议、模型、限流、超时；只做受用户触发的连接测试。配置迁移和切换不泄漏密钥，旧用法继续可用。实际端点 smoke 是可选验证并单独记录。
+
+### P2：由使用信号决定扩展
+
+**P2-1 稳定自动化契约。** 先写事件 schema/版本与向后兼容规则，提供最终结果 JSON Schema 验证；共享取消稳定后再做 RPC/ACP 或会话 fork。事件输出流和双向控制明确分开。
+
+**P2-2 按需 skills/MCP。** 从一个明确外部工具场景开始，定义配置来源、信任、权限继承、超时与断连恢复；先固化工具契约，后决定是否需要 hooks 或通用插件系统。
+
+**P2-3 并行、LSP 和调试器实验。** 先评估只读工具并发，再评估隔离会话/worktree 子 Agent。write/edit/bash 保持审批与快照顺序；LSP 以一个语言的诊断/引用用例起步。比较同任务成功率、总耗时、额外 usage 和合并冲突，再决定推广范围。
+
+P2 共用门槛：至少一个实际任务或集成消费者证明需求；已有预算、审计和权限不退化，有兼容测试与可复现对照结果。Web UI、全量插件内核和多人协作保留在候选池。
+
+## 接下来执行什么
+
+先交付 P0-1 的 fixture、独立成功判定和可运行评测脚手架，建立当前版本基线；随后推进 P0-2 共享取消与 P0-3 审计区保护。P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
+
+这是一份可执行顺序，不是所有阶段都必须等待前一阶段完整结束；P0 的评测和边界验证伴随每轮交付，收益未实测时保留为假设。

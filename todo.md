@@ -33,26 +33,40 @@
 - [x] agent loop 复用 reqwest client，避免每轮重新握手。
 - [x] `ha plan fix the bug` 等多词 subcommand prompt 可解析。
 - [x] npm 分发渠道：`hyper-harness` 主包 + 5 个平台子包 `hyper-agent-*`（`optionalDependencies`，按 `os`/`cpu` 自动择一），发布流水线新增 `npm` job，需要仓库 secret `NPMJS_TOKEN`（必须是 classic Automation token）；build 矩阵新增 `linux-arm64`（原生 arm64 runner）。
-
-## 下一步（按优先级）
-
-> 本清单于 2026-09-28 复核；本轮完成事件级 replay、artifacts 落盘与保留策略、事件/DB 兜底重建后，剩余项已重写。下列体积是加入 SSE 前的样本：一次 trivial run ≈ 2 KB JSONL；一次带工具调用的模型 run ≈ 10 KB JSONL。现在每个文本分片还会产生 `model.delta` 事件，实际体积依赖提供商分片方式；`model.started.input` 也没有严格的 64 KB 上限，另有 SQLite 索引与页开销。
-
-### 可观测性
 - [x] **实时展示运行中的 event stream**：`EventWriter::write` 在事件持久化后推送简短状态到有界 `EventSink`，TUI 每帧 drain 并保留最近 12 条；重复状态合并。聊天 markdown 只在新消息加入时解析并缓存；模型文本分片另进入有上限的显示缓冲。
 - [x] streaming 响应（SSE）：agent loop 的 Chat、Responses、Messages 请求现在使用流式响应；文本分片写入 `model.delta` 事件并实时显示在 TUI。Chat 的 `tool_calls` 和 Messages 的 `tool_use` 参数按分片累积，Responses 从完成事件取完整 `function_call`；缺少协议完成标记时失败，不执行残缺的工具调用。服务端返回普通 JSON 时兼容读取。
 - [x] CLI 机器可读实时 JSONL：`--jsonl` 支持 run/plan/build/直接 prompt（含会话），每条完整事件在文件与索引持久化后立即写入并 flush stdout，与 events.jsonl 完全一致；不混入普通回答、summary 或配置向导。失败保留退出码 1，stderr 放诊断；慢消费者背压，输出失败停止执行且保留审计。门控 SSE 测试证明 delta 在提供商完成前到达，另覆盖失败、会话、四种入口及 flush 错误。
-
-### 工程健壮性
-- [ ] 并行 tool calls：现为 `for call in &reply.tool_calls` 串行（engine.rs:221）。收益中等，但需要先定哪些工具可并发（write/edit/bash 涉及审批、checkpoint 与顺序语义），不建议先做。
 - [x] 资源限制：Linux `bash` 子进程增加 `RLIMIT_AS`（默认 8 GiB 虚拟地址空间）、`RLIMIT_FSIZE`（默认单文件 1 GiB）、`RLIMIT_CPU`（默认 wall timeout 向上取整后加 2 秒），支持步骤级 `limits.memoryMb` / `fileMb` / `cpuSeconds`；继承更严格的父进程软限制，超 CPU/文件上限记录 `ResourceLimitError` 与配置值。限制按进程生效，不是整棵进程树或整个工作区的总配额；后续若需聚合上限，需另做 cgroup/job object。
-- [ ] OS 级沙箱（分阶段）：Linux 默认模式已用 Landlock 限制 shell 及其子进程的工作区外写入与 TCP bind/connect；`read-only` / `workspace-write` / `unrestricted` 由 CLI、TUI 共用，非 Linux 或缺 Landlock ABI 4 时默认拒绝 shell。剩余：网络 UDP/Unix socket、Landlock 未覆盖的 metadata 操作、macOS/Windows 原生隔离，以及对 `.harness` 审计文件的保护。workspace context 仍会把仓库内容发给模型，prompt injection 是活路径。
-
-### 协议与模型
-- [ ] 协议能力的**能力差异**处理：`detect_protocol` 按模型家族在白名单内探测（opencode.ai 主机）；网关新增模型或改名时需要同步，输出上限现已支持 `HYPER_OUTPUT_TOKENS` 配置，但仍需按模型能力手工设置。若某网关把三种协议挂在不同 base path 下，探测表需改为可配置。
 - [x] 会话历史的上下文预算：`HYPER_HISTORY_TOKENS`（默认 16000，0 禁用历史）按 UTF-8 字节数 + 每条 8 的保守 token 估算，滑窗保留最近完整用户轮次；不拆分超大轮次，也不回填更旧轮次。原 transcript 保留，`model.started` 固定实际 history、systemPrompt 与预算/保留/丢弃计数；忘记会话后仍能准确 replay，新旧事件兼容。当前 prompt、workspace context、工具定义与本轮工具输出不在该预算内。
 - [x] 总请求上下文预算：`HYPER_CONTEXT_TOKENS`（默认 128000）减去 `HYPER_OUTPUT_TOKENS`（默认 8192）作为输入预算；每次按三种协议实际 JSON 请求体的 UTF-8 字节数保守估算，覆盖 system/input/tools、参数和观察结果。首次请求进一步裁掉整轮旧会话；不可省略的输入或工具循环超预算时，在发送前以 `ContextBudgetError` 失败，完整审计保留。三种协议发送输出上限，`model.context_budget` 记录每轮用量和判断，replay 停在最后一次通过预算的请求。预算需按所用模型手动配置，尚不探测真实模型能力，也未接入 provider tokenizer。
-- [ ] 模型能力与精确 token 计数：按 provider/model 获取上下文和输出上限，支持 tokenizer 或服务端计数；当前默认预算与字节估算不等于实际模型限制。
-
-### 清理
 - [x] 删除死代码：`deepseek::chat`（一次性、无工具）全仓库无调用点，已删除。
+
+## 下一步（2026-10-03 竞品复核）
+
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。基线为 `92fe90d`：streaming、CLI JSONL、历史滑窗、总请求预算和输出预留已完成。本清单只列未完成交付；优先级是产品判断，竞品性能与 Hyper 真实任务收益尚未对跑。
+
+### P0：质量与运行控制
+
+- [ ] **P0-1 固定任务集和评测脚手架（下一项）**：10 个 Rust/Python/JS 离线小仓库 fixture，独立成功判定，覆盖跨文件、深文件、重复块、测试修复、规划、长会话与恢复；固定真实模型/输入/预算，每项 3 次，导出逐次 JSONL/Markdown 结果。usage 缺失标未知，成本需价格来源与日期。协议 stub 测试与真实编码任务评测分别统计。
+- [ ] **P0-2 CLI/TUI 共享取消**：统一取消源，覆盖模型等待、SSE、重试、审批与 shell 进程组；明确 cancelled/failed/interrupted，终结事件、summary、session 只结算一次，停止后续工具，保留已完成修改与准确 replay。
+- [ ] **P0-3 保护审计区并统一审批策略**：验证直接工具和 shell 对 `.harness` 的伪造/删除风险，隔离 events/DB/task/summary/checkpoint，给 artifact/tmp 独立授权；CLI/TUI 共用 allow/ask/deny、批准范围与非交互 ask 语义，不能放宽 OS 边界。仓库上下文中的 prompt injection 仍需按不可信输入验证，不能靠提示词声明代替执行隔离。
+- [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
+
+### P1：提高任务完成率
+
+- [ ] **P1-1 可审计压缩**：手动后自动；摘要保留目标、约束、改动和剩余工作，记录来源边界、模型、usage 和实际消息投影；保留原始会话/事件，保证 call/result 成对和 replay 一致，失败或取消时保留可用历史并限制重试。
+- [ ] **P1-2 相关上下文与范围读取**：先显式文件选择、read 行/字节范围，再按 prompt/路径/语言选择摘录；覆盖 Python/JS，记录范围和截断，遵守预算与敏感路径排除。repo map/语法索引以固定任务集比较收益。
+- [ ] **P1-3 编辑和验证闭环**：唯一匹配/显式 occurrence、陈旧文件 hash 检查、原子写入与可定位错误；显式 lint/test 命令走执行策略与审批、有限重试，记录首轮编辑成功率。重复块、并发变更、快照与 Unicode 必须验证，再选 Hashline/patch。
+- [ ] **P1-4 项目说明**：根 AGENTS.md 起步，随后目录作用域和 override；固定加载顺序、来源、预算及实际 prompt，说明不能改变宿主授权/工具权限。不在读取时执行脚本；按需 skills 后续接入。
+- [ ] **P1-5 模型能力与完成语义**：可配置 provider/model 上限、协议路径与能力，支持可用的 tokenizer/服务端计数及明确回退；检测输出长度截断与残缺工具调用，不把截断当成功。为重复失败调用设置可审计阈值，避免误伤分页/测试重跑。
+- [ ] **P1-6 命名 provider profile**：兼容旧配置和 DEEPSEEK 环境变量，list/use/test、认证来源、三协议 endpoint 覆盖；运行固定有效配置，stub 区分认证/路径/协议/模型/限流/超时，不记录密钥。
+
+### P2：按实测需求扩展
+
+- [ ] **P2-1 自动化契约**：事件 schema/版本和兼容规则、最终结果 JSON Schema；共享取消稳定后再做双向 RPC/ACP、会话 fork。JSONL 输出流不等于 RPC。
+- [ ] **P2-2 按需 skills/MCP**：从一个外部工具场景起步，定义来源、信任、权限继承、超时和断连恢复，再评估 hooks/插件系统。
+- [ ] **P2-3 并行与代码智能实验**：先只读 read/search 并发，再隔离会话/worktree 子 Agent；write/edit/bash 保留审批、快照与顺序语义。LSP/调试器从单语言真实任务起步，用成功率、耗时、usage 与冲突证明收益。全量插件内核、Web UI 和多人协作暂留候选池。
+
+### 评测与存储口径
+
+之前的约 2 KB trivial run / 10 KB 工具 run 是加入 SSE、历史快照和预算事件前的样本，不能作为当前容量估算。新版本每个 delta 都持久化，历史/system prompt 也固定到事件；输入、SQLite 页、artifact 和 checkpoint 另占空间。P0-1 同时记录每次运行的实际磁盘体积和保留策略效果。
