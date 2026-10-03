@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "rust-clamp",
+      "allowed_changes": [
+        "src/lib.rs"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Fix clamp in src/lib.rs to return lo below the inclusive interval, hi above it, and n inside it. Keep its API. Assume lo <= hi. Validate offline."
+        }
+      ]
+    },
+    {
+      "id": "rust-cross-file",
+      "allowed_changes": [
+        "src/lib.rs",
+        "src/rates.rs"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Change shipping to a flat base fee of 5 plus weight * RATE. Change RATE from 3 to 4 in its source module, preserving the public shipping API. Validate offline."
+        }
+      ]
+    },
+    {
+      "id": "python-boundary",
+      "allowed_changes": [
+        "bounds.py"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Run the existing test_bounds.py tests offline and fix their failure in bounds.py without modifying tests: inside must include both lo and hi. Preserve the API and rerun the tests."
+        }
+      ]
+    },
+    {
+      "id": "python-cross-file",
+      "allowed_changes": [
+        "catalog.py",
+        "checkout.py"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Change book's price to 1000 cents in catalog.py, keep pen 150, and add total(items, discount_percent=0) in checkout.py. Apply the percentage to the summed price and floor the result to whole cents using integer arithmetic. Preserve no-discount callers; validate offline."
+        }
+      ]
+    },
+    {
+      "id": "js-empty",
+      "allowed_changes": [
+        "stats.cjs"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Fix mean in stats.cjs: an empty array must return null; nonempty arrays retain their arithmetic mean, including negative and fractional values. Preserve the API and validate offline."
+        }
+      ]
+    },
+    {
+      "id": "js-repeated-block",
+      "allowed_changes": [
+        "routes.cjs"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "In routes.cjs change only the admin route timeout from 30 to 120. Keep public and health at 30, the order, names, and API unchanged. Validate offline."
+        }
+      ]
+    },
+    {
+      "id": "python-deep-file",
+      "allowed_changes": [
+        "records.py"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Fix active in records.py to return only records whose active value is true, retaining order and object identity. The function is near the end of the file. Preserve the reference padding and validate offline."
+        }
+      ]
+    },
+    {
+      "id": "readonly-plan",
+      "allowed_changes": [],
+      "reply_contains": [
+        "src/settings.cjs",
+        "DELAY_MS",
+        "9000"
+      ],
+      "turns": [
+        {
+          "mode": "plan",
+          "prompt": "Locate the configured client delay bottleneck. Explain which exact file and constant should change and its current numeric value. Do not modify files."
+        }
+      ]
+    },
+    {
+      "id": "long-session",
+      "allowed_changes": [
+        "bounds.py"
+      ],
+      "reply_contains": [
+        "ORCHID-731"
+      ],
+      "turns": [
+        {
+          "mode": "plan",
+          "prompt": "Remember release code ORCHID-731 for this session. Later when asked to fix clamp, add # release: ORCHID-731 as its first line and repeat the release code in your final answer. Do not change files yet."
+        },
+        {
+          "mode": "plan",
+          "prompt": "Inspect bounds.py and explain its current behavior; do not modify files.",
+          "padding_lines": 70
+        },
+        {
+          "mode": "plan",
+          "prompt": "Suggest boundary cases for the function without changing files.",
+          "padding_lines": 70
+        },
+        {
+          "mode": "plan",
+          "prompt": "Explain inclusive clamping and remember the earlier release requirement; do not edit.",
+          "padding_lines": 70
+        },
+        {
+          "mode": "build",
+          "prompt": "Now fix clamp(n, lo, hi), assuming lo <= hi: return lo below range, hi above range, n otherwise. Apply the earlier release requirement and repeat its code in the final answer. Validate offline."
+        }
+      ]
+    },
+    {
+      "id": "checkpoint-recovery",
+      "allowed_changes": [
+        "bounds.py"
+      ],
+      "recovery": true,
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Exercise rollback: using the edit tool (not bash or write), deliberately change clamp in bounds.py to return lo for every input. This is an intentionally incorrect temporary edit. Preserve its API; do not correct it yet. The evaluator will independently verify failure and restore the checkpoint."
+        },
+        {
+          "mode": "build",
+          "prompt": "The evaluator confirmed your intentionally incorrect edit failed its behavior checks, then restored the checkpoint and verified the original file. Reinspect bounds.py and fix clamp using edit: return lo below range, hi above range, n otherwise, assuming lo <= hi. Validate offline."
+        }
+      ]
+    }
+  ]
+}

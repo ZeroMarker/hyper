@@ -36,6 +36,16 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
+      - name: Node for offline evaluation graders
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Offline evaluation fixtures and CLI
+        run: |
+          cargo build --bin hyper
+          python3 -m unittest discover -s evals -v
+
   build:
     name: release build
     runs-on: ubuntu-latest

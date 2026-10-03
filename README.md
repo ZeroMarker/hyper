@@ -17,6 +17,7 @@ model is `deepseek-v4-flash` and the default endpoint is
 
 - [Program design](docs/design.md): modules, execution flow, storage, and boundaries.
 - [Plan](plan.md), [todo](todo.md), and [progress](progress.md): direction, pending work, and change history (Chinese).
+- [Task evaluations](evals/README.md): ten offline fixtures, independent graders, and a pinned real-model JSONL/Markdown baseline runner.
 
 ## Install
 
