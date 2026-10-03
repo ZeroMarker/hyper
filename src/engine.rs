@@ -228,11 +228,7 @@ fn agent(
     const MAX_TURNS: usize = 12;
     let config = DeepSeekConfig::from_env()?;
     let history_budget = history_budget()?;
-    let history = bounded_history(&events.history, history_budget);
-    let history_messages: Vec<Value> = history
-        .iter()
-        .map(|message| json!({"role": message.role, "content": message.content}))
-        .collect();
+    let mut history = bounded_history(&events.history, history_budget);
     let system = system_prompt(step.mode);
     let context = workspace_context(root)?;
     // Exactly what the model is given, recorded once per step: a replay can
@@ -241,6 +237,34 @@ fn agent(
     let input = format!(
         "<workspace_context>\n{context}\n</workspace_context>\n\n<request>\n{prompt}\n</request>"
     );
+    let specs = tool_specs_for(step);
+    let mut messages;
+    loop {
+        messages = vec![json!({"role":"system","content":system})];
+        messages.extend(
+            history
+                .iter()
+                .map(|message| json!({"role":message.role,"content":message.content})),
+        );
+        messages.push(json!({"role":"user","content":input}));
+        if config.estimated_request_tokens(&messages, Some(&specs))? <= config.budget.input_tokens()
+            || history.is_empty()
+        {
+            break;
+        }
+        // Drop only complete old session turns. Keep the current input and all
+        // agent tool calls/results intact; oversized required context fails.
+        let next = history
+            .iter()
+            .skip(1)
+            .position(|message| message.role == "user")
+            .map_or(history.len(), |index| index + 1);
+        history = &history[next..];
+    }
+    let history_messages: Vec<Value> = history
+        .iter()
+        .map(|message| json!({"role":message.role,"content":message.content}))
+        .collect();
     events.write(
         "model.started",
         json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input,
@@ -249,13 +273,21 @@ fn agent(
         Some(&step.id),
         Some(index),
     )?;
-    let mut messages = vec![json!({ "role": "system", "content": system })];
-    // Earlier turns of the conversation come first, so the model can answer a
-    // follow-up that depends on what was already discussed.
-    messages.extend(history_messages);
-    messages.push(json!({ "role": "user", "content": input }));
-    let specs = tool_specs_for(step);
     for turn in 0..MAX_TURNS {
+        let estimated = config.estimated_request_tokens(&messages, Some(&specs))?;
+        events.write(
+            "model.context_budget",
+            json!({
+                "turn":turn,"contextTokens":config.budget.context_tokens,
+                "outputTokens":config.budget.output_tokens,
+                "maxInputTokens":config.budget.input_tokens(),"estimatedInputTokens":estimated,
+                "fits":estimated <= config.budget.input_tokens(),
+                "estimator":"wire-json-utf8-bytes",
+            }),
+            Some(&step.id),
+            Some(index),
+        )?;
+        config.budget.check(estimated)?;
         let reply = chat_messages_stream(&config, &messages, Some(&specs), &mut |content| {
             if !content.is_empty() {
                 events.write(
@@ -1415,7 +1447,9 @@ fn fail(
     Ok(failure)
 }
 fn classify_error(message: &str) -> &'static str {
-    if message.contains("plan mode is read-only")
+    if message.contains("context budget exceeded") {
+        "ContextBudgetError"
+    } else if message.contains("plan mode is read-only")
         || message.contains("read-only execution mode")
         || message.contains("bash sandbox")
         || message.contains("dangerous pattern")
@@ -1614,6 +1648,7 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
     }
     let mut legacy_history = None;
     let mut steps: Vec<ReplayStep> = Vec::new();
+    let mut request_lengths = HashMap::new();
     let mut current: Option<usize> = None;
     let mut started: Option<(String, AgentMode)> = None;
     for event in &events {
@@ -1680,6 +1715,14 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
                 })?;
                 steps[index].messages.push(message.clone());
             }
+            "model.context_budget" => {
+                if let Some(index) = current {
+                    let length = request_lengths.entry(index).or_insert(0);
+                    if event.payload.get("fits").and_then(Value::as_bool) == Some(true) {
+                        *length = steps[index].messages.len();
+                    }
+                }
+            }
             "model.observation" => {
                 let Some(index) = current else {
                     continue;
@@ -1707,7 +1750,22 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
             _ => {}
         }
     }
-    Ok(steps)
+    // An over-budget follow-up was never sent. Its tool results remain in the
+    // audit log, but replay ends at the last request that passed the budget.
+    Ok(steps
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mut step)| {
+            match request_lengths.get(&index) {
+                Some(0) => None,
+                Some(length) => {
+                    step.messages.truncate(*length);
+                    Some(step)
+                }
+                None => Some(step), // Legacy run without request budget events.
+            }
+        })
+        .collect())
 }
 
 /// The conversation prefix a run replayed: the transcript up to the turn this

@@ -65,6 +65,19 @@ impl EventSink {
 }
 
 fn event_line(event: &HarnessEvent) -> String {
+    if event.event_type == "model.context_budget" {
+        return format!(
+            "context {}/{} +{} output{}",
+            event.payload["estimatedInputTokens"],
+            event.payload["maxInputTokens"],
+            event.payload["outputTokens"],
+            if event.payload["fits"] == false {
+                " exceeded"
+            } else {
+                ""
+            }
+        );
+    }
     let detail = match event.event_type.as_str() {
         "model.started" => event.payload.get("model"),
         "tool.started" | "tool.finished" => event.payload.get("tool"),

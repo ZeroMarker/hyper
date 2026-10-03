@@ -4,6 +4,10 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-03（第二轮）：完成总请求预算。`HYPER_CONTEXT_TOKENS`（默认 128000）预留 `HYPER_OUTPUT_TOKENS`（默认 8192），三种协议均发送输出上限。每轮按实际协议 JSON 请求体的 UTF-8 字节数估算，覆盖工具定义、参数和观察结果；首次请求可继续裁掉完整旧会话，必要上下文超预算时在发送前以 `ContextBudgetError` 失败。每轮预算事件可审计，TUI 显示用量；replay 排除超预算而未发送的后续消息。模型能力探测与精确 tokenizer 仍在待办。
+
+本轮验证：54 单元 + 48 run 集成 + 5 task 集成，共 107 测试通过；fmt、Clippy（warnings 视为错误）和 release 构建通过。新测试覆盖输出预留和配置校验、三协议流式/非流式输出上限、首次超预算、完整历史裁剪及工具输出增长后的准确 replay。stub 服务现在按 Content-Length 读完整请求，避免网络分片造成请求体记录不完整。
+
 2026-10-03：新增会话历史滑窗预算 `HYPER_HISTORY_TOKENS`（默认 16000，0 禁用），按 UTF-8 字节与消息开销保守估算，保留最近完整用户轮次。原始会话保留；模型开始事件固定实际历史、系统提示词及裁剪计数，replay 在忘记会话后仍可还原新运行。总请求预算（当前输入、工具定义和本轮观察结果）仍是独立后续事项。
 
 本轮验证：52 单元 + 45 run 集成 + 5 task 集成，共 102 测试通过；`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings` 与 `cargo build --release --locked` 通过。新增回归覆盖整轮预算、中文估算、超大轮次、非法预算，以及带工具调用的裁剪历史在删除会话后与实际请求一致的 replay。

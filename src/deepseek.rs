@@ -14,7 +14,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{AgentMode, i18n, workspace};
+use crate::{AgentMode, context::RequestBudget, i18n, workspace};
 
 mod stream;
 use stream::{stream_chat, stream_messages, stream_responses};
@@ -41,6 +41,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Both non-chat formats want an output budget: the gateway rejects Messages
 /// without one, and a budget that is too small is spent on thinking tokens
 /// before any answer or tool call comes back.
+#[cfg(test)]
 const MAX_OUTPUT_TOKENS: u64 = 8192;
 
 /// The wire protocol a model is served over. On OpenCode Go all three hang off
@@ -130,6 +131,7 @@ struct Settings {
 
 #[derive(Clone, Debug)]
 pub struct DeepSeekConfig {
+    pub(crate) budget: RequestBudget,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
@@ -145,10 +147,27 @@ pub struct DeepSeekConfig {
 }
 
 impl DeepSeekConfig {
+    /// Count the entire translated JSON body conservatively at one token per
+    /// UTF-8 byte, including schemas, arguments and protocol framing.
+    pub(crate) fn estimated_request_tokens(
+        &self,
+        messages: &[serde_json::Value],
+        tools: Option<&[ToolSpec]>,
+    ) -> Result<usize> {
+        let body = match self.protocol {
+            Protocol::Chat => chat_body(self, messages, tools, true),
+            Protocol::Responses => responses_body(self, messages, tools, true),
+            Protocol::Messages => messages_body(self, messages, tools, true),
+        };
+        Ok(serde_json::to_vec(&body)?.len())
+    }
+
     pub fn from_env() -> Result<Self> {
         let stored = read_stored_config(&config_path()?)?;
         let settings = resolve_settings(|key| env::var(key).ok(), stored)?;
-        Self::new(settings)
+        let mut config = Self::new(settings)?;
+        config.budget = RequestBudget::from_env()?;
+        Ok(config)
     }
 
     fn new(settings: Settings) -> Result<Self> {
@@ -185,6 +204,7 @@ impl DeepSeekConfig {
             }
         }
         Ok(Self {
+            budget: RequestBudget::default(),
             provider: provider_name(&settings.base_url),
             api_key: settings.api_key,
             base_url: settings.base_url,
@@ -640,14 +660,13 @@ pub fn chat_messages_stream(
     }
 }
 
-fn openai_chat(
+fn chat_body(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
-    on_text: Option<&mut TextCallback<'_>>,
-) -> Result<ModelReply> {
-    let streaming = on_text.is_some();
-    let mut body = json!({ "model": config.model, "messages": messages, "stream": streaming });
+    streaming: bool,
+) -> serde_json::Value {
+    let mut body = json!({ "model": config.model, "messages": messages, "stream": streaming, "max_tokens": config.budget.output_tokens });
     if streaming {
         body["stream_options"] = json!({"include_usage":true});
     }
@@ -666,6 +685,17 @@ fn openai_chat(
                 .collect::<Vec<_>>()
         );
     }
+    body
+}
+
+fn openai_chat(
+    config: &DeepSeekConfig,
+    messages: &[serde_json::Value],
+    tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
+) -> Result<ModelReply> {
+    let body = chat_body(config, messages, tools, on_text.is_some());
+    config.budget.check(serde_json::to_vec(&body)?.len())?;
     if let Some(on_text) = on_text {
         return stream_chat(config, &body, on_text);
     }
@@ -725,19 +755,19 @@ fn responses_input(messages: &[serde_json::Value]) -> (String, Vec<serde_json::V
     (instructions.join("\n\n"), input)
 }
 
-fn openai_responses(
+fn responses_body(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
-    on_text: Option<&mut TextCallback<'_>>,
-) -> Result<ModelReply> {
+    streaming: bool,
+) -> serde_json::Value {
     let (instructions, input) = responses_input(messages);
     let mut body = json!({
         "model": config.model,
         "input": input,
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_output_tokens": config.budget.output_tokens,
     });
-    if on_text.is_some() {
+    if streaming {
         body["stream"] = json!(true);
     }
     if !instructions.is_empty() {
@@ -758,6 +788,17 @@ fn openai_responses(
                 .collect::<Vec<_>>()
         );
     }
+    body
+}
+
+fn openai_responses(
+    config: &DeepSeekConfig,
+    messages: &[serde_json::Value],
+    tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
+) -> Result<ModelReply> {
+    let body = responses_body(config, messages, tools, on_text.is_some());
+    config.budget.check(serde_json::to_vec(&body)?.len())?;
     if let Some(on_text) = on_text {
         return stream_responses(config, &body, on_text);
     }
@@ -862,20 +903,20 @@ fn messages_turns(messages: &[serde_json::Value]) -> (String, Vec<serde_json::Va
     (system.join("\n\n"), turns)
 }
 
-fn anthropic_messages(
+fn messages_body(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
     tools: Option<&[ToolSpec]>,
-    on_text: Option<&mut TextCallback<'_>>,
-) -> Result<ModelReply> {
+    streaming: bool,
+) -> serde_json::Value {
     let (system, turns) = messages_turns(messages);
     let mut body = json!({
         "model": config.model,
         "messages": turns,
         // Required: without it the gateway rejects the request outright.
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": config.budget.output_tokens,
     });
-    if on_text.is_some() {
+    if streaming {
         body["stream"] = json!(true);
     }
     if !system.is_empty() {
@@ -894,6 +935,17 @@ fn anthropic_messages(
                 .collect::<Vec<_>>()
         );
     }
+    body
+}
+
+fn anthropic_messages(
+    config: &DeepSeekConfig,
+    messages: &[serde_json::Value],
+    tools: Option<&[ToolSpec]>,
+    on_text: Option<&mut TextCallback<'_>>,
+) -> Result<ModelReply> {
+    let body = messages_body(config, messages, tools, on_text.is_some());
+    config.budget.check(serde_json::to_vec(&body)?.len())?;
     if let Some(on_text) = on_text {
         return stream_messages(config, &body, on_text);
     }
@@ -1465,6 +1517,75 @@ mod tests {
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"],
             }),
+        }
+    }
+
+    #[test]
+    fn all_protocols_enforce_budgets_and_send_configured_output_caps() {
+        for (protocol, response, field) in [
+            (
+                Protocol::Chat,
+                r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#,
+                "max_tokens",
+            ),
+            (
+                Protocol::Responses,
+                r#"{"model":"stub","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}"#,
+                "max_output_tokens",
+            ),
+            (
+                Protocol::Messages,
+                r#"{"model":"stub","content":[{"type":"text","text":"done"}]}"#,
+                "max_tokens",
+            ),
+        ] {
+            for streaming in [false, true] {
+                let (url, server) = serve_one(response);
+                let mut config =
+                    DeepSeekConfig::new(settings(protocol, "k", &url, "stub")).unwrap();
+                config.budget = RequestBudget {
+                    context_tokens: 2000,
+                    output_tokens: 37,
+                };
+                let messages = [json!({"role":"user","content":"你好"})];
+                let specs = [read_tool()];
+                let reply = if streaming {
+                    chat_messages_stream(&config, &messages, Some(&specs), &mut |_| Ok(()))
+                } else {
+                    chat_messages(&config, &messages, Some(&specs))
+                }
+                .unwrap();
+                assert_eq!(reply.content, "done");
+                let body = request_body(&server.join().unwrap());
+                assert_eq!(body[field], 37);
+                if streaming {
+                    assert_eq!(
+                        config
+                            .estimated_request_tokens(&messages, Some(&specs))
+                            .unwrap(),
+                        serde_json::to_vec(&body).unwrap().len()
+                    );
+                }
+            }
+            let mut config =
+                DeepSeekConfig::new(settings(protocol, "k", "http://127.0.0.1:1", "stub")).unwrap();
+            let messages = [json!({"role":"user","content":"x".repeat(1000)})];
+            config.budget = RequestBudget {
+                context_tokens: 100,
+                output_tokens: 37,
+            };
+            assert!(
+                chat_messages(&config, &messages, None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("context budget exceeded")
+            );
+            assert!(
+                chat_messages_stream(&config, &messages, None, &mut |_| Ok(()))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("context budget exceeded")
+            );
         }
     }
 

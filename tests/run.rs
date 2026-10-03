@@ -1006,9 +1006,28 @@ fn stub_model(
     let handle = std::thread::spawn(move || {
         for reply in replies {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = vec![0_u8; 65536];
-            let read = stream.read(&mut request).unwrap();
-            let text = String::from_utf8_lossy(&request[..read]).into_owned();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "model request ended before its body was complete");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .expect("request must carry Content-Length");
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
             if let Some((_, body)) = text.split_once("\r\n\r\n") {
                 recorded.lock().unwrap().push(body.to_owned());
             }
@@ -1471,6 +1490,191 @@ fn invalid_history_budget_fails_before_contacting_provider() {
             .unwrap()
             .iter()
             .any(|event| event.event_type == "model.started")
+    );
+}
+
+#[test]
+fn oversized_model_input_is_rejected_before_contacting_provider() {
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), "http://127.0.0.1:1/v1");
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["plan", "hello"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HYPER_CONTEXT_TOKENS", "100")
+        .env("HYPER_OUTPUT_TOKENS", "20")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["failure"]["errorType"], "ContextBudgetError");
+    assert_eq!(summary["failure"]["retryable"], false);
+    let run_id = summary["runId"].as_str().unwrap();
+    let (_, events) = get_run_details(dir.path(), run_id).unwrap();
+    let budget = events
+        .iter()
+        .find(|event| event.event_type == "model.context_budget")
+        .unwrap();
+    assert_eq!(budget.payload["fits"], false);
+    assert_eq!(budget.payload["maxInputTokens"], 80);
+    assert!(
+        harness::replay_messages(dir.path(), run_id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn tool_context_growth_stops_before_an_oversized_followup_and_replays_last_request() {
+    let final_round = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"reading","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\".harness/large.txt\"}"}}]}}]}"#;
+    let (base_url, bodies, server) = stub_model(vec![final_round, tool_round]);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &base_url);
+    let workspace = Workspace::open(dir.path()).unwrap();
+    fs::write(workspace.paths.dir.join("large.txt"), "x".repeat(5000)).unwrap();
+    drop(workspace);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyper"));
+    command
+        .args(["plan", "read the file"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HYPER_OUTPUT_TOKENS", "16")
+        .env_remove("HYPER_CONTEXT_TOKENS")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL");
+    let probe = command.output().unwrap();
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let baseline = bodies.lock().unwrap()[0].len();
+    command.env("HYPER_CONTEXT_TOKENS", (baseline + 16 + 100).to_string());
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    server.join().unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["failure"]["errorType"], "ContextBudgetError");
+    let run_id = summary["runId"].as_str().unwrap();
+    let (_, events) = get_run_details(dir.path(), run_id).unwrap();
+    let budgets: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_type == "model.context_budget")
+        .collect();
+    assert_eq!(budgets.len(), 2);
+    assert_eq!(budgets[0].payload["fits"], true);
+    assert_eq!(budgets[1].payload["fits"], false);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "model.observation")
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let sent: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(sent["max_tokens"], 16);
+    let replay = harness::replay_messages(dir.path(), run_id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&replay[0].messages).unwrap(),
+        sent["messages"]
+    );
+}
+
+#[test]
+fn total_request_budget_trims_whole_old_session_turns() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (base_url, bodies, server) = stub_model(vec![reply, reply]);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &base_url);
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hyper"));
+        command
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("HYPER_OUTPUT_TOKENS", "16")
+            .env("HYPER_HISTORY_TOKENS", "16000")
+            .env_remove("HYPER_CONTEXT_TOKENS")
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("DEEPSEEK_BASE_URL")
+            .env_remove("DEEPSEEK_MODEL")
+            .env_remove("DEEPSEEK_PROTOCOL");
+        command
+    };
+    assert!(
+        command()
+            .args(["plan", "follow up"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let baseline = bodies.lock().unwrap()[0].len();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    for (role, content) in [
+        ("user", "old question".to_owned()),
+        ("assistant", "x".repeat(5000)),
+        ("user", "recent question".to_owned()),
+        ("assistant", "recent answer".to_owned()),
+    ] {
+        workspace
+            .append_session_message(
+                "total",
+                &harness::SessionMessage {
+                    role: role.into(),
+                    content,
+                    timestamp: harness::workspace::now(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+    }
+    drop(workspace);
+    let output = command()
+        .args(["plan", "--session", "total", "follow up"])
+        .env("HYPER_CONTEXT_TOKENS", (baseline + 16 + 500).to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let run_id = workspace.list_runs(1).unwrap()[0].run_id.clone();
+    let (_, events) = get_run_details(dir.path(), &run_id).unwrap();
+    let started = events
+        .iter()
+        .find(|event| event.event_type == "model.started")
+        .unwrap();
+    assert_eq!(
+        started.payload["historyBudget"]["maxEstimatedTokens"],
+        16000
+    );
+    assert_eq!(started.payload["historyBudget"]["droppedMessages"], 2);
+    let bodies = bodies.lock().unwrap();
+    let sent: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(sent["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(sent["messages"][1]["content"], "recent question");
+    let budget = events
+        .iter()
+        .find(|event| event.event_type == "model.context_budget")
+        .unwrap();
+    assert!(
+        budget.payload["estimatedInputTokens"].as_u64().unwrap()
+            <= budget.payload["maxInputTokens"].as_u64().unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&harness::replay_messages(dir.path(), &run_id).unwrap()[0].messages)
+            .unwrap(),
+        sent["messages"]
     );
 }
 

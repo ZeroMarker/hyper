@@ -195,10 +195,27 @@ leaves no history rather than being split or replaced with older turns. The
 original transcript stays intact. `model.started` records the selected history
 and its budget, estimated usage, and kept/dropped message counts.
 
-This budget covers previous session messages only. The current prompt,
-workspace context, system prompt, tool definitions and observations in the
-current agent loop are additional costs; total model context is not capped.
-Invalid budget values fail the model step before making a provider request.
+The history budget covers previous session messages. A separate total request
+budget, `HYPER_CONTEXT_TOKENS` (default: `128000`), reserves
+`HYPER_OUTPUT_TOKENS` (default: `8192`) for output. Set both for the limits of
+your model; these defaults are local budgets, not detected model capabilities.
+The output cap is sent as `max_tokens` for Chat/Messages and
+`max_output_tokens` for Responses.
+
+Before each request, Hyper conservatively estimates the entire translated
+JSON body at one token per UTF-8 byte, including system/input messages,
+workspace context, tool schemas, arguments and observations. Initial requests
+drop additional old session turns if needed. If the current input or a later
+tool round still exceeds the remaining input budget, the step fails with
+`ContextBudgetError` before that request is sent. Tool calls and results stay
+intact. `model.context_budget` records each estimate, reserve and decision;
+replay ends at the last request that passed the budget (or has no model step
+if the first request was rejected).
+
+Estimates do not use a provider tokenizer and cannot guarantee compatibility
+with every model's context limit. Budget values must be integers, output must
+be positive, and context must exceed output. Invalid values fail the model
+step before making a provider request.
 
 `ha prune --keep <N>` deletes every conversation but the N most recently
 updated, transcripts and registry rows included; `ha prune --runs --keep <N>`

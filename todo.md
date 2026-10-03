@@ -48,9 +48,10 @@
 - [ ] OS 级沙箱（分阶段）：Linux 默认模式已用 Landlock 限制 shell 及其子进程的工作区外写入与 TCP bind/connect；`read-only` / `workspace-write` / `unrestricted` 由 CLI、TUI 共用，非 Linux 或缺 Landlock ABI 4 时默认拒绝 shell。剩余：网络 UDP/Unix socket、Landlock 未覆盖的 metadata 操作、macOS/Windows 原生隔离，以及对 `.harness` 审计文件的保护。workspace context 仍会把仓库内容发给模型，prompt injection 是活路径。
 
 ### 协议与模型
-- [ ] 协议能力的**能力差异**处理：`detect_protocol` 按模型家族在白名单内探测（opencode.ai 主机）；网关新增模型或改名时需要同步，且 `max_tokens`/`max_output_tokens` 目前是固定常量而非按模型上限。若某网关把三种协议挂在不同 base path 下，探测表需改为可配置。
+- [ ] 协议能力的**能力差异**处理：`detect_protocol` 按模型家族在白名单内探测（opencode.ai 主机）；网关新增模型或改名时需要同步，输出上限现已支持 `HYPER_OUTPUT_TOKENS` 配置，但仍需按模型能力手工设置。若某网关把三种协议挂在不同 base path 下，探测表需改为可配置。
 - [x] 会话历史的上下文预算：`HYPER_HISTORY_TOKENS`（默认 16000，0 禁用历史）按 UTF-8 字节数 + 每条 8 的保守 token 估算，滑窗保留最近完整用户轮次；不拆分超大轮次，也不回填更旧轮次。原 transcript 保留，`model.started` 固定实际 history、systemPrompt 与预算/保留/丢弃计数；忘记会话后仍能准确 replay，新旧事件兼容。当前 prompt、workspace context、工具定义与本轮工具输出不在该预算内。
-- [ ] 总请求上下文预算：根据模型上限，为 system/input/tools 和当前 agent loop 预留输出空间，处理单轮大输入与工具输出增长；历史估算目前不依赖 provider tokenizer，也不保证总请求落在模型上限内。
+- [x] 总请求上下文预算：`HYPER_CONTEXT_TOKENS`（默认 128000）减去 `HYPER_OUTPUT_TOKENS`（默认 8192）作为输入预算；每次按三种协议实际 JSON 请求体的 UTF-8 字节数保守估算，覆盖 system/input/tools、参数和观察结果。首次请求进一步裁掉整轮旧会话；不可省略的输入或工具循环超预算时，在发送前以 `ContextBudgetError` 失败，完整审计保留。三种协议发送输出上限，`model.context_budget` 记录每轮用量和判断，replay 停在最后一次通过预算的请求。预算需按所用模型手动配置，尚不探测真实模型能力，也未接入 provider tokenizer。
+- [ ] 模型能力与精确 token 计数：按 provider/model 获取上下文和输出上限，支持 tokenizer 或服务端计数；当前默认预算与字节估算不等于实际模型限制。
 
 ### 清理
 - [x] 删除死代码：`deepseek::chat`（一次性、无工具）全仓库无调用点，已删除。
