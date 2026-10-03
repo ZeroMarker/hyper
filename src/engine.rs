@@ -17,6 +17,7 @@ use wait_timeout::ChildExt;
 
 use crate::{
     approval::ApprovalGate,
+    context::{bounded_history, estimated_tokens, history_budget},
     deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt},
     event_sink::EventSink,
     model::*,
@@ -226,6 +227,13 @@ fn agent(
 ) -> Result<(bool, Value)> {
     const MAX_TURNS: usize = 12;
     let config = DeepSeekConfig::from_env()?;
+    let history_budget = history_budget()?;
+    let history = bounded_history(&events.history, history_budget);
+    let history_messages: Vec<Value> = history
+        .iter()
+        .map(|message| json!({"role": message.role, "content": message.content}))
+        .collect();
+    let system = system_prompt(step.mode);
     let context = workspace_context(root)?;
     // Exactly what the model is given, recorded once per step: a replay can
     // then rebuild this request without re-deriving a workspace context that
@@ -235,19 +243,16 @@ fn agent(
     );
     events.write(
         "model.started",
-        json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input}),
+        json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input,
+            "systemPrompt":system,"history":history_messages,
+            "historyBudget":{"maxEstimatedTokens":history_budget,"estimatedTokens":history.iter().map(estimated_tokens).sum::<usize>(),"keptMessages":history.len(),"droppedMessages":events.history.len()-history.len()}}),
         Some(&step.id),
         Some(index),
     )?;
-    let mut messages = vec![json!({ "role": "system", "content": system_prompt(step.mode) })];
+    let mut messages = vec![json!({ "role": "system", "content": system })];
     // Earlier turns of the conversation come first, so the model can answer a
     // follow-up that depends on what was already discussed.
-    messages.extend(
-        events
-            .history
-            .iter()
-            .map(|message| json!({"role": message.role, "content": message.content})),
-    );
+    messages.extend(history_messages);
     messages.push(json!({ "role": "user", "content": input }));
     let specs = tool_specs_for(step);
     for turn in 0..MAX_TURNS {
@@ -1607,7 +1612,7 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
     if events.is_empty() {
         bail!("run {run_id} has no recorded events");
     }
-    let history = replay_history(&workspace, &events, run_id)?;
+    let mut legacy_history = None;
     let mut steps: Vec<ReplayStep> = Vec::new();
     let mut current: Option<usize> = None;
     let mut started: Option<(String, AgentMode)> = None;
@@ -1640,8 +1645,24 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
                         .map(|step| step.mode)
                         .unwrap_or_default(),
                 };
-                let mut messages = vec![json!({"role":"system","content":system_prompt(mode)})];
-                messages.extend(history.iter().cloned());
+                let system = event
+                    .payload
+                    .get("systemPrompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| system_prompt(mode));
+                let mut messages = vec![json!({"role":"system","content":system})];
+                if let Some(history) = event.payload.get("history") {
+                    let history: Vec<Value> = serde_json::from_value(history.clone())
+                        .context("invalid recorded model history")?;
+                    messages.extend(history);
+                } else {
+                    // Old runs relied on the transcript. New runs carry the
+                    // actual bounded prefix, even after the session is forgotten.
+                    if legacy_history.is_none() {
+                        legacy_history = Some(replay_history(&workspace, &events, run_id)?);
+                    }
+                    messages.extend(legacy_history.as_ref().unwrap().iter().cloned());
+                }
                 messages.push(json!({"role":"user","content":input}));
                 steps.push(ReplayStep {
                     step_id,

@@ -1364,6 +1364,116 @@ fn replay_refuses_a_run_recorded_before_its_payloads() {
     assert!(error.to_string().contains("predates"), "{error}");
 }
 
+#[test]
+fn bounded_session_history_replays_after_forgetting_the_session() {
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"query\":\"needle\"}"}}]}}]}"#;
+    let final_round = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (base_url, bodies, server) = stub_model(vec![tool_round, final_round]);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &base_url);
+    let workspace = Workspace::open(dir.path()).unwrap();
+    for (role, content) in [
+        ("user", "old question"),
+        ("assistant", "old answer"),
+        ("user", "recent question"),
+        ("assistant", "recent answer"),
+    ] {
+        workspace
+            .append_session_message(
+                "bounded",
+                &harness::SessionMessage {
+                    role: role.into(),
+                    content: content.into(),
+                    timestamp: harness::workspace::now(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+    }
+    drop(workspace);
+    // The newest pair costs 44 estimated tokens, including framing.
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["plan", "--session", "bounded", "follow up"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HYPER_HISTORY_TOKENS", "44")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let workspace = Workspace::open(dir.path()).unwrap();
+    assert_eq!(workspace.session_messages("bounded").unwrap().len(), 6);
+    let run_id = workspace.list_runs(1).unwrap()[0].run_id.clone();
+    let events = workspace.events(&run_id).unwrap();
+    let started = events
+        .iter()
+        .find(|event| event.event_type == "model.started")
+        .unwrap();
+    assert_eq!(started.payload["historyBudget"]["droppedMessages"], 2);
+    assert_eq!(started.payload["historyBudget"]["estimatedTokens"], 44);
+    workspace.delete_session("bounded").unwrap();
+    drop(workspace);
+    let replay = harness::replay_messages(dir.path(), &run_id).unwrap();
+    let bodies = bodies.lock().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let last: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(first["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(first["messages"][1]["content"], "recent question");
+    assert_eq!(first["messages"][2]["content"], "recent answer");
+    assert!(
+        first["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("follow up")
+    );
+    assert_eq!(
+        serde_json::to_value(&replay[0].messages).unwrap(),
+        last["messages"]
+    );
+}
+
+#[test]
+fn invalid_history_budget_fails_before_contacting_provider() {
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), "http://127.0.0.1:1/v1");
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["plan", "hello"])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HYPER_HISTORY_TOKENS", "invalid")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        summary["failure"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("HYPER_HISTORY_TOKENS")
+    );
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let run_id = workspace.list_runs(1).unwrap()[0].run_id.clone();
+    assert!(
+        !workspace
+            .events(&run_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == "model.started")
+    );
+}
+
 /// The event keeps a bounded slice of a command's output, so the rest would be
 /// gone with the run. It goes to `artifacts/`, where `ha artifacts` lists it.
 #[test]

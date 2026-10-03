@@ -178,13 +178,27 @@ trace is still there when you need it.
 `ha replay <run-id>` rebuilds the conversation a run sent to the model — the
 system prompt, the conversation prefix it replayed, the input it was given, and
 every assistant turn with the observations that followed it — and prints it as
-JSON. It uses the run's `task.json` and events, plus the session transcript for
-the conversation prefix. Replay makes no provider request and executes no
-tools, though opening the workspace may repair its SQLite index. If the session
-has been forgotten, replay omits that prefix. A run recorded before the events
-carried the necessary payloads is refused instead of being guessed from missing
-data. The system prompt comes from the current version of Hyper, so replay
-after a prompt change may differ from the original request.
+JSON. New runs record the actual conversation prefix and system prompt in
+their events, so replay survives forgetting the session and prompt changes.
+Older runs use the session transcript and current system prompt as fallbacks.
+Replay makes no provider request and executes no tools, though opening the
+workspace may repair its SQLite index. If the session has been forgotten,
+replay omits that prefix for older runs. A run recorded before the events
+carried the necessary payloads is refused instead of being guessed from
+missing data.
+
+Session history uses a sliding window of whole user-led turns, retaining the
+most recent turns within `HYPER_HISTORY_TOKENS` (default: `16000`; `0` sends no
+history). The estimate conservatively counts one token per UTF-8 byte plus
+eight per message; it is not a provider tokenizer. An oversized latest turn
+leaves no history rather than being split or replaced with older turns. The
+original transcript stays intact. `model.started` records the selected history
+and its budget, estimated usage, and kept/dropped message counts.
+
+This budget covers previous session messages only. The current prompt,
+workspace context, system prompt, tool definitions and observations in the
+current agent loop are additional costs; total model context is not capped.
+Invalid budget values fail the model step before making a provider request.
 
 `ha prune --keep <N>` deletes every conversation but the N most recently
 updated, transcripts and registry rows included; `ha prune --runs --keep <N>`

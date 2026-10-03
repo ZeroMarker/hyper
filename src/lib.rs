@@ -1,5 +1,6 @@
 pub mod approval;
 pub mod cli;
+mod context;
 pub mod deepseek;
 pub mod engine;
 pub mod event_sink;
