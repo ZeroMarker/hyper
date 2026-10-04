@@ -826,10 +826,9 @@ fn bash(
                 Ok(())
             });
         }
-        if let Some(sandbox) = &sandbox {
-            let ruleset_fd = sandbox.ruleset_fd();
+        if let Some(sandbox) = sandbox {
             unsafe {
-                builder.pre_exec(move || Sandbox::apply_in_child(ruleset_fd));
+                builder.pre_exec(move || sandbox.apply_prepared_in_child());
             }
         }
         if let Some(budget) = resource_budget {

@@ -6,6 +6,8 @@ pub mod deepseek;
 pub mod engine;
 pub mod event_sink;
 pub mod i18n;
+#[cfg(target_os = "linux")]
+mod metadata_sandbox;
 pub mod model;
 pub mod permissions;
 pub mod policy;

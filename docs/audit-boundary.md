@@ -132,14 +132,42 @@ permission bits，并 sync 文件，再从该目录描述符 renameat 到目标 
 10 个确定性/原生单元测试及 4 个 restore 集成测试覆盖目标/父目录/源父目录替换、打开
 parent 后目录改名、删除最终 link、硬链接别名保持、二进制/权限、无目标幂等、失败清理、
 跨 mount 快照以及真正受限 shell 对外部 staging 的写/删/移动/硬链接拒绝；CLI restore/undo
-实际恢复旧文件和移除新文件。metadata 修改仍未被 OS 限制，可导致拒绝服务；宿主整体
+实际恢复旧文件和移除新文件。workspace-write 的 metadata 修改仍未被 OS 限制，可导致拒绝服务；宿主整体
 移动目录、unrestricted/外部不参与的写者和非 Linux 原生边界仍另列验收。
+
+## Linux read-only 显式元数据修改限制（本轮已交付）
+
+read-only shell 在 Landlock 后应用 seccomp BPF，拒绝 chmod/chown、时间戳、xattr
+显式修改的 path/fd/at 接口，含 fchmodat2、setxattrat/removexattrat 和 file_setattr。
+调用返回 EPERM，任意路径、预打开 FD 和链接别名均同样拒绝。ioctl 和 io_uring
+接口也整体拒绝，避免文件属性 ioctl 或异步 xattr 绕过；ptrace/process_vm_writev
+拒绝。该过滤继承到线程、fork 与 exec，不在命令字符串上匹配路径。
+
+[内核 seccomp 文档](https://docs.kernel.org/userspace-api/seccomp_filter.html) 要求检查
+architecture，且经典 BPF 不解引用用户路径；据此本次按操作整体拒绝，而不是猜测路径。
+[内核 syscall 表](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/unistd.h)
+确认新增接口编号。过滤先检查原生 audit arch，拒绝 compat ABI；x86-64 另拒绝 x32
+编号。不支持的 read-only 架构与过滤安装失败均拒绝启动，无静默降级。实现支持 Linux
+64 位 x86-64 与小端 aarch64；本地原生验证只有 aarch64，x86-64 分支仅做静态审查与
+BPF 判定测试，不宣称已完成 x86 原生验证。
+
+两个 BPF 判定单元与四个原生集成覆盖：工作区/外部/审计 marker、路径/fd、symlink/
+普通硬链接、已有 xattr 保持、线程/exec 继承、预打开 FD、现代 raw syscall 和 ioctl/
+io_uring 路线拒绝；读取可用，workspace-write/unrestricted 内的 chmod/utime 兼容。
+原生测试通过真实 engine 运行，确认工具启动与执行模式事件，不把命令策略拒绝当
+内核防护。库调用者应使用 Sandbox::apply_prepared_in_child；既有低层
+apply_in_child(ruleset_fd) 只应用 Landlock，保留兼容，不含此过滤。
+
+该交付只覆盖 read-only 的这些显式修改接口。ioctl、异步 I/O 或调试类工具在该模式
+内会受限；读取导致的 atime、锁/租约、Unix/UDP 外部服务及未参与边界的宿主进程
+不由此隔离，也不据 denylist 宣称覆盖未来所有新 syscall。workspace-write 的路径级
+metadata 隔离继续待办，需要允许仓库内构建操作而保护外部审计元数据。
 
 ## 已验证的剩余限制与下一项
 
-在一次性 Linux workspace，通过受限 shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
+前轮在一次性 Linux workspace，通过 workspace-write shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
 实测退出 0，权限由 0600 变为 0400，原内容未改写；marker 权限随后由宿主恢复。
-因此目前保护的是内容/目录操作，不能宣称抵御所有元数据篡改或拒绝服务。
+因此 workspace-write 目前保护的是内容/目录操作，不能宣称抵御所有元数据篡改或拒绝服务；本轮 read-only 的显式修改限制不解决这个默认模式风险。
 元数据隔离需另外的 OS 边界；不能用命令字符串规则代替。当前环境的 `unshare -Urnm`
 因 uid_map 权限失败，不能把挂载 namespace 当作已可用能力。
 

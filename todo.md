@@ -54,13 +54,15 @@
 
 - [x] **Linux restore/undo 的描述符提交**：固定快照源与目标 parent FD，外部 staging 完整复制/同步后 renameat 原子替换；unlinkat 删除新建文件且缺失幂等，不跟随校验后 link，也不修改硬链接别名。185 个 Rust 测试通过，含 10 个原生/确定性单元和 4 个 restore 集成测试；外部 staging shell 内容攻击、跨 mount 快照、CLI restore/undo、坏源/提交失败保持原目标均覆盖。非 Linux、metadata、整体目录移动及独立库 create_checkpoint 仍保留边界。见 [验证范围](docs/audit-boundary.md)。
 
+- [x] **Linux read-only 显式元数据修改限制**：seccomp 整体拒绝权限、属主、时间戳、xattr 的 path/fd/at 修改，含现代接口；拒绝 ioctl/io_uring 与 ptrace/process_vm_writev，架构检查阻断 compat/x32。191 个 Rust 测试与 13 个评测测试通过，两个判定单元/四个原生集成覆盖外部审计 marker、别名、预打开 FD、线程/exec 继承与已有 xattr 保持；本地原生只验证 aarch64。workspace-write 路径级元数据隔离仍未交付；见 [实际边界](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新运行时代码/评测基线为 `ccc53be`，评测用量修正为 `1d2c273`；Linux restore/undo 已交付。[本轮真实回归](evals/baselines/2026-10-04-restore/report.md) 28/30 通过，错误修改恢复及长会话各 3/3；保留两次失败，45 轮持久化一致，44/45 轮用量完整，缺失回复标未知。前轮范围授权模型冒烟 1/1 是独立历史结果。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，但 Linux 实测 shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围已交付，继续补 OS 读取/元数据边界、Windows 硬链接、非 Linux 描述符/恢复保护、独立库 create_checkpoint 和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
+- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围已交付，继续补 OS 读取/元数据边界、Windows 硬链接、非 Linux 描述符/恢复保护、独立库 create_checkpoint 和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null`、git 内部 `/dev/null` 设备访问与重复策略拒绝样本；跟踪长会话约束位置遗漏。本轮仍出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 

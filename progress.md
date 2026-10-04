@@ -4,6 +4,8 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-04（第十一轮）：交付 Linux read-only 显式元数据修改限制。Landlock 后应用 seccomp，按 syscall 拒绝权限、属主、时间戳、xattr 的 path/fd/at 修改，覆盖现代接口；ioctl/io_uring、ptrace/process_vm_writev 整体拒绝。检查原生 audit arch、拒绝 compat/x32；仅支持 64 位 x86-64/小端 aarch64，不支持或安装失败拒绝启动。parent 准备过滤，pre_exec 无分配/锁。191 个 Rust 测试、13 个评测测试、fmt、Clippy 与 release 构建通过；新增两个 BPF 单元和四个原生集成验证别名、审计 marker、已有 xattr、预打开 FD、线程/exec 与现代 raw syscall；实际原生仅 aarch64。普通读取与工作区写入模式的合法 chmod/utime 均保持兼容。workspace-write 元数据路径边界、atime/锁/外部服务、宿主及其他平台仍未交付，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
+
 2026-10-04（第十轮）：交付 Linux restore/undo 的描述符提交。快照源完整 canonical 路径从根 FD 再打开，拒绝替换后的父/最终 link；目标 parent 由工作区 openat2 入口固定。外部私有 staging 完整复制、权限位、sync 后 renameat 原子替换，最终 link 与硬链接不会重定向写入；新增文件用 unlinkat 删除且缺失幂等。源存储可跨 mount，临时副本必须与目标同 mount，不可用时拒绝，不降级到工作区内临时文件；undo lease 覆盖全过程。185 个 Rust 测试通过，10 个原生/确定性单元和 4 个 CLI/API 集成覆盖链接替换、失败保持、二进制/权限、跨 mount 与真实受限 shell staging 攻击。metadata、非 Linux、宿主整体目录移动与独立库 create_checkpoint 路径仍未交付，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
 
 本轮验证：185 个 Rust 测试（78 单元、9 取消、19 权限、4 restore、54 run、16 state、5 task）、13 个评测测试、fmt、Clippy 与 release 构建通过。正式运行时代码 `ccc53be` 真实回归 28/30，错误修改恢复与长会话各 3/3；45 轮 stdout/持久化一致，30 次 prune 成功。保留 Rust 跨文件任务代码判定通过但策略/设备访问失败后耗尽 12 轮，以及 Python 深文件任务流式工具参数残缺、未修改文件的失败。另在 `1d2c273` 修复评测将缺失最终模型回复误计为完整用量的问题，按原事件重算为 29/30 次、44/45 轮完整，缺失回复标未知且保留已知部分；记录运行与修正的独立 revision/digest，没有重跑或替换结果，成本未知。不据小样本推断恢复实现影响成功率。见 [恢复回归报告](evals/baselines/2026-10-04-restore/report.md)。

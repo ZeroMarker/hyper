@@ -389,8 +389,9 @@ by the harness into the external store; shell temporary files use `.hyper-tmp`
 inside the workspace, with the configured workspace write boundary.
 
 This protects file content and directory entries, not all metadata: on the tested
-Linux kernel a shell can still chmod an external audit file, potentially denying
-future access. Linux direct read/write/edit, search and context now use anchored
+Linux kernel a workspace-write shell can still chmod an external audit file,
+potentially denying future access. Read-only shells additionally use seccomp to
+reject explicit permission, ownership, timestamp and xattr mutations. Linux direct read/write/edit, search and context now use anchored
 `openat2` descriptors; snapshots and modifications share the opened inode.
 Symlink substitutions, magic links and nested mount crossings are refused.
 Existing internal symlinks are resolved before opening. Unsupported Linux
@@ -415,7 +416,8 @@ so a tool cannot consume TUI keyboard events.
 `--sandbox` applies to CLI and TUI runs. The default is `workspace-write`:
 on Linux, shell commands and their child processes use Landlock to confine
 filesystem writes to the workspace and deny TCP connections. `read-only`
-also denies `write`/`edit` tools and shell writes. `unrestricted` explicitly
+also denies `write`/`edit` tools and shell writes, and on Linux rejects explicit
+metadata mutation syscalls with EPERM. `unrestricted` explicitly
 removes shell isolation and the dangerous-command check; tool permission
 decisions still apply. For example:
 
@@ -429,11 +431,20 @@ it. The effective mode is recorded in `run.started` and shown in the TUI.
 Workspace-write shell commands use `.hyper-tmp` for temporary files; read-only
 runs do not create this directory. A kernel
 without Landlock ABI 4, or a non-Linux host, rejects sandboxed `bash` instead
-of silently running it without isolation. To run shell commands there, select
+of silently running it without isolation. Read-only shells additionally require
+seccomp filtering on native 64-bit x86-64 or little-endian aarch64; unsupported
+architectures or filter installation failures refuse to start the shell. The
+filter also rejects compat/x32 syscall ABIs, ioctl, io_uring, ptrace and
+process_vm_writev. Tools needing these operations will fail in read-only mode,
+even inside the workspace. To run shell commands on unsupported hosts, select
 `unrestricted` explicitly.
 
 This boundary limits writes and TCP sockets. Landlock does not restrict reads,
-UDP, Unix sockets, or every metadata operation; commands can still read files
+UDP, Unix sockets, or every metadata operation. Workspace-write metadata
+isolation remains pending. Read-only restrictions cover explicit mutation
+syscalls, including fchmodat2 and new xattr-at/file_setattr calls, inherited by
+threads and child processes; normal reads may still update access times and locks
+are not forbidden. Commands can still read files
 outside the workspace. Shell commands in `unrestricted` mode run with the
 calling user's privileges. Direct `read`/`write`/`edit` tools continue to use
 workspace path checks in every mode.

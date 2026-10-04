@@ -3,7 +3,8 @@
 //! Landlock is inherited across `execve`, so shell redirections and child
 //! processes have the same write boundary. Read access stays available for
 //! compilers and system tools. Landlock does not mediate every filesystem
-//! operation (notably metadata changes on already accessible files), and its
+//! operation. Read-only shells additionally deny explicit metadata mutation
+//! syscalls through seccomp; workspace-write still permits those operations. Its
 //! network rules only cover TCP bind/connect.
 
 use std::{io, path::Path};
@@ -116,6 +117,8 @@ struct PathBeneathAttr {
 pub struct Sandbox {
     #[cfg(target_os = "linux")]
     ruleset: OwnedFd,
+    #[cfg(target_os = "linux")]
+    metadata_filter: Option<crate::metadata_sandbox::MetadataFilter>,
 }
 
 impl Sandbox {
@@ -174,7 +177,15 @@ impl Sandbox {
                     return Err(io::Error::last_os_error());
                 }
             }
-            Ok(Self { ruleset })
+            let metadata_filter = if mode == ExecutionMode::ReadOnly {
+                Some(crate::metadata_sandbox::MetadataFilter::prepare()?)
+            } else {
+                None
+            };
+            Ok(Self {
+                ruleset,
+                metadata_filter,
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -193,7 +204,22 @@ impl Sandbox {
         self.ruleset.as_raw_fd()
     }
 
-    /// Apply a prepared ruleset in a forked child before `exec`.
+    /// Apply all boundaries prepared for this sandbox, including read-only metadata.
+    ///
+    /// # Safety
+    ///
+    /// Call only from `Command::pre_exec`; keep this sandbox alive through spawn.
+    #[cfg(target_os = "linux")]
+    pub unsafe fn apply_prepared_in_child(&self) -> io::Result<()> {
+        unsafe { Self::apply_in_child(self.ruleset_fd())? };
+        if let Some(filter) = &self.metadata_filter {
+            unsafe { filter.apply_in_child()? };
+        }
+        Ok(())
+    }
+
+    /// Apply only the Landlock ruleset; use `apply_prepared_in_child` to also
+    /// enforce the prepared read-only metadata boundary.
     ///
     /// # Safety
     ///

@@ -31,7 +31,7 @@ flowchart LR
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
 | [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
 | [`state.rs`](../src/state.rs)、[`workspace.rs`](../src/workspace.rs)、[`tool_file.rs`](../src/tool_file.rs)、[`restore_file.rs`](../src/restore_file.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
-| [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock、子进程资源限制 |
+| [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`metadata_sandbox.rs`](../src/metadata_sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock/read-only seccomp、子进程资源限制 |
 | [`approval.rs`](../src/approval.rs)、[`event_sink.rs`](../src/event_sink.rs) | TUI 与工作线程之间的审批和状态传递 |
 | [`i18n.rs`](../src/i18n.rs) | 界面文案；默认英语，`HYPER_LANG=zh` 或 `zh-CN` 切换中文 |
 
@@ -92,14 +92,14 @@ shell tmp 移入 `.hyper-tmp`，artifact 仍由 harness 收集至外部审计目
 - `plan` 模式拒绝 `bash` 和写入；`build` 模式允许经过策略检查的工具。步骤的 `tools` 白名单也约束直接指令和模型工具调用。
 - CLI/TUI 共用工具级 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无审批处理器时 ask 明确拒绝，TUI 每次调用确认一次。显式权限文件与参数不从项目说明推导授权。旧库 API 保留先前行为，新 `RunOptions.permissions` 默认 ask。判定和来源固定到事件。
 - `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；直接文件工具拒绝 `.harness` 及符号链接/Unix 硬链接别名。search 和自动上下文也过滤这些路径；审批后重复检查目标。Linux read/write/edit、search/context 使用 openat2 描述符入口，拒绝校验后的符号链接、magic link 与挂载跨越，快照/写入使用同一个 inode。search 改用原生 ignore-aware 枚举与安全读取。Windows 硬链接、非 Linux 描述符边界、非 Linux 恢复与宿主目录移动仍待完善。`read-only` 执行模式拒绝写入。
-- Shell 默认使用 `workspace-write` 模式：先经命令策略检查，再在 Linux 子进程应用 Landlock，允许工作区内写入，拒绝 TCP 连接与监听。`read-only` 不授权文件写入；`unrestricted` 显式跳过 Landlock 和该命令策略检查。无可用 Landlock 时，受限模式的 Shell 启动失败。
+- Shell 默认使用 `workspace-write` 模式：先经命令策略检查，再在 Linux 子进程应用 Landlock，允许工作区内写入，拒绝 TCP 连接与监听。`read-only` 不授权文件写入，并在支持的 Linux 原生 ABI 上安装 seccomp，整体拒绝显式权限/属主/时间戳/xattr 修改和 ioctl/io_uring/ptrace/process_vm_writev；不支持或安装失败拒绝启动。过滤在 parent 准备，pre_exec 只执行 syscall，不分配内存或加锁。旧低层 Sandbox::apply_in_child 仅含 Landlock，应调用 apply_prepared_in_child 应用完整准备策略；`unrestricted` 显式跳过 Landlock 和该命令策略检查。无可用 Landlock 时，受限模式的 Shell 启动失败。
 - Linux Shell 子进程默认使用约 8 GiB 地址空间、1 GiB 单文件大小、以及与步骤超时相关的 CPU 秒数限制；步骤可以覆盖这些值。墙钟超时默认 120 秒，超时后终止进程组。限制按进程生效，不是整个进程树的总额。
-- Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。权威审计目录已移出工作区，受限 shell 的写入/删除/跨层级移动/硬链接被阻断；预先准备的审计 inode 硬链接会在 shell 启动前拒绝。旧 `.harness` 仅是非权威遗留数据。Linux 实测 chmod 仍可改变外部审计文件权限，可能导致后续访问失败，元数据隔离仍需交付。`unrestricted` 模式具有宿主进程的常规权限。
+- Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。权威审计目录已移出工作区，受限 shell 的写入/删除/跨层级移动/硬链接被阻断；预先准备的审计 inode 硬链接会在 shell 启动前拒绝。旧 `.harness` 仅是非权威遗留数据。Linux workspace-write 实测 chmod 仍可改变外部审计文件权限，可能导致后续访问失败，元数据隔离仍需交付。`unrestricted` 模式具有宿主进程的常规权限。
 - Shell 的 stdout/stderr 在事件中各保留最多 256 KiB，在产物中各保留最多 4 MiB；超出部分继续读取但不保存。审计和 replay 应按这些截断边界理解。
 
 ## 修改入口与验证
 
-新增任务字段或事件格式时，先修改 [`model.rs`](../src/model.rs)，再核对 [`engine.rs`](../src/engine.rs) 的写入与 replay、[`workspace.rs`](../src/workspace.rs) 的恢复逻辑及 CLI 展示。新增模型协议时核对 [`deepseek.rs`](../src/deepseek.rs) 的消息转换与 [`deepseek/stream.rs`](../src/deepseek/stream.rs) 的流式解析；新增工具时同时更新工具说明、实际调用白名单、策略检查和事件记录。改变 Shell 隔离时核对 [`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) 及跨平台失败行为。
+新增任务字段或事件格式时，先修改 [`model.rs`](../src/model.rs)，再核对 [`engine.rs`](../src/engine.rs) 的写入与 replay、[`workspace.rs`](../src/workspace.rs) 的恢复逻辑及 CLI 展示。新增模型协议时核对 [`deepseek.rs`](../src/deepseek.rs) 的消息转换与 [`deepseek/stream.rs`](../src/deepseek/stream.rs) 的流式解析；新增工具时同时更新工具说明、实际调用白名单、策略检查和事件记录。改变 Shell 隔离时核对 [`sandbox.rs`](../src/sandbox.rs)、[`metadata_sandbox.rs`](../src/metadata_sandbox.rs)、[`resource.rs`](../src/resource.rs) 及跨平台失败行为。
 
 仓库 CI 执行格式检查、Clippy 和测试；本地对应命令为 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`。发布工作流构建多平台二进制并打包 npm 发行物。
 
