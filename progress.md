@@ -4,6 +4,8 @@
 
 2026-10-04（第十五轮）：推进 P0 平台隔离，Linux workspace-write/read-only 共用 seccomp syscall 过滤，拒绝 socket 创建/连接及带地址或消息式收发、io_uring、pidfd_getfd、ptrace/process_vm_writev；保留 read-only metadata 禁止，workspace-write chmod/utime 与 pipes/文件兼容。先检查原生 ABI，拒绝 compat/x32，不支持架构或安装失败拒绝受限 shell。新增一个 BPF 单元和五个原生集成（含 Rust 编译/子进程启动），通过两模式线程/exec/预开 FD/raw syscall 验证，unrestricted 真实 UDP/路径及抽象 Unix socket 正向兼容；本地 Linux/aarch64 215 个 Rust、14 个离线评测及 fmt/Clippy/release 通过。匿名 AF_UNIX socketpair/无地址收发允许，命名本地编译服务受限，主动继承 socket 的通用 I/O 和宿主预建立共享映射不覆盖，metadata/外部读取/其他平台继续待办；完整 P0-3 不关闭。见 [socket 边界](docs/audit-boundary.md)。
 
+本轮正式代码 `b8464f9` [真实回归](evals/baselines/2026-10-04-sockets/report.md) 30/30；45 轮完整 usage 与 stdout/持久化一致，30 次 prune 成功，恢复/长会话/Rust 跨文件各 3/3，实现 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37218002402) 全部成功（Linux x86 原生及 Windows 硬链接）。初版 `edc3118` 的 [27/30](evals/baselines/2026-10-04-sockets-initial/report.md) 保留；三个 Rust 跨文件正确代码但 12 轮耗尽，确定性编译/子进程测试定位匿名 socketpair 与无地址 send/recv 兼容性，后续代码新增限制例外并另跑完整任务集，没有替换失败结果。成本未知，不从小样本推断因果或完成全部隔离。
+
 2026-10-04（第十四轮）：推进 P0-3b2b2 的 Windows 直接文件工具硬链接检查。通过 GetFileInformationByHandle 检查真实句柄链接数，解析路径和实际打开后均拒绝多链接/查询失败，search/context 共用，审计存储启动校验同样拒绝。保守拒绝全部普通硬链接，不依赖文件 ID；迁移仍复制新 inode，不改变行政恢复/独立快照。新增三个 Windows 单元、三个工具集成和原生 Windows CI；本地 Linux 209 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过；实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 全部成功，Windows 原生 x64 六项针对性测试通过。未重跑模型基线：本轮运行时更改仅作用 Windows，Linux 既有真实基线保留。Linux 默认模式元数据、其他平台描述符/恢复、宿主并发新增 alias 与目录移动仍待办，完整 P0-3 不关闭。见 [Windows 边界](docs/audit-boundary.md)。
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。

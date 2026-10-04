@@ -215,16 +215,19 @@ Linux 原生 64 位 x86-64 或小端 aarch64。unrestricted 不安装此过滤�
 请求不在 shell 子进程内，保持可用。
 
 本地 Linux/aarch64 新增一个 BPF 单元与五个原生集成，覆盖两模式、线程/exec 继承、
-UDP/Unix 预打开 FD 的显式收发拒绝、raw syscall 的 EPERM、管道/普通文件兼容；
+UDP/Unix 预打开 FD 的带地址/消息式收发拒绝、raw syscall 的 EPERM、管道/普通文件兼容；
 宿主接收端确认没有收到字节。unrestricted 在真实 UDP、路径与抽象 Unix 端点正向
 送达 marker。原只读 metadata 四项测试仍通过，workspace-write 的合法 chmod/utime
 保持兼容。新增 Rust 编译及成功/失败子进程启动回归验证匿名通信；read-only 只验证
 status 启动，Rust output 的 ioctl/非阻塞管道操作仍受既有 ioctl 限制。
 完整本地 215 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过；
-x86-64 原生执行由 CI 验证，固定模型任务兼容结果另行记录。
+实现 `b8464f9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37218002402) 全部通过，
+包含 Linux/x86-64 的五个原生 socket/编译集成与 Windows/x64 六项硬链接回归。
+[固定模型回归](../evals/baselines/2026-10-04-sockets/report.md) 30/30 通过，45 轮用量
+及持久化一致、30 次 prune 均验证；首轮严格过滤的 27/30 结果独立保留，不替换。
 
 这会限制依赖命名 Unix socket 的编译缓存/服务与本地网络测试，
-不提供工作区内 socket 例外；需要此能力的任务须由宿主显式选 unrestricted。
+不提供工作区内命名 socket 例外；需要此能力的任务须由宿主显式选 unrestricted。
 此交付是显式 socket syscall 边界，不是完整网络 namespace 或宿主描述符隔离。
 若库调用者主动继承已连接 socket，普通 read/write/readv/writev/sendfile/splice
 及无地址 send/recv 仍可传输字节；宿主预先建立的共享映射/异步队列也不由该过滤自动撤销。调用者须控制

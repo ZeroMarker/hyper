@@ -66,9 +66,11 @@
 
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
-本次补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，Windows x64 六项原生测试已通过；Linux 209 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过，见实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962)。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
+最新运行时代码/基线为 `b8464f9`：[socket 回归](evals/baselines/2026-10-04-sockets/report.md) 30/30，通过 45 轮用量/持久化、30 次 prune、恢复及长会话各 3/3；实现 CI 全部通过（含 Linux x86 原生与 Windows 硬链接）。初版 `edc3118` 的 27/30 独立保留，Rust 编译/子进程握手回归已补；例外仅 AF_UNIX 匿名 pair 与无地址收发，外部命名 socket、SCM_RIGHTS 等仍拒绝。完整 P0-3、Linux 路径级 metadata/读取/宿主资源及其他平台继续待办。
 
-对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新运行时代码/评测基线为 `f8a1cc7`；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，完整 P1-5 保持未完成。[本轮真实回归](evals/baselines/2026-10-04-completion/report.md) 30/30 通过，错误修改恢复、长会话、只读规划与 Python 深文件各 3/3；45 轮完整 usage 和持久化一致，30 次 prune 成功。没有触发完成失败诊断，拒绝行为由本地故障测试另验，不据此宣称前轮残缺参数根因已修复。Responses/Messages 各一次真实只读冒烟通过。此前恢复/快照基线的残缺参数失败与未知总用量仍保留；不重跑替换历史、不作竞品或小样本因果判断。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
+前轮补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，Windows x64 六项原生测试已通过；Linux 209 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过，见实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962)。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
+
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。完成语义阶段的运行时代码/评测基线为 `f8a1cc7`；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，完整 P1-5 保持未完成。[本轮真实回归](evals/baselines/2026-10-04-completion/report.md) 30/30 通过，错误修改恢复、长会话、只读规划与 Python 深文件各 3/3；45 轮完整 usage 和持久化一致，30 次 prune 成功。没有触发完成失败诊断，拒绝行为由本地故障测试另验，不据此宣称前轮残缺参数根因已修复。Responses/Messages 各一次真实只读冒烟通过。此前恢复/快照基线的残缺参数失败与未知总用量仍保留；不重跑替换历史、不作竞品或小样本因果判断。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
 
 ### P0：质量与运行控制
 

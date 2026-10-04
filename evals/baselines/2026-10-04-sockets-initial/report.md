@@ -53,3 +53,5 @@ and [CI](https://github.com/ZeroMarker/hyper/actions/runs/37217305618), includin
 Linux x86-64 socket tests. Those initial tests omitted Rust compiler/subprocess
 compatibility; the deterministic regression was added in the follow-up. Raw
 traces and credentials remain local. Full P0-3 is not closed.
+
+See the [separate follow-up baseline](../2026-10-04-sockets/report.md) for the corrected runtime and 30/30 result.
