@@ -5,7 +5,8 @@
 //! compilers and system tools. Landlock does not mediate every filesystem
 //! operation. Read-only shells additionally deny explicit metadata mutation
 //! syscalls through seccomp; workspace-write still permits those operations. Its
-//! network rules only cover TCP bind/connect.
+//! Landlock network rules cover TCP bind/connect; both restricted modes also
+//! deny explicit socket and indirect execution syscalls with seccomp.
 
 use std::{io, path::Path};
 
@@ -118,7 +119,7 @@ pub struct Sandbox {
     #[cfg(target_os = "linux")]
     ruleset: OwnedFd,
     #[cfg(target_os = "linux")]
-    metadata_filter: Option<crate::metadata_sandbox::MetadataFilter>,
+    syscall_filter: crate::syscall_sandbox::SyscallFilter,
 }
 
 impl Sandbox {
@@ -177,14 +178,10 @@ impl Sandbox {
                     return Err(io::Error::last_os_error());
                 }
             }
-            let metadata_filter = if mode == ExecutionMode::ReadOnly {
-                Some(crate::metadata_sandbox::MetadataFilter::prepare()?)
-            } else {
-                None
-            };
+            let syscall_filter = crate::syscall_sandbox::SyscallFilter::prepare(mode)?;
             Ok(Self {
                 ruleset,
-                metadata_filter,
+                syscall_filter,
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -204,7 +201,7 @@ impl Sandbox {
         self.ruleset.as_raw_fd()
     }
 
-    /// Apply all boundaries prepared for this sandbox, including read-only metadata.
+    /// Apply all prepared boundaries, including socket syscalls and read-only metadata.
     ///
     /// # Safety
     ///
@@ -212,14 +209,12 @@ impl Sandbox {
     #[cfg(target_os = "linux")]
     pub unsafe fn apply_prepared_in_child(&self) -> io::Result<()> {
         unsafe { Self::apply_in_child(self.ruleset_fd())? };
-        if let Some(filter) = &self.metadata_filter {
-            unsafe { filter.apply_in_child()? };
-        }
+        unsafe { self.syscall_filter.apply_in_child()? };
         Ok(())
     }
 
     /// Apply only the Landlock ruleset; use `apply_prepared_in_child` to also
-    /// enforce the prepared read-only metadata boundary.
+    /// enforce socket syscalls and the prepared read-only metadata boundary.
     ///
     /// # Safety
     ///

@@ -14,7 +14,7 @@ Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地�
 
 [权限与直接审计保护回归](evals/baselines/2026-10-03-permissions/report.md)（`7824c5b`）：相同任务、模型和预算，显式 `--approval allow` 保持前轮 CLI 的写工具授权范围，28/30 通过；错误修改恢复 3/3、长会话 2/3。失败分别为首行约束遗漏，以及代码正确但排查宿主 Cargo 配置时遇到已有 `2>/dev/null` 误拒绝、耗尽 12 轮。原结果不剔除或重跑替换；小样本不作权限改动的因果判断。默认 ask/非交互拒绝由本地测试另验。
 
-- CLI/TUI 共用执行模式；Linux shell 有 Landlock 写入/TCP 边界和进程资源限制，其他平台的受限 shell 默认拒绝。
+- CLI/TUI 共用执行模式；Linux shell 有 Landlock 写入/TCP、seccomp 显式 socket 边界和进程资源限制，其他平台的受限 shell 默认拒绝。
 - Chat、Responses、Messages 均支持 SSE；TUI 显示增量文本，CLI `--jsonl` 输出完整持久化事件。
 - 历史按完整轮次滑窗；每轮按实际协议 JSON 字节保守估算输入成本并预留输出空间，超预算在发送前失败。
 - 运行固定实际历史、系统提示词和观察结果；新运行删除会话后仍能 replay。检查点覆盖直接 write/edit，shell 修改尚无同等快照覆盖。
@@ -120,6 +120,8 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 P2 共用门槛：至少一个实际任务或集成消费者证明需求；已有预算、审计和权限不退化，有兼容测试与可复现对照结果。Web UI、全量插件内核和多人协作保留在候选池。
 
 ## 接下来执行什么
+
+本轮交付 Linux 两种受限模式的显式 socket syscall 限制：UDP/Unix socket 创建/收发、io_uring 和外部 FD 导入禁止，socketpair/本地服务也限制；pipes/文件兼容。214 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过。主动继承 socket 的通用 I/O、预建立共享映射、元数据与完整 OS 读取边界仍未交付；x86 原生与固定模型任务由 CI/基线另验，见 [实际边界](docs/audit-boundary.md)。
 
 本次交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 已全部通过；Windows x64 六项测试与 Linux 209 个 Rust/14 个离线评测分别验证。未重跑模型基线，Linux 历史报告保持原样。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
 

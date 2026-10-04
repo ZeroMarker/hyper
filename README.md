@@ -442,7 +442,9 @@ so a tool cannot consume TUI keyboard events.
 
 `--sandbox` applies to CLI and TUI runs. The default is `workspace-write`:
 on Linux, shell commands and their child processes use Landlock to confine
-filesystem writes to the workspace and deny TCP connections. `read-only`
+filesystem writes to the workspace and deny TCP connections. Both restricted
+modes also use seccomp to deny socket creation and explicit socket I/O, covering
+UDP and Unix sockets. `read-only`
 also denies `write`/`edit` tools and shell writes, and on Linux rejects explicit
 metadata mutation syscalls with EPERM. `unrestricted` explicitly
 removes shell isolation and the dangerous-command check; tool permission
@@ -458,16 +460,21 @@ it. The effective mode is recorded in `run.started` and shown in the TUI.
 Workspace-write shell commands use `.hyper-tmp` for temporary files; read-only
 runs do not create this directory. A kernel
 without Landlock ABI 4, or a non-Linux host, rejects sandboxed `bash` instead
-of silently running it without isolation. Read-only shells additionally require
+of silently running it without isolation. Both restricted modes additionally require
 seccomp filtering on native 64-bit x86-64 or little-endian aarch64; unsupported
 architectures or filter installation failures refuse to start the shell. The
-filter also rejects compat/x32 syscall ABIs, ioctl, io_uring, ptrace and
-process_vm_writev. Tools needing these operations will fail in read-only mode,
-even inside the workspace. To run shell commands on unsupported hosts, select
+filter also rejects compat/x32 syscall ABIs, io_uring, pidfd_getfd, ptrace and
+process_vm_writev. Read-only additionally rejects ioctl. Socket-based build
+servers, local network tests and Unix socket IPC (including socketpair) cannot
+run in restricted modes, even inside the workspace; ordinary pipes still work. To run shell commands on unsupported hosts, select
 `unrestricted` explicitly.
 
-This boundary limits writes and TCP sockets. Landlock does not restrict reads,
-UDP, Unix sockets, or every metadata operation. Workspace-write metadata
+This boundary limits writes and explicit socket syscalls. It does not revoke
+generic read/write on sockets deliberately inherited by a library caller,
+control shared mappings prepared by the host, or restrict every metadata
+operation. Library callers must supply trusted inherited descriptors and use
+`Sandbox::apply_prepared_in_child`; `apply_in_child` applies only Landlock.
+Workspace-write metadata
 isolation remains pending. Read-only restrictions cover explicit mutation
 syscalls, including fchmodat2 and new xattr-at/file_setattr calls, inherited by
 threads and child processes; normal reads may still update access times and locks

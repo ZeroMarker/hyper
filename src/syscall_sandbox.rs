@@ -1,12 +1,14 @@
-//! Read-only shell syscall restrictions, supplementing Landlock.
+//! Restricted shell syscall restrictions, supplementing Landlock.
 //!
 //! This deliberately forbids the listed operations everywhere: classic seccomp
-//! cannot safely decide permission from a userspace pathname. Workspace-write
-//! needs a separate path-aware boundary and does not install this filter.
+//! cannot safely decide permission from a userspace pathname. Both restricted
+//! modes deny socket operations and indirect execution routes. Only read-only
+//! denies metadata mutation; workspace-write still needs a path-aware boundary.
 
+use crate::sandbox::ExecutionMode;
 use std::io;
 
-pub(crate) struct MetadataFilter {
+pub(crate) struct SyscallFilter {
     program: Vec<libc::sock_filter>,
 }
 
@@ -20,8 +22,14 @@ fn instruction(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter { code, jt, jf, k }
 }
 
-impl MetadataFilter {
-    pub(crate) fn prepare() -> io::Result<Self> {
+impl SyscallFilter {
+    pub(crate) fn prepare(mode: ExecutionMode) -> io::Result<Self> {
+        if mode == ExecutionMode::Unrestricted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unrestricted mode does not use a syscall filter",
+            ));
+        }
         #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
         let arch = 0xc000_003e; // AUDIT_ARCH_X86_64
         #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
@@ -32,7 +40,7 @@ impl MetadataFilter {
         )))]
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "read-only bash metadata filtering requires Linux x86-64 or little-endian aarch64",
+            "sandboxed bash syscall filtering requires Linux x86-64 or little-endian aarch64",
         ));
 
         #[cfg(any(
@@ -55,7 +63,11 @@ impl MetadataFilter {
                 program.push(instruction(0x35, 0x4000_0000, 0, 1));
                 program.push(instruction(RETURN, DENY, 0, 0));
             }
-            for syscall in denied_syscalls() {
+            let mut denied = denied_socket_syscalls();
+            if mode == ExecutionMode::ReadOnly {
+                denied.extend(denied_metadata_syscalls());
+            }
+            for syscall in denied {
                 program.push(instruction(EQUAL, syscall as u32, 0, 1));
                 program.push(instruction(RETURN, DENY, 0, 0));
             }
@@ -83,7 +95,7 @@ impl MetadataFilter {
     all(target_arch = "x86_64", target_pointer_width = "64"),
     all(target_arch = "aarch64", target_endian = "little")
 ))]
-fn denied_syscalls() -> Vec<libc::c_long> {
+fn denied_metadata_syscalls() -> Vec<libc::c_long> {
     let syscalls = vec![
         libc::SYS_fchmod,
         libc::SYS_fchmodat,
@@ -103,13 +115,6 @@ fn denied_syscalls() -> Vec<libc::c_long> {
         // No asynchronous xattr or filesystem ioctl path around this filter.
         // This includes terminal/device ioctls; read-only bash is noninteractive.
         libc::SYS_ioctl,
-        libc::SYS_io_uring_setup,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
-        // Do not let a child ask an unsandboxed process to execute its syscalls
-        // by changing that process's registers or memory.
-        libc::SYS_ptrace,
-        libc::SYS_process_vm_writev,
     ];
     #[cfg(target_arch = "x86_64")]
     let syscalls = {
@@ -127,6 +132,39 @@ fn denied_syscalls() -> Vec<libc::c_long> {
     syscalls
 }
 
+#[cfg(any(
+    all(target_arch = "x86_64", target_pointer_width = "64"),
+    all(target_arch = "aarch64", target_endian = "little")
+))]
+fn denied_socket_syscalls() -> Vec<libc::c_long> {
+    vec![
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_connect,
+        libc::SYS_bind,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_sendto,
+        libc::SYS_sendmsg,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvfrom,
+        libc::SYS_recvmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_shutdown,
+        libc::SYS_setsockopt,
+        // Async socket operations must not bypass the socket syscall filter.
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+        // Do not import an unsandboxed process's descriptors or ask it to run
+        // syscalls through register/memory modification.
+        libc::SYS_pidfd_getfd,
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_writev,
+    ]
+}
+
 #[cfg(all(
     test,
     any(
@@ -137,7 +175,7 @@ fn denied_syscalls() -> Vec<libc::c_long> {
 mod tests {
     use super::*;
 
-    fn evaluate(filter: &MetadataFilter, arch: u32, syscall: u32) -> u32 {
+    fn evaluate(filter: &SyscallFilter, arch: u32, syscall: u32) -> u32 {
         let mut acc = 0;
         let mut pc = 0;
         loop {
@@ -161,7 +199,7 @@ mod tests {
 
     #[test]
     fn filter_rejects_compat_architectures_and_x32() {
-        let filter = MetadataFilter::prepare().unwrap();
+        let filter = SyscallFilter::prepare(ExecutionMode::ReadOnly).unwrap();
         assert_eq!(evaluate(&filter, 0x4000_0003, 15), DENY); // i386 chmod
         assert_eq!(evaluate(&filter, 0x4000_0028, 15), DENY); // arm compat
         #[cfg(target_arch = "x86_64")]
@@ -170,12 +208,41 @@ mod tests {
 
     #[test]
     fn filter_preserves_reading_and_rejects_each_mutation_route() {
-        let filter = MetadataFilter::prepare().unwrap();
+        let filter = SyscallFilter::prepare(ExecutionMode::ReadOnly).unwrap();
         let arch = filter.program[1].k;
         assert_eq!(evaluate(&filter, arch, libc::SYS_read as u32), ALLOW);
         assert_eq!(evaluate(&filter, arch, libc::SYS_execve as u32), ALLOW);
-        for syscall in denied_syscalls() {
+        for syscall in denied_metadata_syscalls() {
             assert_eq!(evaluate(&filter, arch, syscall as u32), DENY);
         }
+    }
+
+    #[test]
+    fn both_restricted_modes_deny_socket_and_indirect_routes() {
+        for mode in [ExecutionMode::ReadOnly, ExecutionMode::WorkspaceWrite] {
+            let filter = SyscallFilter::prepare(mode).unwrap();
+            let arch = filter.program[1].k;
+            for syscall in denied_socket_syscalls() {
+                assert_eq!(evaluate(&filter, arch, syscall as u32), DENY);
+            }
+            for syscall in [
+                libc::SYS_read,
+                libc::SYS_write,
+                libc::SYS_pipe2,
+                libc::SYS_execve,
+            ] {
+                assert_eq!(evaluate(&filter, arch, syscall as u32), ALLOW);
+            }
+            assert_eq!(evaluate(&filter, 0x4000_0003, 102), DENY); // i386 socketcall
+            assert_eq!(evaluate(&filter, 0x4000_0028, 281), DENY); // arm socket
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(evaluate(&filter, arch, 0x4000_0029), DENY);
+        }
+        let writable = SyscallFilter::prepare(ExecutionMode::WorkspaceWrite).unwrap();
+        assert_eq!(
+            evaluate(&writable, writable.program[1].k, libc::SYS_fchmod as u32),
+            ALLOW
+        );
+        assert!(SyscallFilter::prepare(ExecutionMode::Unrestricted).is_err());
     }
 }
