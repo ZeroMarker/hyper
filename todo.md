@@ -60,9 +60,11 @@
 
 - [x] **Chat/Responses 明确未完成拒绝与流式诊断**：length/content_filter、Responses incomplete/failed 与矛盾完成状态拒绝整个工具批次；model.failed 与运行失败 details 保留有界计数/结束原因/完整 reportedUsage/JSON 错误位置，不记录参数正文。Messages 缺 usage 计数保持未知；不自动重试已消费回复。完整 P1-5 仍待完成。见 [完成语义](docs/model-completion.md)。
 
+- [x] **Windows 直接工具保守硬链接检查**：解析路径与实际 I/O 句柄拒绝所有多链接文件及计数查询失败，search/context 共用，审计存储启动检查复用；普通仓库硬链接同样拒绝。Windows x64 原生 3 单元 + 3 集成通过，Linux 回归通过。P0-3b2b2 其余隔离仍待办。见 [边界与 CI](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
-本次补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，本地 Linux 不执行 Windows 测试。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
+本次补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，Windows x64 六项原生测试已通过；Linux 209 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过，见实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962)。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新运行时代码/评测基线为 `f8a1cc7`；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，完整 P1-5 保持未完成。[本轮真实回归](evals/baselines/2026-10-04-completion/report.md) 30/30 通过，错误修改恢复、长会话、只读规划与 Python 深文件各 3/3；45 轮完整 usage 和持久化一致，30 次 prune 成功。没有触发完成失败诊断，拒绝行为由本地故障测试另验，不据此宣称前轮残缺参数根因已修复。Responses/Messages 各一次真实只读冒烟通过。此前恢复/快照基线的残缺参数失败与未知总用量仍保留；不重跑替换历史、不作竞品或小样本因果判断。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
 

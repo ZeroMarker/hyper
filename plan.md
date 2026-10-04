@@ -121,7 +121,7 @@ P2 共用门槛：至少一个实际任务或集成消费者证明需求；已�
 
 ## 接下来执行什么
 
-本次交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），本地 Linux 回归不作为 Windows 原生证据。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
+本次交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 已全部通过；Windows x64 六项测试与 Linux 209 个 Rust/14 个离线评测分别验证。未重跑模型基线，Linux 历史报告保持原样。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
 
 下一项推进 P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离；P0-3a 共用权限、P0-3b1 外部内容存储与显式迁移已交付，完整 P0-3 保持未完成。P0-2 共享取消及 Linux 门控/PTY 验证已交付。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
 

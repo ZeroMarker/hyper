@@ -209,7 +209,10 @@ Windows 不再仅因非 Unix 而跳过硬链接检查。
 新增三个 Windows 句柄/边界单元与三个工具集成测试，覆盖打开后原路径替换、
 解析后新增 alias、外部与旧审计 marker、read/write/edit 的显式 allow 拒绝、
 search 内容过滤、普通硬链接拒绝及单链接文件兼容。CI 增加 Windows 原生 job；
-本地 Linux 执行 209 个 Rust 测试，Windows 测试在本机不执行，原生结果以 CI 为准。
+本地 Linux 209 个 Rust 测试、14 个离线评测、fmt/Clippy/release 均通过。
+实现提交 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962)
+全部成功，其中 Windows 原生 x64 的上述 3 单元 + 3 集成均通过；不推断其他
+Windows 架构、网络文件系统、shell 或全部平台测试已验证。
 
 本次不改变状态迁移的新 inode 复制语义，不将源硬链接变成迁移拒绝条件。
 没有增加 Windows 受限 shell、目录描述符或恢复/独立快照保护，行政 API 保持原边界。
@@ -227,4 +230,4 @@ search 内容过滤、普通硬链接拒绝及单链接文件兼容。CI 增加 
 P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权；下一项为 P0-3b2b2：元数据、剩余路径竞争与 OS 范围隔离；显式 unrestricted 仍有
 宿主权限。Windows 直接工具已补保守硬链接检查，macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
-本轮仅在 Linux 实测，不宣称跨平台原生验证完成。
+Linux 整套回归与 Windows x64 六项针对性测试已验证；其余平台及完整隔离未验证。

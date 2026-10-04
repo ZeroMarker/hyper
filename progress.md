@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-2026-10-04（第十四轮）：推进 P0-3b2b2 的 Windows 直接文件工具硬链接检查。通过 GetFileInformationByHandle 检查真实句柄链接数，解析路径和实际打开后均拒绝多链接/查询失败，search/context 共用，审计存储启动校验同样拒绝。保守拒绝全部普通硬链接，不依赖文件 ID；迁移仍复制新 inode，不改变行政恢复/独立快照。新增三个 Windows 单元、三个工具集成和原生 Windows CI；本地 Linux 209 个 Rust 测试通过，原生 Windows 结果以 CI 为准。Linux 默认模式元数据、其他平台描述符/恢复、宿主并发新增 alias 与目录移动仍待办，完整 P0-3 不关闭。见 [Windows 边界](docs/audit-boundary.md)。
+2026-10-04（第十四轮）：推进 P0-3b2b2 的 Windows 直接文件工具硬链接检查。通过 GetFileInformationByHandle 检查真实句柄链接数，解析路径和实际打开后均拒绝多链接/查询失败，search/context 共用，审计存储启动校验同样拒绝。保守拒绝全部普通硬链接，不依赖文件 ID；迁移仍复制新 inode，不改变行政恢复/独立快照。新增三个 Windows 单元、三个工具集成和原生 Windows CI；本地 Linux 209 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过；实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 全部成功，Windows 原生 x64 六项针对性测试通过。未重跑模型基线：本轮运行时更改仅作用 Windows，Linux 既有真实基线保留。Linux 默认模式元数据、其他平台描述符/恢复、宿主并发新增 alias 与目录移动仍待办，完整 P0-3 不关闭。见 [Windows 边界](docs/audit-boundary.md)。
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
