@@ -52,9 +52,9 @@
 
 - [x] **P0-3b2b1 工具路径与精确命令授权**：显式 rules 支持 literal 相对文件/目录与完整 bash 命令，deny > ask > allow，无匹配取基础权限；请求/解析目标共同判定，审批固定目标，范围硬链接拒绝。搜索/context 只读 allow 文件，ask 只在显式 read 时审批；CLI allow 保留范围 ask/deny，ask 收紧 allow，deny 禁止 mutation。171 个 Rust 测试通过；Linux path rules，非 Linux 拒绝，工具授权不等于 shell OS 范围隔离。见 [实际边界](docs/audit-boundary.md)。
 
-## 下一步（2026-10-03 竞品复核）
+## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
-对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `0fc6dad`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架、共享取消、共用工具权限、直接审计路径保护及外部审计内容存储/显式迁移、Linux 直接工具描述符边界已完成。[本轮真实回归](evals/baselines/2026-10-03-descriptor/report.md) 30/30 通过，错误修改恢复及长会话各 3/3；外部 state 的磁盘统计排除 workspace tmp，不与旧口径直接比较。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
+对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新代码/评测基线为 `6382c84`：streaming、CLI JSONL、历史滑窗、总请求预算、输出预留、固定任务脚手架、共享取消、共用工具权限、直接审计路径保护及外部审计内容存储/显式迁移、Linux 直接工具描述符边界和工具路径/命令授权已完成。[本轮真实回归](evals/baselines/2026-10-04-scopes/report.md) 30/30 通过，另一个真实范围授权模型任务 1/1 通过，错误修改恢复及长会话各 3/3；外部 state 的磁盘统计排除 workspace tmp，不与旧口径直接比较。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。
 
 ### P0：质量与运行控制
 

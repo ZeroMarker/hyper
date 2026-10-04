@@ -1,0 +1,88 @@
+{
+  "revision": "6382c847abb10579602149a5230e3d34209ba376",
+  "binary_sha256": "4ffb0966dacca2951d34523fd00a7f9700a4e1b628a26a8e538479e470b2b81b",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://opencode.ai/zen/go/v1",
+  "protocol": "chat",
+  "context_tokens": 128000,
+  "output_tokens": 8192,
+  "history_tokens": 16000,
+  "prompt": "In bounds.py, make clamp raise ValueError when low > high. Keep normal clamp behavior. Change only bounds.py. Use read and edit tools; do not run shell commands. Briefly describe the change.",
+  "permissions": {
+    "read": "deny",
+    "write": "deny",
+    "edit": "deny",
+    "bash": "deny",
+    "search": "deny",
+    "rules": [
+      {
+        "tool": "read",
+        "path": "bounds.py",
+        "decision": "allow"
+      },
+      {
+        "tool": "edit",
+        "path": "bounds.py",
+        "decision": "allow"
+      }
+    ]
+  },
+  "exit_code": 0,
+  "grader_passed": true,
+  "protected_file_unchanged": true,
+  "context_scope_filtered": true,
+  "persisted_stream_matches": true,
+  "tool_policies": [
+    {
+      "command": null,
+      "decision": "allow",
+      "matchedRules": [
+        0
+      ],
+      "resolvedTarget": "bounds.py",
+      "scope": "invocation",
+      "source": "explicit permissions file",
+      "target": "/home/ubuntu/hyper/evals/results/scopes-smoke-2026-10-04/repo/bounds.py",
+      "tool": "read"
+    },
+    {
+      "command": null,
+      "decision": "allow",
+      "matchedRules": [
+        1
+      ],
+      "resolvedTarget": "bounds.py",
+      "scope": "invocation",
+      "source": "explicit permissions file",
+      "target": "/home/ubuntu/hyper/evals/results/scopes-smoke-2026-10-04/repo/bounds.py",
+      "tool": "edit"
+    }
+  ],
+  "usage_iterations": [
+    {
+      "completion_tokens": 77,
+      "prompt_tokens": 638,
+      "total_tokens": 715
+    },
+    {
+      "completion_tokens": 158,
+      "prompt_tokens": 785,
+      "total_tokens": 943
+    },
+    {
+      "completion_tokens": 55,
+      "prompt_tokens": 1072,
+      "total_tokens": 1127
+    }
+  ],
+  "duration_seconds": 3.7325,
+  "cost": null,
+  "passed": true,
+  "fixture_before": "def clamp(value, low, high):\n    return min(high, max(low, value))\n",
+  "grader_checks": [
+    "clamp(-1,0,5)==0",
+    "clamp(9,0,5)==5",
+    "clamp(3,0,5)==3",
+    "clamp(3,5,0) raises ValueError"
+  ]
+}

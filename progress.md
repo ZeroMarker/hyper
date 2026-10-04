@@ -6,6 +6,8 @@
 
 2026-10-04（第九轮）：交付 P0-3b2b1 工具范围授权。宿主显式 rules 按相对 literal 路径/目录、完整 shell 命令匹配，重叠 deny > ask > allow，无命中取基础权限；请求与 canonical 目标共同判定，审批显示/固定目标，实际打开 inode 后拒绝范围硬链接。Linux 路径范围启用，非 Linux 明确拒绝；search/context 只读取 read allow，ask 留给显式 read。CLI allow 保留范围 ask/deny，ask 收紧范围 allow，deny 禁止所有 mutation；规则与匹配索引落事件。171 个 Rust 测试通过，完整 OS metadata/读取隔离、行政恢复、非 Linux 与先前历史投影仍未交付，P0-3 保持未完成。见 [实际边界](docs/audit-boundary.md)。
 
+本轮验证：171 个 Rust 测试（68 单元、9 取消、19 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。正式代码 `6382c84` 固定任务真实回归 30/30，长会话和错误修改恢复各 3/3；45 轮 usage 完整且 stdout/持久化一致，30 次 prune 成功。常规套件沿用明确 allow 与空范围规则，另一次模型范围冒烟在基础 deny、仅允许 read/edit bounds.py 时 1/1 通过，行为判定、其他文件保持、context 过滤与实际规则索引均验证。没有重跑替换，不从小样本或单任务推断因果/普遍安全收益，成本未知。见 [范围授权回归报告](evals/baselines/2026-10-04-scopes/report.md)。
+
 2026-10-03（第八轮）：交付 P0-3b2a Linux 直接文件工具描述符边界。openat2 逐层约束工作区目标，拒绝校验后 symlink/magic link/mount crossing，打开 inode 后检查审计硬链接；read/快照/修改共用同一描述符，search/context 也安全读取。搜索改为遵守 ignore 的原生文本匹配。六个确定性测试覆盖最终/父目录替换、打开后替换、后插入审计硬链接、正常内部链接与 FIFO；157 个 Rust 测试通过。元数据、非 Linux、行政恢复、宿主目录整体移动及内容陈旧编辑仍未完成；完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
 
 本轮验证：157 个 Rust 测试（64 单元、9 取消、9 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。正式代码 `0fc6dad` 的固定任务集真实回归 30/30，长会话与错误修改恢复各 3/3；45 轮 usage 完整且 stdout 与持久化 JSONL 一致，30 次 prune 全部成功。保留原任务/模型/预算/授权及外部 state 口径，未重跑替换；小样本不宣称质量或性能提升，成本未知。见 [描述符回归报告](evals/baselines/2026-10-03-descriptor/report.md)。
