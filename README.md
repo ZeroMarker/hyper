@@ -623,9 +623,13 @@ an event that reached the files cannot stay unrecorded.
   memory cap.
 - `ha artifacts` lists `runs/<run-id>/artifacts/`, which every `bash` call
   writes to: one file per non-empty stream, named
-  `<step>-<index>-bash-stdout.log` (up to 4 MiB each, with a marker where it was
-  cut short). For output between 256 KiB and 4 MiB, the artifact retains text
-  omitted from the event. Output beyond 4 MiB is not retained. `read` results
+  `<step>-<index>-<invocation>-bash-stdout.log` (up to 4 MiB each, with a marker
+  where it was cut short). For output between 256 KiB and 4 MiB, the artifact retains text
+  omitted from the event. Output beyond 4 MiB is not retained. Each invocation
+  has a unique filename. The model can pass an artifact path returned by `bash`
+  to `read`, with an optional nonnegative byte `offset` to read later chunks
+  (up to 64 KB per read). This access requires the ordinary `read` permission
+  and is limited to artifacts issued by the current run. `read` results
   are not copied — the whole file is still in the workspace — and the
   observations handed to a model are derived from payloads already in the log.
 - The dangerous-command check is a **lightweight denylist over shell words**

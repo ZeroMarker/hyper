@@ -1,7 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     process::{Child, Command, Stdio},
     thread::JoinHandle,
@@ -44,6 +45,8 @@ struct EventWriter<'a> {
     /// Earlier turns of the session this run belongs to, oldest first. Empty
     /// for a standalone run.
     history: Vec<SessionMessage>,
+    /// Only output files issued by this run can cross the workspace read boundary.
+    artifacts: RefCell<HashMap<String, fs::File>>,
     cancellation: CancellationToken,
 }
 impl EventWriter<'_> {
@@ -118,14 +121,22 @@ fn authorize(
     command: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>> {
     events.cancellation.check()?;
-    let resolved = match assert_allowed(
-        root,
-        step.mode,
-        events.execution_mode,
-        action,
-        target,
-        command,
-    ) {
+    // Issued artifacts select pinned files and never resolve arbitrary host paths.
+    let boundary = if tool == "read"
+        && target.is_some_and(|path| events.artifacts.borrow().contains_key(path))
+    {
+        Ok(None)
+    } else {
+        assert_allowed(
+            root,
+            step.mode,
+            events.execution_mode,
+            action,
+            target,
+            command,
+        )
+    };
+    let resolved = match boundary {
         Ok(resolved) => resolved,
         Err(error) => {
             events.write(
@@ -261,7 +272,7 @@ fn tool(
         return bash(events, run, root, step, index, command.trim());
     }
     if let Some(path) = instruction.strip_prefix("read:") {
-        return read(events, root, step, index, path.trim());
+        return read(events, root, step, index, path.trim(), 0);
     }
     if let Some(query) = instruction.strip_prefix("search:") {
         return search(events, root, step, index, query.trim(), 100);
@@ -482,8 +493,8 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "read",
-            description: "Read a text file inside the workspace (up to 64 KB).",
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            description: "Read a workspace text file or an output artifact path returned by bash (up to 64 KB). Use offset to read later bytes.",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["path"]}),
         },
         ToolSpec {
             name: "search",
@@ -516,8 +527,19 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
     specs
 }
 
-fn arg_str<'a>(args: &'a Value, key: &str) -> &'a str {
-    args.get(key).and_then(Value::as_str).unwrap_or_default()
+fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .with_context(|| format!("tool argument '{key}' must be a string"))
+}
+
+fn read_offset(args: &Value) -> Result<u64> {
+    match args.get("offset") {
+        None => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .context("tool argument 'offset' must be a nonnegative integer"),
+    }
 }
 
 fn run_agent_tool(
@@ -529,41 +551,53 @@ fn run_agent_tool(
     name: &str,
     arguments: &str,
 ) -> String {
-    let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-    // The allowlist must also bind model-initiated calls: the model can emit a
-    // tool call for a tool that was never advertised in `tools`.
-    let result = if !tool_allowed(step, name) {
-        Err(anyhow::anyhow!(
-            "tool '{name}' is not allowed for step '{}'",
-            step.id
-        ))
-    } else {
-        match name {
-            "bash" => bash(events, run, root, step, index, arg_str(&args, "command")),
-            "read" => read(events, root, step, index, arg_str(&args, "path")),
-            "search" => search(events, root, step, index, arg_str(&args, "query"), 100),
-            "write" => write_file(
-                events,
-                run,
-                root,
-                step,
-                index,
-                arg_str(&args, "path"),
-                arg_str(&args, "content"),
-            ),
-            "edit" => edit_file(
-                events,
-                run,
-                root,
-                step,
-                index,
-                arg_str(&args, "path"),
-                arg_str(&args, "search"),
-                arg_str(&args, "replace"),
-            ),
-            other => Err(anyhow::anyhow!("unknown tool: {other}")),
+    let result = (|| -> Result<(bool, Value)> {
+        let args: Value = serde_json::from_str(arguments).context("invalid tool arguments JSON")?;
+        if !args.is_object() {
+            bail!("tool arguments must be an object");
         }
-    };
+        // The allowlist must also bind model-initiated calls: the model can emit a
+        // tool call for a tool that was never advertised in `tools`.
+        if !tool_allowed(step, name) {
+            Err(anyhow::anyhow!(
+                "tool '{name}' is not allowed for step '{}'",
+                step.id
+            ))
+        } else {
+            match name {
+                "bash" => bash(events, run, root, step, index, arg_str(&args, "command")?),
+                "read" => read(
+                    events,
+                    root,
+                    step,
+                    index,
+                    arg_str(&args, "path")?,
+                    read_offset(&args)?,
+                ),
+                "search" => search(events, root, step, index, arg_str(&args, "query")?, 100),
+                "write" => write_file(
+                    events,
+                    run,
+                    root,
+                    step,
+                    index,
+                    arg_str(&args, "path")?,
+                    arg_str(&args, "content")?,
+                ),
+                "edit" => edit_file(
+                    events,
+                    run,
+                    root,
+                    step,
+                    index,
+                    arg_str(&args, "path")?,
+                    arg_str(&args, "search")?,
+                    arg_str(&args, "replace")?,
+                ),
+                other => Err(anyhow::anyhow!("unknown tool: {other}")),
+            }
+        }
+    })();
     observation(result)
 }
 
@@ -614,11 +648,13 @@ fn workspace_context(root: &Path, permissions: &ToolPermissions) -> Result<Strin
         .current_dir(root)
         .output()
     {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .take(300)
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
+        Ok(output) if output.status.success() || output.status.code() == Some(1) => {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .take(300)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        }
         Ok(output) => bail!(
             "rg failed to enumerate workspace files: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -930,18 +966,19 @@ fn bash(
     let stdout = truncate_utf8(&full_stdout, MAX_CAPTURED_OUTPUT);
     let stderr = truncate_utf8(&full_stderr, MAX_CAPTURED_OUTPUT);
     let truncated = stdout_total > stdout.len() || stderr_total > stderr.len();
+    let invocation = workspace::id();
     let stdout_artifact = write_output_artifact(
+        events,
         run,
-        root,
-        &artifact_name(&step.id, index, "stdout"),
+        &artifact_name(&step.id, index, &invocation, "stdout"),
         &full_stdout,
         stdout_bytes.len(),
         stdout_total,
     )?;
     let stderr_artifact = write_output_artifact(
+        events,
         run,
-        root,
-        &artifact_name(&step.id, index, "stderr"),
+        &artifact_name(&step.id, index, &invocation, "stderr"),
         &full_stderr,
         stderr_bytes.len(),
         stderr_total,
@@ -994,7 +1031,7 @@ fn bash(
 ///
 /// A step id is authored in `task.json`, so it is reduced to characters that
 /// cannot form a path: the name stays one file name inside `artifacts/`.
-fn artifact_name(step_id: &str, index: usize, stream: &str) -> String {
+fn artifact_name(step_id: &str, index: usize, invocation: &str, stream: &str) -> String {
     let cleaned: String = step_id
         .chars()
         .map(|c| {
@@ -1007,17 +1044,17 @@ fn artifact_name(step_id: &str, index: usize, stream: &str) -> String {
         .take(48)
         .collect();
     let cleaned = if cleaned.is_empty() { "step" } else { &cleaned };
-    format!("{cleaned}-{index}-bash-{stream}.log")
+    format!("{cleaned}-{index}-{invocation}-bash-{stream}.log")
 }
 
 /// Write one stream's full output where `ha artifacts` can list it.
 ///
-/// Returns the workspace-relative path to record, or `None` when the stream
+/// Returns the issued artifact path, or `None` when the stream
 /// was empty — an artifact directory full of zero-byte files would hide the
 /// ones that matter.
 fn write_output_artifact(
+    events: &EventWriter<'_>,
     run: &RunPaths,
-    root: &Path,
     name: &str,
     text: &str,
     kept: usize,
@@ -1031,11 +1068,19 @@ fn write_output_artifact(
     } else {
         format!("{text}\n... [truncated after {total} bytes] ...\n")
     };
-    fs::write(run.artifacts.join(name), body)?;
-    let relative = run.artifacts.strip_prefix(root).unwrap_or(&run.artifacts);
-    Ok(Some(
-        relative.join(name).to_string_lossy().replace('\\', "/"),
-    ))
+    let path = run.artifacts.join(name);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(body.as_bytes())?;
+    let reference = path.to_string_lossy().replace('\\', "/");
+    events
+        .artifacts
+        .borrow_mut()
+        .insert(reference.clone(), file);
+    Ok(Some(reference))
 }
 
 /// Read a child pipe to EOF on its own thread, keeping at most `cap` bytes.
@@ -1125,26 +1170,51 @@ fn read(
     step: &StepSpec,
     index: usize,
     path: &str,
+    offset: u64,
 ) -> Result<(bool, Value)> {
     if path.trim().is_empty() {
         bail!("read: path must not be empty")
     }
-    let resolved = authorize(events, root, step, index, "read", "read", Some(path), None)?
-        .context("missing read target")?;
+    let artifact = events.artifacts.borrow().contains_key(path);
+    let resolved = authorize(events, root, step, index, "read", "read", Some(path), None)?;
+    if !artifact && resolved.is_none() {
+        bail!("missing read target");
+    }
     events.write(
         "tool.started",
-        json!({"tool":"read","input":{"path":path}}),
+        json!({"tool":"read","input":{"path":path,"offset":offset},"artifact":artifact}),
         Some(&step.id),
         Some(index),
     )?;
-    let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
-    file.check_scope_links(&events.permissions, "read")?;
-    let bytes = file.read()?;
-    let max = 64_000.min(bytes.len());
-    let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()});
-    events.write("tool.finished",json!({"tool":"read","path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()}),Some(&step.id),Some(index))?;
+    let (bytes, total) = if let Some(resolved) = resolved {
+        let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
+        file.check_scope_links(&events.permissions, "read")?;
+        let bytes = file.read()?;
+        let total = bytes.len() as u64;
+        let start = offset.min(total) as usize;
+        (
+            bytes[start..start + 64_000.min(bytes.len() - start)].to_vec(),
+            total,
+        )
+    } else {
+        let mut artifacts = events.artifacts.borrow_mut();
+        let file = artifacts.get_mut(path).context("missing issued artifact")?;
+        let total = file.metadata()?.len();
+        file.seek(SeekFrom::Start(offset.min(total)))?;
+        let mut bytes = Vec::new();
+        file.take(64_000).read_to_end(&mut bytes)?;
+        (bytes, total)
+    };
+    let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes),
+        "truncated":total.saturating_sub(offset)>bytes.len() as u64,"bytes":total});
+    let mut event_payload = payload.clone();
+    event_payload["tool"] = json!("read");
+    event_payload["offset"] = json!(offset);
+    event_payload["artifact"] = json!(artifact);
+    events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
     Ok((true, payload))
 }
+
 fn search(
     events: &EventWriter<'_>,
     root: &Path,
@@ -1274,6 +1344,9 @@ fn edit_file(
 ) -> Result<(bool, Value)> {
     if path.trim().is_empty() {
         bail!("edit: path must not be empty")
+    }
+    if search.is_empty() {
+        bail!("edit: search text must not be empty")
     }
     let resolved = authorize(events, root, step, index, "edit", "write", Some(path), None)?
         .context("missing edit target")?;
@@ -1536,6 +1609,7 @@ fn run_task_inner(
         sink,
         execution_mode,
         history,
+        artifacts: RefCell::new(HashMap::new()),
         cancellation,
     };
     events.write(
@@ -2141,6 +2215,190 @@ mod tests {
         }
     }
 
+    fn with_events(test: impl FnOnce(&mut EventWriter<'_>, &RunPaths, &Path)) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(dir.path()).unwrap();
+        let run_id = workspace::id();
+        let run = workspace.prepare_run(&run_id).unwrap();
+        let task = prompt_to_task("test", AgentMode::Build);
+        let mut events = EventWriter {
+            run_id,
+            task: &task,
+            path: &run.events,
+            workspace: &workspace,
+            permissions: legacy_permissions(false),
+            gate: None,
+            sink: None,
+            execution_mode: ExecutionMode::default(),
+            history: Vec::new(),
+            artifacts: RefCell::new(HashMap::new()),
+            cancellation: CancellationToken::new(),
+        };
+        test(&mut events, &run, dir.path());
+    }
+
+    #[test]
+    fn invalid_agent_arguments_never_mutate_files() {
+        with_events(|events, run, root| {
+            fs::write(root.join("important.txt"), "keep this").unwrap();
+            let step = gated_step(vec!["write", "edit", "bash", "read", "search"]);
+            for (tool, args) in [
+                ("write", r#"{"path":"important.txt"}"#),
+                ("write", r#"{"path":"important.txt","content":null}"#),
+                ("write", r#"{"path":"important.txt","content":42}"#),
+                ("write", r#"{"path":false,"content":"text"}"#),
+                ("write", "[1,2]"),
+                ("write", "{"),
+                ("edit", r#"{"path":"important.txt","search":"keep"}"#),
+                ("edit", r#"{"path":"important.txt","replace":"changed"}"#),
+                (
+                    "edit",
+                    r#"{"path":"important.txt","search":"","replace":"changed"}"#,
+                ),
+                ("bash", "{}"),
+                ("search", "{}"),
+                ("read", r#"{"path":"important.txt","offset":-1}"#),
+                ("read", r#"{"path":"important.txt","offset":"1"}"#),
+            ] {
+                let result = run_agent_tool(events, run, root, &step, 0, tool, args);
+                assert!(result.starts_with("tool error:"), "{tool}: {result}");
+                assert_eq!(
+                    fs::read_to_string(root.join("important.txt")).unwrap(),
+                    "keep this"
+                );
+            }
+            assert!(fs::read_dir(&run.checkpoints).unwrap().next().is_none());
+            // An explicit empty string remains a valid intentional write.
+            let result = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "write",
+                r#"{"path":"important.txt","content":""}"#,
+            );
+            assert!(!result.starts_with("tool error:"), "{result}");
+            assert_eq!(fs::read_to_string(root.join("important.txt")).unwrap(), "");
+        });
+    }
+
+    #[test]
+    fn artifact_reads_are_bounded_run_scoped_and_permission_checked() {
+        with_events(|events, run, root| {
+            let body = format!("{}TAIL", "x".repeat(70_000));
+            let reference =
+                write_output_artifact(events, run, "output.log", &body, body.len(), body.len())
+                    .unwrap()
+                    .unwrap();
+            let step = gated_step(vec!["read"]);
+            let (_, first) = read(events, root, &step, 0, &reference, 0).unwrap();
+            assert_eq!(first["content"].as_str().unwrap().len(), 64_000);
+            assert_eq!(first["truncated"], true);
+            let (_, tail) = read(events, root, &step, 0, &reference, 70_000).unwrap();
+            assert_eq!(tail["content"], "TAIL");
+            assert_eq!(tail["truncated"], false);
+            let (_, end) = read(events, root, &step, 0, &reference, u64::MAX).unwrap();
+            assert_eq!(end["content"], "");
+            // Existing host files, even other run artifacts, are not issued references.
+            let other = run.artifacts.parent().unwrap().join("summary.json");
+            fs::write(&other, "private").unwrap();
+            for path in [
+                other.to_str().unwrap(),
+                &format!("{reference}/../summary.json"),
+            ] {
+                assert!(
+                    read(events, root, &step, 0, path, 0)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("escapes workspace")
+                );
+            }
+            events.artifacts.borrow_mut().remove(&reference);
+            assert!(read(events, root, &step, 0, &reference, 0).is_err());
+            let reference = write_output_artifact(events, run, "second.log", "ok", 2, 2)
+                .unwrap()
+                .unwrap();
+            events.permissions.read = Permission::Deny;
+            assert!(
+                read(events, root, &step, 0, &reference, 0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("permission denies")
+            );
+            events.permissions.read = Permission::Ask;
+            assert!(
+                read(events, root, &step, 0, &reference, 0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("interactive approval")
+            );
+            events.permissions.read = Permission::Allow;
+            let result = run_agent_tool(
+                events,
+                run,
+                root,
+                &gated_step(vec!["search"]),
+                0,
+                "read",
+                &json!({"path":reference}).to_string(),
+            );
+            assert!(result.contains("not allowed"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_reads_keep_the_issued_inode_after_path_replacement() {
+        with_events(|events, run, root| {
+            let reference = write_output_artifact(events, run, "output.log", "original", 8, 8)
+                .unwrap()
+                .unwrap();
+            fs::remove_file(&reference).unwrap();
+            let other = root.join("other.txt");
+            fs::write(&other, "replacement").unwrap();
+            std::os::unix::fs::symlink(&other, &reference).unwrap();
+            let (_, result) =
+                read(events, root, &gated_step(vec!["read"]), 0, &reference, 0).unwrap();
+            assert_eq!(result["content"], "original");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeated_bash_calls_keep_separate_artifacts() {
+        with_events(|events, run, root| {
+            let step = gated_step(vec!["bash", "read"]);
+            let (_, first) = bash(events, run, root, &step, 0, "printf FIRST").unwrap();
+            let (_, second) = bash(events, run, root, &step, 0, "printf SECOND").unwrap();
+            let a = first["stdoutArtifact"].as_str().unwrap();
+            let b = second["stdoutArtifact"].as_str().unwrap();
+            assert_ne!(a, b);
+            assert_eq!(fs::read_to_string(a).unwrap(), "FIRST");
+            assert_eq!(fs::read_to_string(b).unwrap(), "SECOND");
+            let result = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                &json!({"path":a}).to_string(),
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&result).unwrap()["content"],
+                "FIRST"
+            );
+        });
+    }
+
+    #[test]
+    fn empty_workspace_has_valid_automatic_context() {
+        let root = tempfile::tempdir().unwrap();
+        let context = workspace_context(root.path(), &ToolPermissions::default()).unwrap();
+        assert!(context.contains("Files:\n\n"), "{context}");
+    }
+
     #[test]
     fn agent_tool_calls_respect_step_allowlist() {
         let dir = tempfile::tempdir().unwrap();
@@ -2158,6 +2416,7 @@ mod tests {
             sink: None,
             execution_mode: ExecutionMode::default(),
             history: Vec::new(),
+            artifacts: RefCell::new(HashMap::new()),
             cancellation: CancellationToken::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the

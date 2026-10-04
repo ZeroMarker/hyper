@@ -1340,6 +1340,94 @@ fn stub_config(dir: &std::path::Path, base_url: &str) -> std::path::PathBuf {
     config_home
 }
 
+#[test]
+fn cli_model_can_start_in_an_empty_workspace() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"ready"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![reply]);
+    let root = tempdir().unwrap();
+    let config = tempdir().unwrap();
+    let config_home = stub_config(config.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "plan", "create a project"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn malformed_model_write_and_edit_calls_preserve_existing_content() {
+    let tools = r#"{"model":"stub","choices":[{"message":{"tool_calls":[
+        {"id":"c1","type":"function","function":{"name":"write","arguments":"{\"path\":\"important.txt\"}"}},
+        {"id":"c2","type":"function","function":{"name":"write","arguments":"{\"path\":\"important.txt\",\"content\":null}"}},
+        {"id":"c3","type":"function","function":{"name":"edit","arguments":"{\"path\":\"important.txt\",\"search\":\"keep\"}"}}
+    ]}}]}"#;
+    let final_reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![tools, final_reply]);
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("important.txt"), "keep this content").unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "fix the file"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join("important.txt")).unwrap(),
+        "keep this content"
+    );
+    let requests = bodies.lock().unwrap();
+    let followup: serde_json::Value = serde_json::from_str(&requests[1]).unwrap();
+    let results: Vec<_> = followup["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(results.len(), 3);
+    for result in results {
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("tool error:")
+        );
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "checkpoint.created" || event["type"] == "tool.started")
+    );
+}
+
 /// A conversation keeps the user's prompt and the model's answer, and later
 /// turns replay the earlier ones so a follow-up is answered with context.
 #[test]
@@ -1994,16 +2082,18 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
     let relative = payload["stdoutArtifact"]
         .as_str()
         .expect("the artifact must be named in the event");
+    let path = std::path::Path::new(relative);
     assert_eq!(
-        relative,
+        path.parent().unwrap(),
         Workspace::open(dir.path())
             .unwrap()
             .paths
             .runs
             .join(&summary.run_id)
-            .join("artifacts/step-0-bash-stdout.log")
-            .to_string_lossy()
+            .join("artifacts")
     );
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with("step-0-") && name.ends_with("-bash-stdout.log"));
     let kept = fs::read_to_string(dir.path().join(relative)).unwrap();
     assert!(
         kept.len() > 256 * 1024,
@@ -2018,16 +2108,7 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
         "the event keeps only the head of the output"
     );
     // An empty stream leaves no zero-byte file behind to wade through.
-    assert!(
-        !Workspace::open(dir.path())
-            .unwrap()
-            .paths
-            .runs
-            .join(&summary.run_id)
-            .join("artifacts")
-            .join("step-0-bash-stderr.log")
-            .exists()
-    );
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
 
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
         .env("HYPER_APPROVAL", "allow")
@@ -2037,7 +2118,7 @@ fn command_output_past_the_event_cap_is_kept_as_an_artifact() {
         .unwrap();
     assert_eq!(output.status.code(), Some(0));
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("step-0-bash-stdout.log"),
+        String::from_utf8_lossy(&output.stdout).contains(name),
         "ha artifacts must list it"
     );
 }
