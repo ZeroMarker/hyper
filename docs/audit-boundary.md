@@ -272,7 +272,9 @@ O_NOFOLLOW 的最终分量限制见 [Apple open 文档](https://developer.apple.
 新增五项 walker 单元，并把六项 ToolFile 路径替换测试用于 macOS；三个原生集成验证
 嵌套创建/读取/编辑/快照、内部链接、审计硬链接拒绝与 search 过滤、CLI JSONL 持久化
 一致性，另有自动上下文审计 alias 过滤单元。Linux 本地 220 个 Rust 与 14 个离线评测、
-fmt/Clippy/release 通过；新增 macOS 原生 CI，原生结果待运行确认。
+fmt/Clippy/release 通过；实现 `cc5e81e` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37225246393) 全部成功，
+macOS 原生 aarch64-apple-darwin 上述 15 项测试通过，Linux x86 回归及 Windows x64
+六项硬链接测试同样通过。不推断 macOS Intel、其他文件系统或 macOS 整套测试已验证。
 
 仅拒绝跨设备路径，不宣称 Linux NO_XDEV 等价边界：同设备 mount alias、可信根的
 宿主 ancestor 替换、打开后宿主整体移动目录、同 inode 并发写入或新增 alias 仍未隔离。
@@ -291,4 +293,4 @@ macOS 的 path rules 继续明确拒绝，受限 shell 继续不支持；独立 
 P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权；下一项为 P0-3b2b2：元数据、剩余路径竞争与 OS 范围隔离；显式 unrestricted 仍有
 宿主权限。Windows 直接工具已补保守硬链接检查，macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
-Linux 整套回归与 Windows x64 六项针对性测试已验证；macOS 原生入口测试待 CI 确认，完整隔离未验证。
+Linux 整套回归与 Windows x64 六项针对性测试已验证；macOS arm64 十五项针对性测试已验证，完整隔离未验证。

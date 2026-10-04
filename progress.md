@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-2026-10-04（第十六轮）：推进 P0-3b2b2 的 macOS 直接文件工具描述符入口。逐层 openat/O_NOFOLLOW 固定目录，mkdirat 后安全重开、O_EXCL 创建，拒绝校验后最终/parent 链接替换与跨设备路径；读取/快照源/修改绑定同一文件 FD，search/context 共用。新增五项 walker 单元、复用六项 ToolFile 测试，三个 macOS 原生工具/CLI 集成及一个上下文过滤单元；本地 Linux 220 个 Rust、14 个离线评测、fmt/Clippy/release 通过，macOS 原生 CI 待确认。同设备挂载别名、宿主整体目录移动/同 inode 并发、快照输出/独立库快照/行政恢复、path rules 与受限 shell 未扩展，完整 P0-3 不关闭。未重跑模型基线，本轮生产改动仅作用 macOS，保留此前 Linux 30/30 历史基线。见 [范围与验证](docs/audit-boundary.md)。
+2026-10-04（第十六轮）：推进 P0-3b2b2 的 macOS 直接文件工具描述符入口。逐层 openat/O_NOFOLLOW 固定目录，mkdirat 后安全重开、O_EXCL 创建，拒绝校验后最终/parent 链接替换与跨设备路径；读取/快照源/修改绑定同一文件 FD，search/context 共用。新增五项 walker 单元、复用六项 ToolFile 测试，三个 macOS 原生工具/CLI 集成及一个上下文过滤单元；本地 Linux 220 个 Rust、14 个离线评测、fmt/Clippy/release 通过，实现 `cc5e81e` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37225246393) 全部成功，macOS arm64 原生十五项、Windows x64 六项及 Linux x86 回归通过。同设备挂载别名、宿主整体目录移动/同 inode 并发、快照输出/独立库快照/行政恢复、path rules 与受限 shell 未扩展，完整 P0-3 不关闭。未重跑模型基线，本轮生产改动仅作用 macOS，保留此前 Linux 30/30 历史基线。见 [范围与验证](docs/audit-boundary.md)。
 
 2026-10-04（第十五轮）：推进 P0 平台隔离，Linux workspace-write/read-only 共用 seccomp syscall 过滤，拒绝 socket 创建/连接及带地址或消息式收发、io_uring、pidfd_getfd、ptrace/process_vm_writev；保留 read-only metadata 禁止，workspace-write chmod/utime 与 pipes/文件兼容。先检查原生 ABI，拒绝 compat/x32，不支持架构或安装失败拒绝受限 shell。新增一个 BPF 单元和五个原生集成（含 Rust 编译/子进程启动），通过两模式线程/exec/预开 FD/raw syscall 验证，unrestricted 真实 UDP/路径及抽象 Unix socket 正向兼容；本地 Linux/aarch64 215 个 Rust、14 个离线评测及 fmt/Clippy/release 通过。匿名 AF_UNIX socketpair/无地址收发允许，命名本地编译服务受限，主动继承 socket 的通用 I/O 和宿主预建立共享映射不覆盖，metadata/外部读取/其他平台继续待办；完整 P0-3 不关闭。见 [socket 边界](docs/audit-boundary.md)。
 
