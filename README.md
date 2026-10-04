@@ -396,8 +396,15 @@ Symlink substitutions, magic links and nested mount crossings are refused.
 Existing internal symlinks are resolved before opening. Unsupported Linux
 kernels or syscall restrictions fail closed; other platforms retain path checks.
 Search enumerates ignored-filtered text files and reads them through this same
-entry point. Metadata isolation, non-Linux descriptor confinement, administrative
-restore races and OS-level range isolation remain pending. `unrestricted`
+entry point. Linux restore/undo pin snapshot and target directory descriptors,
+stage the complete file outside the workspace, then atomically replace the target
+entry; removal uses unlinkat. Other hardlink aliases are preserved. Restored bytes
+and snapshot permission bits replace the target; ownership/ACLs/xattrs are not
+reconstructed. The workspace parent must permit external staging on the same
+mount as the target. Snapshot storage may be on another mount. Source or commit
+errors retain the old target, though newly required directories can remain.
+Metadata isolation, non-Linux descriptor confinement and OS-level range isolation
+remain pending. `unrestricted`
 shells retain host permissions, including access to external state. See the
 [measured boundaries](docs/audit-boundary.md).
 Shell tool stdin is closed; supply command input with pipes or redirection,

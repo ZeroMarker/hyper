@@ -835,18 +835,7 @@ pub fn create_checkpoint(root: &Path, dir: &Path, target: &str) -> Result<Checkp
     Ok(cp)
 }
 pub fn restore_checkpoint(root: &Path, cp: &Checkpoint) -> Result<()> {
-    let target = resolve_path(root, &cp.target_path)?;
-    if !cp.existed {
-        if target.exists() {
-            fs::remove_file(target)?;
-        }
-        return Ok(());
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&cp.snapshot_path, target)?;
-    Ok(())
+    crate::restore_file::restore(root, cp)
 }
 
 pub(crate) fn initialize_database(path: &Path) -> Result<Connection> {

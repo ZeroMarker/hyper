@@ -549,11 +549,8 @@ fn read_task(path: &PathBuf) -> Result<TaskSpec> {
 }
 
 fn undo(root: &std::path::Path, run_id: &str) -> Result<()> {
-    let dir = Workspace::open(root)?
-        .paths
-        .runs
-        .join(run_id)
-        .join("checkpoints");
+    let workspace = Workspace::open(root)?;
+    let dir = workspace.paths.runs.join(run_id).join("checkpoints");
     let files = fs::read_dir(&dir)
         .with_context(|| format!("run {run_id} has no checkpoint directory"))?
         .filter_map(Result::ok)

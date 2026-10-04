@@ -10,6 +10,7 @@ pub mod model;
 pub mod permissions;
 pub mod policy;
 pub mod resource;
+mod restore_file;
 pub mod sandbox;
 pub mod state;
 mod tool_file;

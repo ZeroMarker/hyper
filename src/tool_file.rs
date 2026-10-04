@@ -127,7 +127,7 @@ impl ToolFile {
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
+pub(crate) mod linux {
     use super::*;
     use std::{
         ffi::CString,
@@ -144,14 +144,29 @@ mod linux {
         resolve: u64,
     }
 
-    fn open_at(parent: &File, path: &Path, flags: i32, mode: u64) -> std::io::Result<File> {
+    pub(crate) fn open_at(
+        parent: &File,
+        path: &Path,
+        flags: i32,
+        mode: u64,
+    ) -> std::io::Result<File> {
+        open_at_resolve(parent, path, flags, mode, 0x01 | 0x02 | 0x04 | 0x08)
+    }
+
+    pub(crate) fn open_at_resolve(
+        parent: &File,
+        path: &Path,
+        flags: i32,
+        mode: u64,
+        resolve: u64,
+    ) -> std::io::Result<File> {
         let path = CString::new(path.as_os_str().as_bytes())?;
         // NO_XDEV | NO_MAGICLINKS | NO_SYMLINKS | BENEATH. Existing internal
         // symlinks are resolved by policy first; a substituted link is refused.
         let how = OpenHow {
             flags: (flags | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
             mode,
-            resolve: 0x01 | 0x02 | 0x04 | 0x08,
+            resolve,
         };
         let fd = unsafe {
             libc::syscall(
@@ -168,12 +183,11 @@ mod linux {
         Ok(unsafe { File::from_raw_fd(fd as i32) })
     }
 
-    pub(super) fn open(
+    pub(crate) fn parent(
         root: &Path,
         relative: &Path,
-        writable: bool,
         create: bool,
-    ) -> Result<(File, bool)> {
+    ) -> Result<(File, std::ffi::OsString)> {
         let mut parent = File::open(root)?;
         let components: Vec<_> = relative.components().collect();
         let Some((name, directories)) = components.split_last() else {
@@ -200,6 +214,16 @@ mod linux {
                 }
             };
         }
+        Ok((parent, name.as_os_str().to_owned()))
+    }
+
+    pub(crate) fn open(
+        root: &Path,
+        relative: &Path,
+        writable: bool,
+        create: bool,
+    ) -> Result<(File, bool)> {
+        let (parent, name) = parent(root, relative, create)?;
         let path = Path::new(name.as_os_str());
         let flags = if writable {
             libc::O_RDWR

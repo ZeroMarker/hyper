@@ -83,7 +83,7 @@ read/write/edit、search 和自动上下文共享此入口。search 使用 respe
 六个确定性测试覆盖最终 link、父目录 link、打开后路径替换、校验后审计硬链接、
 正常内部链接以及无写者 FIFO。打开后替换路径不会重定向读/快照/写，操作绑定原 inode；
 这不保证路径名称仍指向该 inode，也不防并发内容写者造成陈旧编辑。
-宿主移动整个目录到工作区外、admin restore/undo 的路径竞争与非 Linux 原生保护仍待验收。
+宿主移动整个目录到工作区外与非 Linux 原生保护仍待验收；Linux restore/undo 的描述符提交已补齐，见下文。
 
 ## 工具路径与精确命令授权（P0-3b2b1）
 
@@ -104,6 +104,36 @@ deny 禁止所有 mutation。运行固定完整有效规则和来源，每次 to
 及复合命令拒绝、别名和硬链接、审批期间替换、CLI 参数优先级、搜索和实际 context 投影。
 范围不限制 bash 内部读写到单个目录，不固定 PATH 可执行程序或仓库脚本内容，也不清除
 先前会话中的内容/用户输入；完整 OS 读取边界和历史投影的保密策略需另外定义。
+
+## Linux restore/undo 的描述符与原子提交
+
+[restore_file.rs](../src/restore_file.rs) 在读取快照前解析其 parent，并从文件系统根描述符
+用 openat2 再打开完整 canonical 路径，拒绝新的 ancestor/final symlink、magic link 和
+非 regular file；读取绑定同一源 inode，允许快照存储在不同 mount。
+目标 parent 沿工作区描述符用既有 BENEATH/NO_SYMLINKS/NO_XDEV 入口打开，新目录
+逐层 mkdirat 后重新打开。操作不重新按完整目标路径找文件。
+
+恢复已有文件时，工作区父目录中的私有 `.hyper-restore-*` 临时目录保存完整副本与快照
+permission bits，并 sync 文件，再从该目录描述符 renameat 到目标 parent 描述符。
+原子替换最终目录项，不跟随校验后插入的 link，也不改动目标原 inode 的其他硬链接。
+依据 [renameat 手册](https://man7.org/linux/man-pages/man2/rename.2.html)，源/目标必须在
+同一 mount；不可写的外部 staging parent、挂载点工作区或提交错误均拒绝，不能降级为
+工作区内易被同 UID shell 替换名称的 temp。快照本身可跨文件系统，本环境 ext4→tmpfs
+实际复制/恢复通过。非 regular/坏源在创建目标目录之前拒绝；失败提交保持原目录项，
+已创建的缺失父目录可能留下。普通错误自动清理 stage；进程被强杀可留下外部临时目录。
+内容/失败保证实测于本地 ext4/tmpfs，不对网络文件系统或断电后目录项持久性作同等承诺，
+也不重建 ACL/xattr/owner。
+
+恢复本次新建文件的 checkpoint 用 parent FD + unlinkat，只删除该目录项；缺失文件/parent
+是幂等成功，最终 link 不被跟随，目录不会递归删。`undo` 持有 Workspace lease 直到操作
+完成。行政恢复拒绝旧 `.harness` 目标；独立库 create_checkpoint 的路径读取与非 Linux
+恢复仍采用旧路径方式，不将它们算入本次保证。
+
+10 个确定性/原生单元测试及 4 个 restore 集成测试覆盖目标/父目录/源父目录替换、打开
+parent 后目录改名、删除最终 link、硬链接别名保持、二进制/权限、无目标幂等、失败清理、
+跨 mount 快照以及真正受限 shell 对外部 staging 的写/删/移动/硬链接拒绝；CLI restore/undo
+实际恢复旧文件和移除新文件。metadata 修改仍未被 OS 限制，可导致拒绝服务；宿主整体
+移动目录、unrestricted/外部不参与的写者和非 Linux 原生边界仍另列验收。
 
 ## 已验证的剩余限制与下一项
 

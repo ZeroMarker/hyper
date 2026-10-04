@@ -4,6 +4,8 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-04（第十轮）：交付 Linux restore/undo 的描述符提交。快照源完整 canonical 路径从根 FD 再打开，拒绝替换后的父/最终 link；目标 parent 由工作区 openat2 入口固定。外部私有 staging 完整复制、权限位、sync 后 renameat 原子替换，最终 link 与硬链接不会重定向写入；新增文件用 unlinkat 删除且缺失幂等。源存储可跨 mount，临时副本必须与目标同 mount，不可用时拒绝，不降级到工作区内临时文件；undo lease 覆盖全过程。185 个 Rust 测试通过，10 个原生/确定性单元和 4 个 CLI/API 集成覆盖链接替换、失败保持、二进制/权限、跨 mount 与真实受限 shell staging 攻击。metadata、非 Linux、宿主整体目录移动与独立库 create_checkpoint 路径仍未交付，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
+
 2026-10-04（第九轮）：交付 P0-3b2b1 工具范围授权。宿主显式 rules 按相对 literal 路径/目录、完整 shell 命令匹配，重叠 deny > ask > allow，无命中取基础权限；请求与 canonical 目标共同判定，审批显示/固定目标，实际打开 inode 后拒绝范围硬链接。Linux 路径范围启用，非 Linux 明确拒绝；search/context 只读取 read allow，ask 留给显式 read。CLI allow 保留范围 ask/deny，ask 收紧范围 allow，deny 禁止所有 mutation；规则与匹配索引落事件。171 个 Rust 测试通过，完整 OS metadata/读取隔离、行政恢复、非 Linux 与先前历史投影仍未交付，P0-3 保持未完成。见 [实际边界](docs/audit-boundary.md)。
 
 本轮验证：171 个 Rust 测试（68 单元、9 取消、19 权限、54 run、16 state、5 task）、10 个评测测试、fmt、Clippy 与 release 构建通过。正式代码 `6382c84` 固定任务真实回归 30/30，长会话和错误修改恢复各 3/3；45 轮 usage 完整且 stdout/持久化一致，30 次 prune 成功。常规套件沿用明确 allow 与空范围规则，另一次模型范围冒烟在基础 deny、仅允许 read/edit bounds.py 时 1/1 通过，行为判定、其他文件保持、context 过滤与实际规则索引均验证。没有重跑替换，不从小样本或单任务推断因果/普遍安全收益，成本未知。见 [范围授权回归报告](evals/baselines/2026-10-04-scopes/report.md)。
