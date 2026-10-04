@@ -145,6 +145,12 @@ than silently ignored. Each model's protocol is recorded in the run's
 `model.started` event, so a surprising answer is always traceable to the
 endpoint it came from.
 
+Explicit Chat truncation/filtering and incomplete Responses replies fail before
+any tool in that reply executes. `model.failed` and run failure details retain
+bounded completion diagnostics without tool argument text. Missing usage stays
+unknown; failed streams are not automatically replayed. See
+[completion behavior and remaining limits](docs/model-completion.md).
+
 Natural-language `plan`, `build`, and TUI prompts use the configured provider.
 Explicit instruction prefixes continue to use local deterministic tools and do
 not require an API key.

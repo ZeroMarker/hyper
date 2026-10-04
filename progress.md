@@ -4,6 +4,8 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-04（第十三轮）：交付 Chat/Responses 明确未完成拒绝与有界流式诊断。length/content_filter 与 Responses incomplete/failed/矛盾完成状态拒绝整个工具批次；SSE/普通 JSON 兼容路径覆盖，缺终结/残缺参数继续失败。model.failed 与 step/run 失败 details 保留协议、终结、允许列表原因、帧/文本/调用计数、最多 16 项工具元数据、完整 reportedUsage 和 JSON 类别/位置，不含参数正文或任意 provider 错误文本；不自动重试已消费回复，取消/事件发布失败保持独立。Messages 缺计数不再补零。评测单独保存 completion_failures，失败用量仍不并入完整总量，不重算历史报告。新增七个协议单元、一个有界诊断单元和 CLI 集成验收；本地 209 个 Rust 测试、14 个评测测试、fmt、Clippy 与 release 构建通过。已有 PTY 退出检查的两次 poll 竞争补二次谓词核对。完整 P1-5 不关闭，见 [完成语义及后续](docs/model-completion.md)。
+
 2026-10-04（第十二轮）：交付 Linux 独立库 create_checkpoint 与共用快照提交。源先解析再经工作区目录 FD/openat2 固定，缺失只认 ENOENT，非法/特殊/权限错误拒绝且不创建源 parent。ToolFile 与库共用输出 writer，固定 canonical 输出 dir FD，O_EXCL 创建 snapshot/临时 JSON，复制源 FD bytes/mode、sync 后 renameat2(NOREPLACE) 发布完整清单；冲突不覆盖，普通失败尽力清理新建条目。manifest 0600、snapshot_path 绝对化，支持相对 root/dir 和跨 mount 存储。201 个 Rust 测试、13 个评测测试、fmt、Clippy 与 release 构建通过；六个确定性单元和四个 API 集成覆盖源/输出替换、inode 固定/rewind、碰撞/失败回滚、binary/mode、缺失/幂等与实际 ext4/tmpfs 创建恢复。宿主 API 不应用模型权限/审批，需信任输出 dir；非 Linux、同 inode 并发、宿主目录移动、metadata 与断电持久性仍另列边界，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
 
 本轮正式代码 `267d206` 固定任务真实回归 29/30；错误修改恢复、长会话、只读规划各 3/3。45 轮 stdout/持久化一致，30 次 prune 成功；29/30 次、44/45 轮用量完整，缺失最终回复标未知并保留此前用量。保留 Python 深文件任务流式工具参数残缺（EOF column 83）失败，未执行修改或生成快照的工具，独立代码判定失败；日志不能确定 provider/适配因素，不归因快照提交。未重跑替换或修改本轮 usage；运行版本、二进制/runner/fixture/grader digest 均核验。成本未知，小样本不推断因果，原生安全边界另验。见 [快照回归报告](evals/baselines/2026-10-04-checkpoint/report.md)。

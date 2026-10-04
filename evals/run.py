@@ -138,6 +138,7 @@ def invoke(command, root, env, output, timeout):
         'duration_seconds': round(time.monotonic() - started, 4),
         'first_delta_seconds': first('model.delta'), 'first_tool_result_seconds': first('tool.finished'),
         'model_iterations': len(iterations), **usage_metrics(events),
+        'completion_failures': [e['payload'] for e in events if e['type'] == 'model.failed'],
         'tool_results': sum(e['type'] == 'tool.finished' for e in events),
         'tools_used': sorted({e['payload'].get('tool', 'unknown') for e in events if e['type'] == 'tool.finished'}),
         'approval_events': sum(e['type'] == 'tool.approval' for e in events),

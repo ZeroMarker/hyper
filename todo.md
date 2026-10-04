@@ -58,6 +58,8 @@
 
 - [x] **Linux 独立库 create_checkpoint 与共用快照提交**：源经工作区 openat2 固定，缺失只认 ENOENT，非法源/权限错误拒绝且不创建目标 parent。ToolFile 与库共用输出目录 FD writer，O_EXCL 创建 snapshot/临时 JSON，复制/sync 后 renameat2(NOREPLACE) 发布完整清单；冲突不覆盖，普通失败尽力清理本次新建条目。201 个 Rust 测试通过，六个确定性单元/四个 API 集成覆盖源/输出替换、固定 inode、碰撞、失败回滚、binary/mode/相对路径、缺失与跨 mount 创建恢复。宿主选择受信任输出目录；非 Linux、同 inode 并发/目录移动及断电持久性仍另列边界。见 [实际边界](docs/audit-boundary.md)。
 
+- [x] **Chat/Responses 明确未完成拒绝与流式诊断**：length/content_filter、Responses incomplete/failed 与矛盾完成状态拒绝整个工具批次；model.failed 与运行失败 details 保留有界计数/结束原因/完整 reportedUsage/JSON 错误位置，不记录参数正文。Messages 缺 usage 计数保持未知；不自动重试已消费回复。完整 P1-5 仍待完成。见 [完成语义](docs/model-completion.md)。
+
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新运行时代码/评测基线为 `267d206`，包含评测用量修正 `1d2c273`；Linux 独立库快照源与共用输出提交已交付。[本轮真实回归](evals/baselines/2026-10-04-checkpoint/report.md) 29/30 通过，错误修改恢复、长会话及只读规划各 3/3；45 轮持久化一致，44/45 轮用量完整，30 次 prune 成功。Python 深文件任务的残缺工具参数失败保留，未执行修改/生成快照的工具，总用量未知。历史失败和范围授权冒烟仍分别保留；原生边界另由确定性/API 测试验证。本清单只列未完成交付；优先级是产品判断，已有 Hyper/指定模型基线，尚未与竞品对跑。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
@@ -76,7 +78,7 @@
 - [ ] **P1-2 相关上下文与范围读取**：先显式文件选择、read 行/字节范围，再按 prompt/路径/语言选择摘录；覆盖 Python/JS，记录范围和截断，遵守预算与敏感路径排除；空仓库的 rg --files 退出码 1 应视为空集合，而不是启动失败。repo map/语法索引以固定任务集比较收益。
 - [ ] **P1-3 编辑和验证闭环**：唯一匹配/显式 occurrence、陈旧文件 hash 检查、原子写入与可定位错误；显式 lint/test 命令走执行策略与审批、有限重试，记录首轮编辑成功率。重复块、并发变更、快照与 Unicode 必须验证，再选 Hashline/patch。
 - [ ] **P1-4 项目说明**：根 AGENTS.md 起步，随后目录作用域和 override；固定加载顺序、来源、预算及实际 prompt，说明不能改变宿主授权/工具权限。不在读取时执行脚本；按需 skills 后续接入。
-- [ ] **P1-5 模型能力与完成语义**：可配置 provider/model 上限、协议路径与能力，支持可用的 tokenizer/服务端计数及明确回退；检测输出长度截断与残缺工具调用，不把截断当成功；恢复基线及本轮 Python 深文件任务均出现残缺参数失败，保留为回归样本；继续补充截断/终结标记与适配诊断，缺失模型回复的总用量已修正为未知。为重复失败调用设置可审计阈值，避免误伤分页/测试重跑。
+- [ ] **P1-5 模型能力与完成语义**：可配置 provider/model 上限、协议路径与能力，支持可用的 tokenizer/服务端计数及明确回退；检测输出长度截断与残缺工具调用，不把截断当成功；恢复基线及本轮 Python 深文件任务均出现残缺参数失败，保留为回归样本；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，缺失模型回复的总用量保持未知；继续统一独立非流式与 Messages 停止语义、缺失/未知原因的 provider 策略。为重复失败调用设置可审计阈值，避免误伤分页/测试重跑。
 - [ ] **P1-6 命名 provider profile**：兼容旧配置和 DEEPSEEK 环境变量，list/use/test、认证来源、三协议 endpoint 覆盖；运行固定有效配置，stub 区分认证/路径/协议/模型/限流/超时，不记录密钥。
 
 ### P2：按实测需求扩展

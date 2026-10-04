@@ -168,6 +168,62 @@ class OfflineCLI(unittest.TestCase):
             self.assertEqual(metrics['missing_usage_iterations'],1)
             self.assertEqual(metrics['unobserved_model_replies'],1)
             self.assertTrue(metrics['persisted_stream_matches'])
+            self.assertEqual(metrics['errors'],['ModelCompletionError'])
+            failure = metrics['completion_failures'][0]
+            self.assertEqual(failure['kind'],'invalid_tool_arguments')
+            completion = failure['completion']
+            self.assertTrue(completion['terminalReceived'])
+            self.assertEqual(completion['finishReason'],'tool_calls')
+            self.assertEqual(completion['reportedUsage']['total_tokens'],18)
+            self.assertEqual(completion['tools'][0]['argumentFragments'],1)
+            self.assertEqual(completion['argumentError']['category'],'eof')
+            events = [json.loads(line) for line in (root/'trace.jsonl').read_text().splitlines()]
+            failed = next(e for e in events if e['type']=='run.failed')['payload']['failure']
+            self.assertFalse(failed['retryable'])
+            self.assertEqual(failed['details']['completion'],completion)
+            self.assertEqual(sum(e['type']=='model.tool_calls' for e in events),1)
+            self.assertNotIn('{"path":', json.dumps(failure))
+
+    def test_truncated_valid_tool_batch_never_executes_or_retries(self):
+        for content_type in ['application/json','text/event-stream']:
+            with self.subTest(content_type=content_type), tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as state_temp:
+                class Handler(http.server.BaseHTTPRequestHandler):
+                    def log_message(self,*args): pass
+                    def do_POST(self):
+                        self.rfile.read(int(self.headers['Content-Length']))
+                        self.server.requests += 1
+                        call = {'id':'write1','type':'function','function':{'name':'write','arguments':json.dumps({'path':'out.txt','content':'must not execute'})}}
+                        if content_type == 'application/json':
+                            body = json.dumps({'model':'stub','choices':[{'finish_reason':'length','message':{'tool_calls':[call]}}]})
+                        else:
+                            call['index']=0
+                            body = 'data: '+json.dumps({'choices':[{'delta':{'tool_calls':[call]},'finish_reason':'length'}]})+'\n\ndata: [DONE]\n\n'
+                        self.send_response(200)
+                        self.send_header('Content-Type',content_type)
+                        self.end_headers()
+                        self.wfile.write(body.encode())
+                server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+                server.requests=0
+                thread=threading.Thread(target=server.serve_forever,daemon=True)
+                thread.start()
+                try:
+                    root=Path(temp)
+                    (root/'README.md').write_text('Completion guard fixture\n')
+                    env=os.environ.copy()
+                    env.update({'DEEPSEEK_API_KEY':'stub','DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1','DEEPSEEK_MODEL':'stub','DEEPSEEK_PROTOCOL':'chat','HYPER_STATE_DIR':state_temp})
+                    metrics,_=invoke([str(self.binary),'--jsonl','--approval','allow','build','write out.txt'],root,env,root/'trace.jsonl',10)
+                    self.assertEqual(metrics['exit_code'],1)
+                    self.assertEqual(server.requests,1,(root/'trace.jsonl').read_text()+(root/'trace.stderr').read_text())
+                    self.assertFalse((root/'out.txt').exists())
+                    self.assertEqual(metrics['tool_results'],0)
+                    self.assertEqual(metrics['model_iterations'],0)
+                    self.assertEqual(metrics['errors'],['ModelCompletionError'])
+                    self.assertEqual(metrics['completion_failures'][0]['kind'],'output_truncated')
+                    self.assertTrue(metrics['persisted_stream_matches'])
+                finally:
+                    server.shutdown()
+                    thread.join()
+                    server.server_close()
 
     def test_timeout_stops_cli_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -207,6 +263,10 @@ class OfflineCLI(unittest.TestCase):
                     if predicate(data):
                         return
                     if child.poll() is not None:
+                        # Exit may race the predicate's first poll. Recheck the
+                        # expected gate after observing the terminal state.
+                        if predicate(data):
+                            return
                         self.fail('TUI exited before the expected gate')
                 self.fail('TUI gate timed out')
             def summaries(status):

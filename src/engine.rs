@@ -19,7 +19,9 @@ use crate::{
     approval::ApprovalGate,
     cancellation::{CancellationToken, POLL_INTERVAL},
     context::{bounded_history, estimated_tokens, history_budget},
-    deepseek::{DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt},
+    deepseek::{
+        CompletionError, DeepSeekConfig, ModelReply, ToolSpec, chat_messages_stream, system_prompt,
+    },
     event_sink::EventSink,
     model::*,
     permissions::{Permission, ToolPermissions},
@@ -381,7 +383,19 @@ fn agent(
                 )?;
             }
             Ok(())
-        })?;
+        });
+        let reply =
+            match reply {
+                Ok(reply) => reply,
+                Err(error) => {
+                    if let Some(completion) = error.downcast_ref::<CompletionError>() {
+                        events.write("model.failed", json!({
+                        "turn":turn,"kind":completion.kind,"completion":completion.diagnostics
+                    }), Some(&step.id), Some(index))?;
+                    }
+                    return Err(error);
+                }
+            };
         events.write(
             "model.iteration",
             json!({"turn":turn,"model":reply.model,"usage":reply.usage}),
@@ -1572,7 +1586,26 @@ fn run_task_inner(
                 // `{:#}` keeps the source chain, so a failure reports "failed to
                 // call the opencode-go API: connection refused" instead of only
                 // the outermost context.
-                failure = Some(fail(&events, step, index, format!("{error:#}"))?);
+                failure = Some(
+                    if let Some(completion) = error.downcast_ref::<CompletionError>() {
+                        fail_with_details(
+                            &events,
+                            step,
+                            index,
+                            format!("{error:#}"),
+                            "ModelCompletionError",
+                            HashMap::from([
+                                (
+                                    "completion".into(),
+                                    serde_json::to_value(&completion.diagnostics)?,
+                                ),
+                                ("completionFailureKind".into(), json!(completion.kind)),
+                            ]),
+                        )?
+                    } else {
+                        fail(&events, step, index, format!("{error:#}"))?
+                    },
+                );
                 break;
             }
         }
@@ -1686,12 +1719,23 @@ fn fail(
     message: String,
 ) -> Result<Failure> {
     let error_type = classify_error(&message);
+    fail_with_details(events, step, index, message, error_type, HashMap::new())
+}
+
+fn fail_with_details(
+    events: &EventWriter<'_>,
+    step: &StepSpec,
+    index: usize,
+    message: String,
+    error_type: &str,
+    details: HashMap<String, Value>,
+) -> Result<Failure> {
     let failure = Failure {
         error_type: error_type.into(),
         message,
         retryable: matches!(error_type, "TimeoutError" | "ModelError"),
         step_id: Some(step.id.clone()),
-        details: HashMap::new(),
+        details,
         cause: None,
     };
     events.write(

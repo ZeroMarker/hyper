@@ -16,6 +16,8 @@ use serde_json::json;
 
 use crate::{AgentMode, context::RequestBudget, i18n, workspace};
 
+mod completion;
+pub(crate) use completion::CompletionError;
 mod stream;
 use stream::{stream_chat, stream_messages, stream_responses};
 
