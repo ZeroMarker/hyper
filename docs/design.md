@@ -102,3 +102,10 @@ shell tmp 移入 `.hyper-tmp`，artifact 仍由 harness 收集至外部审计目
 新增任务字段或事件格式时，先修改 [`model.rs`](../src/model.rs)，再核对 [`engine.rs`](../src/engine.rs) 的写入与 replay、[`workspace.rs`](../src/workspace.rs) 的恢复逻辑及 CLI 展示。新增模型协议时核对 [`deepseek.rs`](../src/deepseek.rs) 的消息转换与 [`deepseek/stream.rs`](../src/deepseek/stream.rs) 的流式解析；新增工具时同时更新工具说明、实际调用白名单、策略检查和事件记录。改变 Shell 隔离时核对 [`sandbox.rs`](../src/sandbox.rs)、[`resource.rs`](../src/resource.rs) 及跨平台失败行为。
 
 仓库 CI 执行格式检查、Clippy 和测试；本地对应命令为 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`。发布工作流构建多平台二进制并打包 npm 发行物。
+
+工具权限的 `rules` 在 [permissions.rs](../src/permissions.rs) 验证，匹配 literal 相对路径或
+完整 bash 命令，重叠取 deny/ask/allow 中最严值，无匹配取工具基础值。路径按原请求与
+解析目标共同判定，审批固定该目标交给描述符入口；有 path rules 的工具拒绝硬链接，
+该功能目前只支持 Linux。搜索/自动 context 只投影 read allow 文件；规则与命中索引固定
+到运行/工具事件。CLI allow 不清除范围 ask/deny，ask 收紧 allow，deny 禁止所有 mutation。
+这是工具授权，未将 shell 的 OS 边界缩为相同目录，也未固定仓库脚本或清理先前历史。

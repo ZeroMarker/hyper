@@ -174,7 +174,7 @@ pub fn run() -> Result<()> {
         permissions.source = format!("file:{}", path.display());
     }
     if let Some(decision) = cli.approval {
-        permissions.set_mutations(decision);
+        permissions.apply_approval(decision);
         permissions.source.push_str(" + --approval");
     }
     if cli.command.is_none() {

@@ -14,12 +14,18 @@ pub(crate) struct ToolFile {
 }
 
 impl ToolFile {
+    #[cfg(all(test, target_os = "linux"))]
     pub fn open(root: &Path, target: &str, writable: bool, create: bool) -> Result<Self> {
         let resolved = crate::workspace::resolve_tool_path(root, target)?;
         Self::open_resolved(root, resolved, writable, create)
     }
 
-    fn open_resolved(root: &Path, target: PathBuf, writable: bool, create: bool) -> Result<Self> {
+    pub(crate) fn open_resolved(
+        root: &Path,
+        target: PathBuf,
+        writable: bool,
+        create: bool,
+    ) -> Result<Self> {
         let relative = target.strip_prefix(root)?;
         #[cfg(target_os = "linux")]
         let (file, existed) = linux::open(root, relative, writable, create)?;
@@ -49,6 +55,31 @@ impl ToolFile {
             target,
             existed,
         })
+    }
+
+    pub(crate) fn check_scope_links(
+        &self,
+        permissions: &crate::ToolPermissions,
+        tool: &str,
+    ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if permissions
+                .rules
+                .iter()
+                .any(|r| r.tool == tool && r.path.is_some())
+                && self.file.metadata()?.nlink() > 1
+            {
+                bail!(
+                    "permission scope denies hardlinked file: {}",
+                    self.target.display()
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (permissions, tool);
+        Ok(())
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>> {

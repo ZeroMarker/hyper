@@ -86,7 +86,7 @@ fn assert_allowed(
     action: &str,
     target: Option<&str>,
     command: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<std::path::PathBuf>> {
     // Read-only guard first so plan mode always gets the accurate diagnostic,
     // regardless of the target path or shell command supplied.
     if mode == AgentMode::Plan && (action == "write" || action == "bash") {
@@ -95,13 +95,13 @@ fn assert_allowed(
     if execution_mode == ExecutionMode::ReadOnly && action == "write" {
         bail!("read-only execution mode denies writes")
     }
-    if let Some(target) = target {
-        workspace::resolve_tool_path(root, target)?;
-    }
+    let resolved = target
+        .map(|target| workspace::resolve_tool_path(root, target))
+        .transpose()?;
     if action == "bash" && execution_mode != ExecutionMode::Unrestricted {
         policy::check_command(command.unwrap_or_default(), root)?;
     }
-    Ok(())
+    Ok(resolved)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -114,9 +114,9 @@ fn authorize(
     action: &str,
     target: Option<&str>,
     command: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<std::path::PathBuf>> {
     events.cancellation.check()?;
-    if let Err(error) = assert_allowed(
+    let resolved = match assert_allowed(
         root,
         step.mode,
         events.execution_mode,
@@ -124,26 +124,46 @@ fn authorize(
         target,
         command,
     ) {
-        events.write(
+        Ok(resolved) => resolved,
+        Err(error) => {
+            events.write(
             "tool.denied",
             json!({"tool":tool,"target":target,"command":command,"reason":error.to_string(),"source":"execution-boundary"}),
             Some(&step.id),
             Some(index),
         )?;
-        return Err(error);
-    }
-    let decision = events.permissions.decision(tool);
+            return Err(error);
+        }
+    };
+    let (decision, rules) = if let (Some(target), Some(resolved)) = (target, &resolved) {
+        events
+            .permissions
+            .path_decision(root, tool, target, resolved)?
+    } else {
+        events.permissions.scoped_decision(tool, None, command)
+    };
     let detail = target.or(command).unwrap_or("workspace search");
     events.write(
         "tool.policy",
         json!({"tool":tool,"target":target,"command":command,"decision":decision,
-            "source":events.permissions.source,"scope":"invocation"}),
+            "source":events.permissions.source,"scope":"invocation","matchedRules":rules,"resolvedTarget":resolved.as_ref().and_then(|p| p.strip_prefix(root).ok())}),
         Some(&step.id),
         Some(index),
     )?;
     match decision {
-        Permission::Allow => Ok(()),
-        Permission::Ask => require_approval(events, step, index, tool, detail),
+        Permission::Allow => Ok(resolved),
+        Permission::Ask => {
+            let detail = if let Some(path) = &resolved {
+                format!(
+                    "{detail} (resolved: {})",
+                    path.strip_prefix(root)?.display()
+                )
+            } else {
+                detail.to_owned()
+            };
+            require_approval(events, step, index, tool, &detail)?;
+            Ok(resolved)
+        }
         Permission::Deny => {
             events.write(
                 "tool.denied",
@@ -291,7 +311,7 @@ fn agent(
     let history_budget = history_budget()?;
     let mut history = bounded_history(&events.history, history_budget);
     let system = system_prompt(step.mode);
-    let context = workspace_context(root)?;
+    let context = workspace_context(root, &events.permissions)?;
     // Exactly what the model is given, recorded once per step: a replay can
     // then rebuild this request without re-deriving a workspace context that
     // the run itself may since have changed.
@@ -561,7 +581,7 @@ fn observation(result: Result<(bool, Value)>) -> String {
     truncate_head_tail(&text, MAX_OBSERVATION)
 }
 
-fn workspace_context(root: &Path) -> Result<String> {
+fn workspace_context(root: &Path, permissions: &ToolPermissions) -> Result<String> {
     const MAX_TOTAL: usize = 64_000;
     const MAX_FILE: usize = 6_000;
     let files = match Command::new("rg")
@@ -596,7 +616,7 @@ fn workspace_context(root: &Path) -> Result<String> {
     };
     let files: Vec<_> = files
         .into_iter()
-        .filter(|path| workspace::resolve_tool_path(root, path).is_ok())
+        .filter(|path| scoped_read(root, path, permissions).is_ok())
         .collect();
     let mut context = format!(
         "Workspace: {}\n\nFiles:\n{}\n",
@@ -614,7 +634,7 @@ fn workspace_context(root: &Path) -> Result<String> {
             break;
         }
         let Ok(content) =
-            ToolFile::open(root, relative, false, false).and_then(|mut file| file.read_text())
+            scoped_read(root, relative, permissions).and_then(|mut file| file.read_text())
         else {
             continue;
         };
@@ -1096,14 +1116,17 @@ fn read(
     if path.trim().is_empty() {
         bail!("read: path must not be empty")
     }
-    authorize(events, root, step, index, "read", "read", Some(path), None)?;
+    let resolved = authorize(events, root, step, index, "read", "read", Some(path), None)?
+        .context("missing read target")?;
     events.write(
         "tool.started",
         json!({"tool":"read","input":{"path":path}}),
         Some(&step.id),
         Some(index),
     )?;
-    let bytes = ToolFile::open(root, path, false, false)?.read()?;
+    let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
+    file.check_scope_links(&events.permissions, "read")?;
+    let bytes = file.read()?;
     let max = 64_000.min(bytes.len());
     let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()});
     events.write("tool.finished",json!({"tool":"read","path":path,"content":String::from_utf8_lossy(&bytes[..max]),"truncated":bytes.len()>max,"bytes":bytes.len()}),Some(&step.id),Some(index))?;
@@ -1126,7 +1149,7 @@ fn search(
     )?;
     // Enumeration respects ignore rules; every matching byte comes from an
     // anchored descriptor rather than a subprocess that reopens checked paths.
-    let lines = search_workspace_files(root, query, limit);
+    let lines = search_workspace_files(root, query, limit, &events.permissions);
     let code = i32::from(lines.is_empty());
     let payload = json!({"query":query,"lines":lines,"exitCode":code});
     events.write(
@@ -1138,14 +1161,29 @@ fn search(
     Ok((code <= 1, payload))
 }
 
-fn search_workspace_files(root: &Path, query: &str, limit: usize) -> Vec<String> {
+fn scoped_read(root: &Path, path: &str, permissions: &ToolPermissions) -> Result<ToolFile> {
+    let resolved = workspace::resolve_tool_path(root, path)?;
+    if permissions.path_decision(root, "read", path, &resolved)?.0 != Permission::Allow {
+        bail!("read permission requires explicit invocation");
+    }
+    let file = ToolFile::open_resolved(root, resolved, false, false)?;
+    file.check_scope_links(permissions, "read")?;
+    Ok(file)
+}
+
+fn search_workspace_files(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    permissions: &ToolPermissions,
+) -> Vec<String> {
     if limit == 0 {
         return Vec::new();
     }
     let mut matches = Vec::new();
     for relative in workspace_files(root, false, usize::MAX) {
         let Ok(content) =
-            ToolFile::open(root, &relative, false, false).and_then(|mut file| file.read_text())
+            scoped_read(root, &relative, permissions).and_then(|mut file| file.read_text())
         else {
             continue;
         };
@@ -1172,7 +1210,7 @@ fn write_file(
     if path.trim().is_empty() {
         bail!("write: path must not be empty")
     }
-    authorize(
+    let resolved = authorize(
         events,
         root,
         step,
@@ -1181,14 +1219,16 @@ fn write_file(
         "write",
         Some(path),
         None,
-    )?;
+    )?
+    .context("missing write target")?;
     events.write(
         "tool.started",
         json!({"tool":"write","path":path}),
         Some(&step.id),
         Some(index),
     )?;
-    let mut file = ToolFile::open(root, path, true, true)?;
+    let mut file = ToolFile::open_resolved(root, resolved, true, true)?;
+    file.check_scope_links(&events.permissions, "write")?;
     let before = String::from_utf8_lossy(&file.read()?).into_owned();
     let cp = file.checkpoint(root, &run.checkpoints)?;
     file.replace(content.as_bytes())?;
@@ -1222,14 +1262,16 @@ fn edit_file(
     if path.trim().is_empty() {
         bail!("edit: path must not be empty")
     }
-    authorize(events, root, step, index, "edit", "write", Some(path), None)?;
+    let resolved = authorize(events, root, step, index, "edit", "write", Some(path), None)?
+        .context("missing edit target")?;
     events.write(
         "tool.started",
         json!({"tool":"edit","path":path}),
         Some(&step.id),
         Some(index),
     )?;
-    let mut file = ToolFile::open(root, path, true, false)?;
+    let mut file = ToolFile::open_resolved(root, resolved, true, false)?;
+    file.check_scope_links(&events.permissions, "edit")?;
     let before = file.read_text()?;
     if !before.contains(search) {
         bail!("search text not found in {path}")
@@ -1449,6 +1491,7 @@ fn run_task_inner(
     permissions: ToolPermissions,
 ) -> Result<RunSummary> {
     task.validate()?;
+    permissions.validate()?;
     let workspace = Workspace::open(root)?;
     let run_id = workspace::id();
     let run = workspace.prepare_run(&run_id)?;
@@ -2138,7 +2181,33 @@ mod tests {
     fn built_in_search_finds_fixed_strings() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("sample.txt"), "first\n--literal value\n").unwrap();
-        let matches = search_workspace_files(dir.path(), "--literal", 10);
+        let matches =
+            search_workspace_files(dir.path(), "--literal", 10, &ToolPermissions::default());
         assert_eq!(matches, vec!["sample.txt:2:--literal value"]);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn automatic_context_omits_denied_or_ask_paths_and_contents() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("README.md"), "CONFIDENTIAL").unwrap();
+        std::fs::write(root.path().join("src/private.rs"), "PENDING_APPROVAL").unwrap();
+        std::fs::write(root.path().join("src/public.rs"), "PUBLIC_CONTEXT").unwrap();
+        std::fs::hard_link(
+            root.path().join("README.md"),
+            root.path().join("src/alias.rs"),
+        )
+        .unwrap();
+        let p: ToolPermissions=serde_json::from_str(r#"{"rules":[{"tool":"read","path":"README.md","decision":"deny"},{"tool":"read","path":"src/private.rs","decision":"ask"}]}"#).unwrap();
+        let context = workspace_context(root.path(), &p).unwrap();
+        assert!(context.contains("PUBLIC_CONTEXT"));
+        for excluded in [
+            "CONFIDENTIAL",
+            "PENDING_APPROVAL",
+            "README.md",
+            "src/private.rs",
+        ] {
+            assert!(!context.contains(excluded));
+        }
     }
 }

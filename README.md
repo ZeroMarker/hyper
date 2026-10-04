@@ -333,12 +333,47 @@ disables mutation tools. The flag applies to CLI and TUI and overrides
 An explicit `--permissions FILE` accepts JSON such as
 `{"read":"allow","search":"allow","write":"ask","edit":"ask","bash":"deny"}`.
 Missing entries keep the defaults; unknown fields/values fail before a run.
-Precedence is `--approval` for mutation tools, then the explicit file, then
+Fallback precedence is `--approval` for mutation tools, then the explicit file, then
 `HYPER_APPROVAL`, then defaults. Repository files are never loaded as permission
 configuration automatically. `run.started` fixes the effective decisions and
 source; `tool.policy` records each decision. A TUI approval permits one call,
 including reads if configured to ask. Approval never expands the plan mode,
 step tool whitelist, workspace path checks or shell OS boundary.
+
+Keep permission files outside the writable checkout. The file also accepts optional `rules`:
+
+```json
+{
+  "write": "deny", "edit": "deny", "bash": "deny",
+  "rules": [
+    {"tool": "write", "path": "src/", "decision": "allow"},
+    {"tool": "write", "path": "src/private/", "decision": "deny"},
+    {"tool": "read", "path": "private/", "decision": "deny"},
+    {"tool": "bash", "command": "cargo test --offline", "decision": "allow"}
+  ]
+}
+```
+
+Paths are literal workspace-relative names; a trailing `/` selects a directory
+subtree. Absolute paths, `..`, globs and backslashes are rejected. Rules apply
+independently to read/write/edit; bash matches the complete command string passed
+to the shell, with no prefix or token expansion. Matching rules override the tool
+fallback; among matching rules deny wins over ask, which wins over allow.
+Path checks combine the requested spelling and resolved destination using the
+stricter decision. Linux path-scoped tools reject hardlinked targets before I/O;
+path rules fail closed on other platforms until descriptor confinement is ready.
+
+`--approval allow` changes mutation fallbacks and preserves scoped ask/deny.
+`--approval ask` also constrains scoped mutation allows; `--approval deny` denies
+all mutations. `tool.policy` records zero-based matching rule indices and the
+resolved relative target. Approval displays and retains that resolved target.
+Search and automatic context include only files whose read decision is allow;
+ask files require an explicit read invocation and never prompt during enumeration.
+
+These rules authorize tool calls. Shells retain their configured OS boundary,
+and an allowed command can execute changing repository scripts. Rules do not
+redact prior conversation history or user input, or create OS-level read secrecy.
+Do not use a broad `--approval allow` fallback when a narrow allow-list is wanted.
 
 `RunOptions.permissions` exposes the same policy to embedders. For API
 compatibility, older `run_task*` helpers retain their prior automatic mutation
@@ -362,7 +397,7 @@ Existing internal symlinks are resolved before opening. Unsupported Linux
 kernels or syscall restrictions fail closed; other platforms retain path checks.
 Search enumerates ignored-filtered text files and reads them through this same
 entry point. Metadata isolation, non-Linux descriptor confinement, administrative
-restore races and path/command permission scopes remain pending. `unrestricted`
+restore races and OS-level range isolation remain pending. `unrestricted`
 shells retain host permissions, including access to external state. See the
 [measured boundaries](docs/audit-boundary.md).
 Shell tool stdin is closed; supply command input with pipes or redirection,

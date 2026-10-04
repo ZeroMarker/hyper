@@ -27,6 +27,6 @@ pub use engine::{
 };
 pub use event_sink::EventSink;
 pub use model::*;
-pub use permissions::{Permission, ToolPermissions};
+pub use permissions::{Permission, PermissionRule, ToolPermissions};
 pub use sandbox::ExecutionMode;
 pub use workspace::{Checkpoint, Workspace, restore_checkpoint};

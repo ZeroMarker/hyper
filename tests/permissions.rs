@@ -339,3 +339,421 @@ fn explicit_cli_policy_overrides_invalid_lower_precedence_environment() {
             .success()
     );
 }
+
+#[cfg(target_os = "linux")]
+fn scopes(value: &str) -> ToolPermissions {
+    let mut p: ToolPermissions = serde_json::from_str(value).unwrap();
+    p.source = "test:scopes".into();
+    p
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_scopes_apply_to_actual_tool_actions_and_record_rule_indices() {
+    let root = tempdir().unwrap();
+    let p = scopes(
+        r#"{"write":"deny","rules":[
+        {"tool":"write","path":"src/","decision":"allow"},
+        {"tool":"write","path":"src/private/","decision":"deny"}
+    ]}"#,
+    );
+    for (instruction, ok) in [
+        ("write:src/a\nYES", true),
+        ("write:src/private/a\nNO", false),
+        ("write:src-other/a\nNO", false),
+    ] {
+        let run = run_task_with_control(
+            &task(&[instruction]),
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status == "finished", ok);
+        let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.event_type == "tool.policy")
+            .unwrap();
+        assert_eq!(policy.payload["source"], "test:scopes");
+        if instruction.contains("private") {
+            assert_eq!(policy.payload["matchedRules"], serde_json::json!([0, 1]));
+            assert!(!events.iter().any(|e| e.event_type == "tool.started"));
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("src/a")).unwrap(),
+        "YES"
+    );
+    assert!(!root.path().join("src/private").exists());
+    assert!(!root.path().join("src-other").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn command_scopes_do_not_authorize_compound_or_similar_commands() {
+    let root = tempdir().unwrap();
+    let p = scopes(
+        r#"{"bash":"deny","rules":[{"tool":"bash","command":"printf OK","decision":"allow"}]}"#,
+    );
+    for (command, ok) in [
+        ("printf OK", true),
+        ("printf OK; touch escaped", false),
+        ("printf OK && touch escaped", false),
+        ("printf OK > escaped", false),
+    ] {
+        let run = run_task_with_control(
+            &task(&[&format!("bash:{command}")]),
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status == "finished", ok);
+        let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+        assert_eq!(events.iter().any(|e| e.event_type == "tool.started"), ok);
+    }
+    assert!(!root.path().join("escaped").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn path_scopes_check_symlink_destination_and_requested_spelling() {
+    use std::os::unix::fs::symlink;
+    let root = tempdir().unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    fs::create_dir(root.path().join("private")).unwrap();
+    fs::write(root.path().join("private/key"), "SECRET").unwrap();
+    symlink(
+        root.path().join("private/key"),
+        root.path().join("src/alias"),
+    )
+    .unwrap();
+    let p =
+        scopes(r#"{"write":"deny","rules":[{"tool":"write","path":"src/","decision":"allow"}]}"#);
+    let run = run_task_with_control(
+        &task(&["write:src/alias\nWRONG"]),
+        root.path(),
+        RunOptions {
+            permissions: p,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(run.status, "failed");
+    assert_eq!(
+        fs::read_to_string(root.path().join("private/key")).unwrap(),
+        "SECRET"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn search_omits_denied_and_ask_files_even_when_search_is_allowed() {
+    let root = tempdir().unwrap();
+    for (file, contents) in [
+        ("allow.txt", "needle PUBLIC"),
+        ("deny.txt", "needle SECRET"),
+        ("ask.txt", "needle APPROVAL"),
+    ] {
+        fs::write(root.path().join(file), contents).unwrap();
+    }
+    let p = scopes(
+        r#"{"read":"allow","rules":[{"tool":"read","path":"deny.txt","decision":"deny"},{"tool":"read","path":"ask.txt","decision":"ask"}]}"#,
+    );
+    let gate = ApprovalGate::new();
+    let run = run_task_with_control(
+        &task(&["search:needle"]),
+        root.path(),
+        RunOptions {
+            permissions: p,
+            gate: Some(gate.clone()),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(run.status, "finished");
+    assert!(gate.drain().is_empty());
+    let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+    let result = events
+        .iter()
+        .find(|e| e.event_type == "tool.finished")
+        .unwrap()
+        .payload
+        .to_string();
+    assert!(result.contains("PUBLIC"));
+    assert!(!result.contains("SECRET"));
+    assert!(!result.contains("APPROVAL"));
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[test]
+fn approval_keeps_the_resolved_target_when_alias_changes() {
+    use std::os::unix::fs::symlink;
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("allowed"), "OLD").unwrap();
+    fs::write(root.path().join("private"), "SECRET").unwrap();
+    symlink(root.path().join("allowed"), root.path().join("alias")).unwrap();
+    let p =
+        scopes(r#"{"write":"ask","rules":[{"tool":"write","path":"private","decision":"deny"}]}"#);
+    let gate = ApprovalGate::new();
+    let worker_gate = gate.clone();
+    let path = root.path().to_owned();
+    let worker = std::thread::spawn(move || {
+        run_task_with_control(
+            &task(&["write:alias\nNEW"]),
+            path,
+            RunOptions {
+                permissions: p,
+                gate: Some(worker_gate),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let request = loop {
+        if let Some(request) = gate.drain().into_iter().next() {
+            break request;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(request.detail.contains("resolved: allowed"));
+    fs::remove_file(root.path().join("alias")).unwrap();
+    symlink(root.path().join("private"), root.path().join("alias")).unwrap();
+    request.response.send(true).unwrap();
+    assert_eq!(worker.join().unwrap().status, "finished");
+    assert_eq!(
+        fs::read_to_string(root.path().join("allowed")).unwrap(),
+        "NEW"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("private")).unwrap(),
+        "SECRET"
+    );
+}
+
+#[test]
+fn invalid_library_scopes_fail_before_a_run_is_created() {
+    let root = tempdir().unwrap();
+    let mut p = ToolPermissions::default();
+    p.rules.push(harness::PermissionRule {
+        tool: "bash".into(),
+        decision: Permission::Allow,
+        path: Some("src/".into()),
+        command: None,
+    });
+    assert!(
+        run_task_with_control(
+            &task(&["bash:printf WRONG"]),
+            root.path(),
+            RunOptions {
+                permissions: p,
+                ..RunOptions::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(!harness::state::directory(root.path()).unwrap().exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scoped_allow_cannot_override_audit_plan_or_readonly_boundaries() {
+    let root = tempdir().unwrap();
+    let p = scopes(
+        r#"{"write":"deny","rules":[{"tool":"write","path":"src/","decision":"allow"},{"tool":"write","path":".harness/","decision":"allow"}]}"#,
+    );
+    for instruction in ["write:src/a\nNO", "write:.harness/forged\nNO"] {
+        let mut spec = task(&[instruction]);
+        spec.steps[0].mode = AgentMode::Plan;
+        let run = run_task_with_control(
+            &spec,
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status, "failed");
+    }
+    for (instruction, mode) in [
+        ("write:src/a\nNO", ExecutionMode::ReadOnly),
+        ("write:.harness/forged\nNO", ExecutionMode::WorkspaceWrite),
+    ] {
+        let run = run_task_with_control(
+            &task(&[instruction]),
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                execution_mode: mode,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status, "failed");
+        let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+        assert!(!events.iter().any(|e| e.event_type == "tool.started"));
+    }
+    assert!(!root.path().join("src").exists());
+    assert!(!root.path().join(".harness").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_approval_flags_preserve_scope_denies_and_record_effective_rules() {
+    let root = tempdir().unwrap();
+    let config = root.path().join("permissions.json");
+    fs::write(&config,r#"{"write":"deny","rules":[{"tool":"write","path":"src/","decision":"allow"},{"tool":"write","path":"src/private/","decision":"deny"}]}"#).unwrap();
+    for (flag, path, ok) in [
+        ("allow", "src/a", true),
+        ("allow", "src/private/a", false),
+        ("deny", "src/b", false),
+        ("ask", "src/c", false),
+    ] {
+        let taskfile = root.path().join("task.json");
+        fs::write(
+            &taskfile,
+            serde_json::to_vec(&task(&[&format!("write:{path}\nOK")])).unwrap(),
+        )
+        .unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hyper"))
+            .current_dir(root.path())
+            .args([
+                "--permissions",
+                "permissions.json",
+                "--approval",
+                flag,
+                "--jsonl",
+                "run",
+                "task.json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.success(),
+            ok,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let events: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(
+            events[0]["payload"]["permissions"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(events.iter().any(|e| e["type"] == "tool.policy"
+            && !e["payload"]["matchedRules"].as_array().unwrap().is_empty()));
+    }
+    assert!(!root.path().join("src/private").exists());
+    assert!(!root.path().join("src/b").exists());
+    assert!(!root.path().join("src/c").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scoped_tools_reject_hardlink_aliases_before_reading_or_modifying() {
+    let root = tempdir().unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    fs::write(root.path().join("private"), "needle SECRET").unwrap();
+    fs::hard_link(root.path().join("private"), root.path().join("src/alias")).unwrap();
+    let p = scopes(
+        r#"{"write":"deny","edit":"deny","rules":[
+        {"tool":"read","path":"private","decision":"deny"},
+        {"tool":"write","path":"src/","decision":"allow"},
+        {"tool":"edit","path":"src/","decision":"allow"}
+    ]}"#,
+    );
+    for instruction in [
+        "read:src/alias",
+        "write:src/alias\nWRONG",
+        "edit:src/alias\nSECRET\nWRONG",
+    ] {
+        let run = run_task_with_control(
+            &task(&[instruction]),
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(
+            fs::read_to_string(root.path().join("private")).unwrap(),
+            "needle SECRET"
+        );
+        let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+        assert!(!events.iter().any(|e| e.event_type == "tool.finished"));
+    }
+    let run = run_task_with_control(
+        &task(&["search:needle"]),
+        root.path(),
+        RunOptions {
+            permissions: p,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(run.status, "finished");
+    let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
+    assert!(
+        !events
+            .iter()
+            .find(|e| e.event_type == "tool.finished")
+            .unwrap()
+            .payload
+            .to_string()
+            .contains("SECRET")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn read_and_edit_scopes_apply_to_files_without_granting_other_tools() {
+    let root = tempdir().unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    fs::write(root.path().join("src/a"), "OLD").unwrap();
+    fs::write(root.path().join("private"), "SECRET").unwrap();
+    let p = scopes(
+        r#"{"read":"deny","edit":"deny","write":"deny","rules":[{"tool":"read","path":"src/","decision":"allow"},{"tool":"edit","path":"src/a","decision":"allow"}]}"#,
+    );
+    for (instruction, ok) in [
+        ("read:src/a", true),
+        ("read:private", false),
+        ("edit:src/a\nOLD\nNEW", true),
+        ("write:src/a\nWRONG", false),
+        ("edit:private\nSECRET\nWRONG", false),
+    ] {
+        let run = run_task_with_control(
+            &task(&[instruction]),
+            root.path(),
+            RunOptions {
+                permissions: p.clone(),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.status == "finished", ok);
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("src/a")).unwrap(),
+        "NEW"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("private")).unwrap(),
+        "SECRET"
+    );
+}

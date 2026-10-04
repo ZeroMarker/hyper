@@ -1,6 +1,6 @@
 # 审计边界与 P0-3 分阶段交付
 
-2026-10-03。已交付共用工具权限、直接工具保护与外部审计内容存储；P0-3 的元数据隔离和范围规则尚未整体完成。
+2026-10-04。已交付共用权限、外部审计内容存储、Linux 描述符入口和工具范围规则；P0-3 的元数据与完整 OS 范围隔离仍未完成。
 
 ## 已交付的边界
 
@@ -85,6 +85,26 @@ read/write/edit、search 和自动上下文共享此入口。search 使用 respe
 这不保证路径名称仍指向该 inode，也不防并发内容写者造成陈旧编辑。
 宿主移动整个目录到工作区外、admin restore/undo 的路径竞争与非 Linux 原生保护仍待验收。
 
+## 工具路径与精确命令授权（P0-3b2b1）
+
+显式宿主配置支持 `rules`：read/write/edit 配 literal 相对 `path`，目录尾 `/` 表示子树；
+bash 配完整 `command`。不匹配时取工具默认值，匹配规则中 deny > ask > allow；
+路径同时按请求拼写与 canonical 目标判定，二者取更严结果。拒绝绝对/上级路径、glob、
+未知工具/字段和混合 path/command，库构造的配置也在创建运行前验证。
+Linux 路径范围工具在实际打开 inode 后拒绝 nlink > 1，避免普通硬链接越范围；
+非 Linux 的 path rules 明确拒绝，不以字符串匹配宣称原生同等边界。
+
+`--approval allow` 只改基础 mutation 值并保留范围 ask/deny；ask 同时收紧范围 allow，
+deny 禁止所有 mutation。运行固定完整有效规则和来源，每次 tool.policy 记录匹配索引
+与解析目标；审批显示该目标并将其固定给描述符入口，审批期间别名变化不会转移授权。
+搜索和自动上下文按 read allow 过滤，ask 不自动弹出审批，显式 read 才逐次申请。
+默认无规则与旧配置继续兼容，工具 allow 仍不能突破 plan/read-only、白名单或审计路径。
+
+本地测试覆盖字段/路径校验、范围重叠、路径段边界、read/write/edit 独立判定、精确 shell
+及复合命令拒绝、别名和硬链接、审批期间替换、CLI 参数优先级、搜索和实际 context 投影。
+范围不限制 bash 内部读写到单个目录，不固定 PATH 可执行程序或仓库脚本内容，也不清除
+先前会话中的内容/用户输入；完整 OS 读取边界和历史投影的保密策略需另外定义。
+
 ## 已验证的剩余限制与下一项
 
 在一次性 Linux workspace，通过受限 shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
@@ -93,7 +113,7 @@ read/write/edit、search 和自动上下文共享此入口。search 使用 respe
 元数据隔离需另外的 OS 边界；不能用命令字符串规则代替。当前环境的 `unshare -Urnm`
 因 uid_map 权限失败，不能把挂载 namespace 当作已可用能力。
 
-P0-3b2a 已交付 Linux 直接工具描述符边界；下一项为 P0-3b2b：元数据、剩余路径竞争与路径/命令范围授权；显式 unrestricted 仍有
+P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权；下一项为 P0-3b2b2：元数据、剩余路径竞争与 OS 范围隔离；显式 unrestricted 仍有
 宿主权限。Windows 硬链接及 macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
 本轮仅在 Linux 实测，不宣称跨平台原生验证完成。
