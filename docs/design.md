@@ -30,7 +30,7 @@ flowchart LR
 | [`model.rs`](../src/model.rs) | 任务、步骤、事件、摘要及会话的数据结构和校验 |
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
 | [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
-| [`state.rs`](../src/state.rs)、[`workspace.rs`](../src/workspace.rs)、[`tool_file.rs`](../src/tool_file.rs)、[`restore_file.rs`](../src/restore_file.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
+| [`state.rs`](../src/state.rs)、[`workspace.rs`](../src/workspace.rs)、[`tool_file.rs`](../src/tool_file.rs)、[`restore_file.rs`](../src/restore_file.rs)、[`checkpoint_file.rs`](../src/checkpoint_file.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
 | [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`metadata_sandbox.rs`](../src/metadata_sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock/read-only seccomp、子进程资源限制 |
 | [`approval.rs`](../src/approval.rs)、[`event_sink.rs`](../src/event_sink.rs) | TUI 与工作线程之间的审批和状态传递 |
 | [`i18n.rs`](../src/i18n.rs) | 界面文案；默认英语，`HYPER_LANG=zh` 或 `zh-CN` 切换中文 |
@@ -114,5 +114,13 @@ Linux restore/undo 由 [restore_file.rs](../src/restore_file.rs) 固定源和目
 在工作区父目录中创建外部临时副本，完整复制/同步后 renameat 原子替换，避免最终 link
 和硬链接重定向写入。源可位于其他 mount，staging 和目标须同 mount；不可用时拒绝。
 未存在 checkpoint 用 unlinkat 幂等删除名称；失败保留原目标，可能留下新建父目录。
-权限位取 snapshot，不重建 owner/ACL/xattr。非 Linux 与独立库 create_checkpoint 的路径
-读取仍另列边界；metadata 和整体宿主目录移动未包含在内容提交保证中。
+权限位取 snapshot，不重建 owner/ACL/xattr。非 Linux 的创建/恢复路径、metadata 和整体
+宿主目录移动未包含在内容提交保证中。
+
+Linux 独立库 create_checkpoint canonicalize root 后固定源 FD，缺失只认 ENOENT，其他
+错误拒绝且不创建目标 parent。与 ToolFile 共用 checkpoint_file writer，复制源 FD 的
+bytes/mode，输出目录从 `/` FD/openat2 固定，可跨 mount。O_EXCL 创建新 snapshot/临时
+JSON，sync 后 renameat2(RENAME_NOREPLACE) 发布完整清单；已有条目不覆盖，普通失败
+尽力清理本次新建条目。manifest mode 0600，snapshot_path 为绝对路径。宿主库 API
+不应用模型审批/工具权限，需受信任输出目录；无同 inode 并发一致性、目录断电持久性
+或其他 writer 保证，SIGKILL 可留 orphan，非 Linux 仍旧路径方式。

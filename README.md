@@ -404,6 +404,22 @@ and snapshot permission bits replace the target; ownership/ACLs/xattrs are not
 reconstructed. The workspace parent must permit external staging on the same
 mount as the target. Snapshot storage may be on another mount. Source or commit
 errors retain the old target, though newly required directories can remain.
+On Linux, standalone `workspace::create_checkpoint` now pins the resolved source
+before reading and distinguishes a missing target from permission/link errors.
+It shares the descriptor-based snapshot writer with direct file tools. The writer
+pins the canonical output directory, creates new snapshot/temp names exclusively,
+copies and syncs bytes and mode bits, then publishes the complete JSON manifest
+with renameat2(RENAME_NOREPLACE). Existing entries are never overwritten; ordinary
+errors attempt to remove only newly created entries. The output filesystem must
+support that operation; there is no unsafe fallback. Manifests use mode 0600 and
+snapshot paths are absolute, including for relative API roots/output paths.
+The library API is a host administrative operation; its caller must choose trusted
+storage. It does not apply agent approval rules, prevent same-inode concurrent
+writes, or make workspace-writable storage authoritative. Abrupt termination can
+leave orphan snapshots/temp manifests, and directory entries are not synced for a
+power-loss durability guarantee. Non-Linux checkpoint creation keeps its earlier
+path-based behavior.
+
 Metadata isolation, non-Linux descriptor confinement and OS-level range isolation
 remain pending. `unrestricted`
 shells retain host permissions, including access to external state. See the

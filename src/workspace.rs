@@ -807,32 +807,39 @@ pub struct Checkpoint {
     pub created_at: String,
 }
 pub fn create_checkpoint(root: &Path, dir: &Path, target: &str) -> Result<Checkpoint> {
-    let absolute = resolve_path(root, target)?;
-    fs::create_dir_all(dir)?;
-    let id = id();
-    let snapshot = dir.join(format!("{id}.snapshot"));
-    let existed = absolute.exists();
-    if existed {
-        fs::copy(&absolute, &snapshot)?;
-    } else {
-        fs::write(&snapshot, "")?;
+    #[cfg(target_os = "linux")]
+    {
+        crate::checkpoint_file::create(root, dir, target)
     }
-    let cp = Checkpoint {
-        id: id.clone(),
-        target_path: absolute
-            .strip_prefix(root)?
-            .to_str()
-            .context("non-UTF-8 checkpoint target")?
-            .into(),
-        snapshot_path: snapshot,
-        existed,
-        created_at: now(),
-    };
-    fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::to_vec_pretty(&cp)?,
-    )?;
-    Ok(cp)
+    #[cfg(not(target_os = "linux"))]
+    {
+        let absolute = resolve_path(root, target)?;
+        fs::create_dir_all(dir)?;
+        let id = id();
+        let snapshot = dir.join(format!("{id}.snapshot"));
+        let existed = absolute.exists();
+        if existed {
+            fs::copy(&absolute, &snapshot)?;
+        } else {
+            fs::write(&snapshot, "")?;
+        }
+        let cp = Checkpoint {
+            id: id.clone(),
+            target_path: absolute
+                .strip_prefix(root)?
+                .to_str()
+                .context("non-UTF-8 checkpoint target")?
+                .into(),
+            snapshot_path: snapshot,
+            existed,
+            created_at: now(),
+        };
+        fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&cp)?,
+        )?;
+        Ok(cp)
+    }
 }
 pub fn restore_checkpoint(root: &Path, cp: &Checkpoint) -> Result<()> {
     crate::restore_file::restore(root, cp)

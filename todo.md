@@ -52,9 +52,11 @@
 
 - [x] **P0-3b2b1 工具路径与精确命令授权**：显式 rules 支持 literal 相对文件/目录与完整 bash 命令，deny > ask > allow，无匹配取基础权限；请求/解析目标共同判定，审批固定目标，范围硬链接拒绝。搜索/context 只读 allow 文件，ask 只在显式 read 时审批；CLI allow 保留范围 ask/deny，ask 收紧 allow，deny 禁止 mutation。171 个 Rust 测试通过；Linux path rules，非 Linux 拒绝，工具授权不等于 shell OS 范围隔离。见 [实际边界](docs/audit-boundary.md)。
 
-- [x] **Linux restore/undo 的描述符提交**：固定快照源与目标 parent FD，外部 staging 完整复制/同步后 renameat 原子替换；unlinkat 删除新建文件且缺失幂等，不跟随校验后 link，也不修改硬链接别名。185 个 Rust 测试通过，含 10 个原生/确定性单元和 4 个 restore 集成测试；外部 staging shell 内容攻击、跨 mount 快照、CLI restore/undo、坏源/提交失败保持原目标均覆盖。非 Linux、metadata、整体目录移动及独立库 create_checkpoint 仍保留边界。见 [验证范围](docs/audit-boundary.md)。
+- [x] **Linux restore/undo 的描述符提交**：固定快照源与目标 parent FD，外部 staging 完整复制/同步后 renameat 原子替换；unlinkat 删除新建文件且缺失幂等，不跟随校验后 link，也不修改硬链接别名。185 个 Rust 测试通过，含 10 个原生/确定性单元和 4 个 restore 集成测试；外部 staging shell 内容攻击、跨 mount 快照、CLI restore/undo、坏源/提交失败保持原目标均覆盖。非 Linux、metadata 与整体目录移动仍保留边界。见 [验证范围](docs/audit-boundary.md)。
 
 - [x] **Linux read-only 显式元数据修改限制**：seccomp 整体拒绝权限、属主、时间戳、xattr 的 path/fd/at 修改，含现代接口；拒绝 ioctl/io_uring 与 ptrace/process_vm_writev，架构检查阻断 compat/x32。191 个 Rust 测试与 13 个评测测试通过，两个判定单元/四个原生集成覆盖外部审计 marker、别名、预打开 FD、线程/exec 继承与已有 xattr 保持；本地原生只验证 aarch64。workspace-write 路径级元数据隔离仍未交付；见 [实际边界](docs/audit-boundary.md)。
+
+- [x] **Linux 独立库 create_checkpoint 与共用快照提交**：源经工作区 openat2 固定，缺失只认 ENOENT，非法源/权限错误拒绝且不创建目标 parent。ToolFile 与库共用输出目录 FD writer，O_EXCL 创建 snapshot/临时 JSON，复制/sync 后 renameat2(NOREPLACE) 发布完整清单；冲突不覆盖，普通失败尽力清理本次新建条目。201 个 Rust 测试通过，六个确定性单元/四个 API 集成覆盖源/输出替换、固定 inode、碰撞、失败回滚、binary/mode/相对路径、缺失与跨 mount 创建恢复。宿主选择受信任输出目录；非 Linux、同 inode 并发/目录移动及断电持久性仍另列边界。见 [实际边界](docs/audit-boundary.md)。
 
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
@@ -62,7 +64,7 @@
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围已交付，继续补 OS 读取/元数据边界、Windows 硬链接、非 Linux 描述符/恢复保护、独立库 create_checkpoint 和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
+- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围已交付，继续补 OS 读取/元数据边界、Windows 硬链接、非 Linux 描述符/恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null`、git 内部 `/dev/null` 设备访问与重复策略拒绝样本；跟踪长会话约束位置遗漏。前轮仍出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 

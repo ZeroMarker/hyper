@@ -4,6 +4,8 @@
 
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
+2026-10-04（第十二轮）：交付 Linux 独立库 create_checkpoint 与共用快照提交。源先解析再经工作区目录 FD/openat2 固定，缺失只认 ENOENT，非法/特殊/权限错误拒绝且不创建源 parent。ToolFile 与库共用输出 writer，固定 canonical 输出 dir FD，O_EXCL 创建 snapshot/临时 JSON，复制源 FD bytes/mode、sync 后 renameat2(NOREPLACE) 发布完整清单；冲突不覆盖，普通失败尽力清理新建条目。manifest 0600、snapshot_path 绝对化，支持相对 root/dir 和跨 mount 存储。201 个 Rust 测试、13 个评测测试、fmt、Clippy 与 release 构建通过；六个确定性单元和四个 API 集成覆盖源/输出替换、inode 固定/rewind、碰撞/失败回滚、binary/mode、缺失/幂等与实际 ext4/tmpfs 创建恢复。宿主 API 不应用模型权限/审批，需信任输出 dir；非 Linux、同 inode 并发、宿主目录移动、metadata 与断电持久性仍另列边界，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
+
 2026-10-04（第十一轮）：交付 Linux read-only 显式元数据修改限制。Landlock 后应用 seccomp，按 syscall 拒绝权限、属主、时间戳、xattr 的 path/fd/at 修改，覆盖现代接口；ioctl/io_uring、ptrace/process_vm_writev 整体拒绝。检查原生 audit arch、拒绝 compat/x32；仅支持 64 位 x86-64/小端 aarch64，不支持或安装失败拒绝启动。parent 准备过滤，pre_exec 无分配/锁。191 个 Rust 测试、13 个评测测试、fmt、Clippy 与 release 构建通过；新增两个 BPF 单元和四个原生集成验证别名、审计 marker、已有 xattr、预打开 FD、线程/exec 与现代 raw syscall；实际原生仅 aarch64。普通读取与工作区写入模式的合法 chmod/utime 均保持兼容。workspace-write 元数据路径边界、atime/锁/外部服务、宿主及其他平台仍未交付，完整 P0-3 不关闭。见 [实际边界](docs/audit-boundary.md)。
 
 本轮正式代码 `88672f0` 固定任务真实回归 30/30；错误修改恢复、长会话、只读规划各 3/3，45 轮完整 usage 与 stdout/持久化一致，30 次 prune 成功。运行版本及二进制/runner/fixture/grader digest 均固定且核验；runner 已含缺失回复修正，无需修改本轮用量。保留前轮两次失败记录，没有重跑替换；普通模型任务用于兼容验证，新 read-only shell 保证由独立原生攻击测试验收，不据成功率变化推断因果，也不宣称 x86 原生或完整 P0-3 已完成，成本未知。见 [元数据回归报告](evals/baselines/2026-10-04-readonly-metadata/report.md)。

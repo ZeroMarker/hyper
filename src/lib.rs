@@ -1,5 +1,7 @@
 pub mod approval;
 pub mod cancellation;
+#[cfg(target_os = "linux")]
+mod checkpoint_file;
 pub mod cli;
 mod context;
 pub mod deepseek;

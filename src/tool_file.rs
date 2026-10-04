@@ -1,7 +1,9 @@
 //! Direct file I/O anchored to the workspace, with Linux descriptor confinement.
 use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "linux"))]
+use std::fs;
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -101,28 +103,41 @@ impl ToolFile {
     }
 
     pub fn checkpoint(&mut self, root: &Path, dir: &Path) -> Result<crate::workspace::Checkpoint> {
-        fs::create_dir_all(dir)?;
-        let id = crate::workspace::id();
-        let snapshot = dir.join(format!("{id}.snapshot"));
-        fs::write(&snapshot, self.read()?)?;
-        fs::set_permissions(&snapshot, self.file.metadata()?.permissions())?;
-        let cp = crate::workspace::Checkpoint {
-            id: id.clone(),
-            target_path: self
-                .target
-                .strip_prefix(root)?
-                .to_str()
-                .context("non-UTF-8 target")?
-                .into(),
-            snapshot_path: snapshot,
-            existed: self.existed,
-            created_at: crate::workspace::now(),
-        };
-        fs::write(
-            dir.join(format!("{id}.json")),
-            serde_json::to_vec_pretty(&cp)?,
-        )?;
-        Ok(cp)
+        #[cfg(target_os = "linux")]
+        {
+            crate::checkpoint_file::write(
+                root,
+                dir,
+                &self.target,
+                self.existed,
+                Some(&mut self.file),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            fs::create_dir_all(dir)?;
+            let id = crate::workspace::id();
+            let snapshot = dir.join(format!("{id}.snapshot"));
+            fs::write(&snapshot, self.read()?)?;
+            fs::set_permissions(&snapshot, self.file.metadata()?.permissions())?;
+            let cp = crate::workspace::Checkpoint {
+                id: id.clone(),
+                target_path: self
+                    .target
+                    .strip_prefix(root)?
+                    .to_str()
+                    .context("non-UTF-8 target")?
+                    .into(),
+                snapshot_path: snapshot,
+                existed: self.existed,
+                created_at: crate::workspace::now(),
+            };
+            fs::write(
+                dir.join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&cp)?,
+            )?;
+            Ok(cp)
+        }
     }
 }
 
@@ -247,7 +262,7 @@ pub(crate) mod linux {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::{fs, os::unix::fs::symlink};
     use tempfile::tempdir;
 
     #[test]

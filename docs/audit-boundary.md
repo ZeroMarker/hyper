@@ -126,14 +126,47 @@ permission bits，并 sync 文件，再从该目录描述符 renameat 到目标 
 
 恢复本次新建文件的 checkpoint 用 parent FD + unlinkat，只删除该目录项；缺失文件/parent
 是幂等成功，最终 link 不被跟随，目录不会递归删。`undo` 持有 Workspace lease 直到操作
-完成。行政恢复拒绝旧 `.harness` 目标；独立库 create_checkpoint 的路径读取与非 Linux
-恢复仍采用旧路径方式，不将它们算入本次保证。
+完成。行政恢复拒绝旧 `.harness` 目标；非 Linux 恢复/独立库快照仍采用旧路径方式。
+Linux 独立库 create_checkpoint 已在本轮补齐，见下文，不把它计为前轮恢复交付。
 
 10 个确定性/原生单元测试及 4 个 restore 集成测试覆盖目标/父目录/源父目录替换、打开
 parent 后目录改名、删除最终 link、硬链接别名保持、二进制/权限、无目标幂等、失败清理、
 跨 mount 快照以及真正受限 shell 对外部 staging 的写/删/移动/硬链接拒绝；CLI restore/undo
 实际恢复旧文件和移除新文件。workspace-write 的 metadata 修改仍未被 OS 限制，可导致拒绝服务；宿主整体
 移动目录、unrestricted/外部不参与的写者和非 Linux 原生边界仍另列验收。
+
+## Linux 独立库快照与共用提交（本轮已交付）
+
+[checkpoint_file.rs](../src/checkpoint_file.rs) 将 workspace::create_checkpoint 的 root
+先 canonicalize，目标经既有路径解析后从工作区目录 FD/openat2 打开；拒绝校验后
+parent/final symlink、magic link、跨 mount 与非 regular file，FIFO 非阻塞拒绝。
+只有 ENOENT 记为不存在，EACCES/ELOOP 等失败不产生缺失快照；缺失 parent 不创建。
+打开的 inode 固定后，路径替换不会把快照改为新路径内容；不保证并发修改该 inode
+时得到一致时间点的内容。既有内部 symlink 先解析，普通源 hardlink 仍可用。
+
+独立库与 ToolFile 共用 writer：输出 dir 解析后从 `/` FD/openat2 打开完整 canonical
+路径，允许宿主选择跨 mount 存储；新 snapshot/临时清单用 O_EXCL 创建，拒绝同名
+文件/link。从既有源 FD rewind/复制，权限取同 FD，sync snapshot 与完整临时 JSON，
+最后同输出目录 FD 用 renameat2(RENAME_NOREPLACE) 发布 `.json`，已有清单不覆盖。
+[renameat2 手册](https://man7.org/linux/man-pages/man2/rename.2.html) 明确该 flag 需要
+文件系统支持，不支持或 syscall 失败均返回错误，不降级为可覆盖的 path 写入。
+普通错误通过同 dir FD 尽力 unlink 本次新建条目，不删除既有冲突；新建输出目录
+可能留下。成功只留下完整 snapshot/JSON，JSON mode 0600，返回的 snapshot_path
+为 canonical 绝对路径，兼容相对 root/dir，不依赖后续 cwd。
+
+六个确定性单元验证 source final/parent 替换、打开后名称替换及 rewind、output 解析
+后替换/固定 FD、snapshot/临时 JSON/最终 JSON 冲突保持与复制失败回滚。四个 API 集成
+验证 binary/mode/相对路径/内部 link 的完整创建恢复、缺失 parent/幂等恢复、越界/
+dangling/目录/FIFO/权限拒绝与无输出副作用，跨 ext4/tmpfs 存储创建和恢复。权限样本
+只在非 root 用户运行，跨 mount 样本在无可写独立 `/dev/shm` 时跳过；本环境两者均执行。
+
+该 API 是宿主行政读取，不应用模型工具权限/审批或审计 hardlink 过滤。输出目录须由
+宿主选择且受信任；任意 workspace 内可写 dir 不因采用该 API 变为权威存储。打开前
+存在的输出 symlink 可以被 canonicalize 成宿主实际选择目录；拒绝的是解析后替换。
+宿主整体移动 root/state dir 可使返回路径陈旧；其他不参与的 writer、同 inode 并发修改
+及 workspace-write 的 metadata 可用性风险另列边界。SIGKILL 可能留下未发布快照/
+临时 JSON；未 sync 输出目录，不承诺断电持久性或网络文件系统失败语义，未复制
+ACL/xattr/owner。原生测试仅 Linux/aarch64 的本地 ext4/tmpfs；非 Linux 保留旧实现。
 
 ## Linux read-only 显式元数据修改限制（本轮已交付）
 
