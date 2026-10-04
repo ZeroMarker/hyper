@@ -406,7 +406,12 @@ reject explicit permission, ownership, timestamp and xattr mutations. Linux dire
 `openat2` descriptors; snapshots and modifications share the opened inode.
 Symlink substitutions, magic links and nested mount crossings are refused.
 Existing internal symlinks are resolved before opening. Unsupported Linux
-kernels or syscall restrictions fail closed; other platforms retain path checks.
+kernels or syscall restrictions fail closed. macOS direct tools walk pinned directory
+descriptors with single-component openat/O_NOFOLLOW calls and exclusive creation.
+Reads, snapshot source bytes and mutations share the opened file. Cross-device
+paths are refused, but same-device mount aliases and host directory moves remain
+outside this guarantee. macOS path-scoped rules remain unsupported. Other
+platforms retain path checks.
 Search enumerates ignored-filtered text files and reads them through this same
 entry point. Linux restore/undo pin snapshot and target directory descriptors,
 stage the complete file outside the workspace, then atomically replace the target
@@ -431,7 +436,7 @@ leave orphan snapshots/temp manifests, and directory entries are not synced for 
 power-loss durability guarantee. Non-Linux checkpoint creation keeps its earlier
 path-based behavior.
 
-Metadata isolation, non-Linux descriptor confinement and OS-level range isolation
+Metadata isolation, remaining platform descriptor/restore boundaries and OS-level range isolation
 remain pending. `unrestricted`
 shells retain host permissions, including access to external state. See the
 [measured boundaries](docs/audit-boundary.md).

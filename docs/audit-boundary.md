@@ -1,6 +1,6 @@
 # 审计边界与 P0-3 分阶段交付
 
-2026-10-04。已交付共用权限、外部审计内容存储、Linux 描述符入口和工具范围规则；P0-3 的元数据与完整 OS 范围隔离仍未完成。
+2026-10-04。已交付共用权限、外部审计内容存储、Linux/macOS 直接工具描述符入口、Windows 硬链接检查和工具范围规则；P0-3 的元数据与完整 OS 范围隔离仍未完成。
 
 ## 已交付的边界
 
@@ -14,7 +14,7 @@ CLI 没有交互审批处理器，ask 明确拒绝并返回失败；TUI 每次�
 read/write/edit 拒绝 `.harness` 审计/控制路径、解析后的符号链接别名和 Unix 硬链接；
 search 及自动上下文也过滤这些文件，文件工具在审批之后重复检查目标。
 直接工具暂时拒绝整个 `.harness`，包括 artifacts/tmp。用户仍可通过专门命令查看产物、
-恢复检查点和 replay。Linux 直接工具的描述符级保护已交付；Windows 硬链接及非 Linux 描述符边界尚未交付。
+恢复检查点和 replay。Linux/macOS 直接工具的描述符级保护及 Windows 保守硬链接检查已交付；其他描述符与非 Linux 行政恢复边界仍待补齐。
 工具权限不是整个进程的文件读取隔离，模型还会收到受过滤和预算约束的工作区上下文。
 
 验收由 [权限集成测试](../tests/permissions.rs)、既有取消/运行测试和 Linux PTY 测试覆盖。
@@ -258,6 +258,28 @@ Windows 架构、网络文件系统、shell 或全部平台测试已验证。
 不保证检查后宿主并发新增 alias、同 inode 修改、reparse point 或目录移动的防护；
 支持边界是成功查询到真实计数的文件系统，不据本地 Linux 回归宣称 Windows 原生通过。
 
+## macOS 直接文件工具的描述符入口
+
+[posix_file.rs](../src/posix_file.rs) 从可信 canonical 工作区根打开目录，逐个普通路径
+分量通过 openat/O_NOFOLLOW 固定 parent FD；mkdirat 后再次安全打开，创建文件使用
+O_EXCL，拒绝缺失检查后插入的条目。O_NONBLOCK 避免 FIFO 读取阻塞，实际打开后
+检查 regular file、设备号及已有审计 inode 检查。已有内部符号链接先解析为工作区内
+目标，校验后最终文件或 parent 被替换为链接时拒绝；read、快照源和修改使用同一
+文件 FD，search/context 共用安全读取。openat 相对目录 FD 的语义见
+[POSIX open/openat](https://pubs.opengroup.org/onlinepubs/9799919799/functions/open.html)，
+O_NOFOLLOW 的最终分量限制见 [Apple open 文档](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/open.2.html)。
+
+新增五项 walker 单元，并把六项 ToolFile 路径替换测试用于 macOS；三个原生集成验证
+嵌套创建/读取/编辑/快照、内部链接、审计硬链接拒绝与 search 过滤、CLI JSONL 持久化
+一致性，另有自动上下文审计 alias 过滤单元。Linux 本地 220 个 Rust 与 14 个离线评测、
+fmt/Clippy/release 通过；新增 macOS 原生 CI，原生结果待运行确认。
+
+仅拒绝跨设备路径，不宣称 Linux NO_XDEV 等价边界：同设备 mount alias、可信根的
+宿主 ancestor 替换、打开后宿主整体移动目录、同 inode 并发写入或新增 alias 仍未隔离。
+macOS 的 path rules 继续明确拒绝，受限 shell 继续不支持；独立 create_checkpoint、
+快照输出目录和 restore/undo 仍采用旧路径实现。本轮保证只扩展直接工具文件入口与
+快照源，不扩大这些行政 API 或 OS 元数据/读取边界。完整 P0-3 保持未完成。
+
 ## 已验证的剩余限制与下一项
 
 前轮在一次性 Linux workspace，通过 workspace-write shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
@@ -269,4 +291,4 @@ Windows 架构、网络文件系统、shell 或全部平台测试已验证。
 P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权；下一项为 P0-3b2b2：元数据、剩余路径竞争与 OS 范围隔离；显式 unrestricted 仍有
 宿主权限。Windows 直接工具已补保守硬链接检查，macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
-Linux 整套回归与 Windows x64 六项针对性测试已验证；其余平台及完整隔离未验证。
+Linux 整套回归与 Windows x64 六项针对性测试已验证；macOS 原生入口测试待 CI 确认，完整隔离未验证。

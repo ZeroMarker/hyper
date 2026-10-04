@@ -9,6 +9,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  macos-files:
+    name: macOS native file boundary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Native compiler target
+        run: rustc -vV
+      - name: POSIX traversal tests
+        run: cargo test --lib posix_file
+      - name: Opened file and path replacement tests
+        run: cargo test --lib tool_file
+      - name: Direct tools and JSONL integration
+        run: cargo test --test macos_files
+      - name: Automatic context audit filtering
+        run: cargo test --lib macos_automatic_context
+
   windows-hardlinks:
     name: Windows native hardlink boundary
     runs-on: windows-latest

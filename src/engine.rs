@@ -2228,6 +2228,26 @@ mod tests {
             search_workspace_files(dir.path(), "--literal", 10, &ToolPermissions::default());
         assert_eq!(matches, vec!["sample.txt:2:--literal value"]);
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_automatic_context_omits_hardlinked_audit_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(root.path()).unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/public.rs"), "PUBLIC_CONTEXT").unwrap();
+        let marker = workspace.paths.dir.join("context-marker");
+        fs::write(&marker, "AUDIT_CONTEXT_SECRET").unwrap();
+        fs::hard_link(marker, root.path().join("README.md")).unwrap();
+        let context = workspace_context(
+            &root.path().canonicalize().unwrap(),
+            &ToolPermissions::default(),
+        )
+        .unwrap();
+        assert!(context.contains("PUBLIC_CONTEXT"));
+        assert!(!context.contains("AUDIT_CONTEXT_SECRET"));
+        assert!(!context.contains("README.md"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn automatic_context_omits_denied_or_ask_paths_and_contents() {

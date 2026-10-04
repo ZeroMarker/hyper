@@ -1,4 +1,4 @@
-//! Direct file I/O anchored to the workspace, with Linux descriptor confinement.
+//! Direct file I/O anchored to the workspace, with Linux and macOS descriptor traversal.
 use anyhow::{Context, Result, bail};
 #[cfg(not(target_os = "linux"))]
 use std::fs;
@@ -16,10 +16,11 @@ pub(crate) struct ToolFile {
 }
 
 impl ToolFile {
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub fn open(root: &Path, target: &str, writable: bool, create: bool) -> Result<Self> {
-        let resolved = crate::workspace::resolve_tool_path(root, target)?;
-        Self::open_resolved(root, resolved, writable, create)
+        let root = root.canonicalize()?;
+        let resolved = crate::workspace::resolve_tool_path(&root, target)?;
+        Self::open_resolved(&root, resolved, writable, create)
     }
 
     pub(crate) fn open_resolved(
@@ -31,7 +32,9 @@ impl ToolFile {
         let relative = target.strip_prefix(root)?;
         #[cfg(target_os = "linux")]
         let (file, existed) = linux::open(root, relative, writable, create)?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let (file, existed) = crate::posix_file::open(root, relative, writable, create)?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let (file, existed) = {
             if create && let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
@@ -261,7 +264,7 @@ pub(crate) mod linux {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::symlink};
@@ -278,7 +281,13 @@ mod tests {
         symlink(outside.path().join("secret"), &resolved).unwrap();
         for writable in [false, true] {
             assert!(
-                ToolFile::open_resolved(root.path(), resolved.clone(), writable, false).is_err()
+                ToolFile::open_resolved(
+                    &root.path().canonicalize().unwrap(),
+                    resolved.clone(),
+                    writable,
+                    false
+                )
+                .is_err()
             );
         }
         assert_eq!(
@@ -295,7 +304,10 @@ mod tests {
         let resolved = crate::workspace::resolve_tool_path(root.path(), "parent/new/file").unwrap();
         fs::remove_dir(root.path().join("parent")).unwrap();
         symlink(outside.path(), root.path().join("parent")).unwrap();
-        assert!(ToolFile::open_resolved(root.path(), resolved, true, true).is_err());
+        assert!(
+            ToolFile::open_resolved(&root.path().canonicalize().unwrap(), resolved, true, true)
+                .is_err()
+        );
         assert!(!outside.path().join("new").exists());
     }
 
@@ -310,7 +322,9 @@ mod tests {
         fs::rename(root.path().join("victim"), root.path().join("original")).unwrap();
         symlink(outside.path().join("secret"), root.path().join("victim")).unwrap();
         assert_eq!(file.read_text().unwrap(), "before");
-        let cp = file.checkpoint(root.path(), snapshots.path()).unwrap();
+        let cp = file
+            .checkpoint(&root.path().canonicalize().unwrap(), snapshots.path())
+            .unwrap();
         file.replace(b"after").unwrap();
         assert_eq!(fs::read_to_string(cp.snapshot_path).unwrap(), "before");
         assert_eq!(
@@ -334,10 +348,15 @@ mod tests {
         fs::hard_link(&protected, &resolved).unwrap();
         for writable in [false, true] {
             assert!(
-                ToolFile::open_resolved(root.path(), resolved.clone(), writable, false)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("protected audit hardlink")
+                ToolFile::open_resolved(
+                    &root.path().canonicalize().unwrap(),
+                    resolved.clone(),
+                    writable,
+                    false
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("protected audit hardlink")
             );
         }
         assert_eq!(fs::read_to_string(protected).unwrap(), "AUDIT");

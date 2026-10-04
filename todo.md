@@ -64,9 +64,11 @@
 
 - [x] **Linux 受限 shell 显式 socket 限制**：两种受限模式共用 seccomp，拒绝 socket 创建/连接及带地址或消息式收发、io_uring 与外部描述符导入，兼容 pipes/文件及 workspace-write chmod；线程/exec/预开 FD 原生验证通过。匿名 AF_UNIX socketpair/无地址收发允许，命名本地 socket 禁止，主动继承 socket 的通用 I/O 不覆盖。215 个 Rust/14 个离线评测通过；完整 P0-3 不关闭。见 [边界说明](docs/audit-boundary.md)。
 
+- [x] **macOS 直接工具描述符入口**：逐层 openat/O_NOFOLLOW 固定 parent，O_EXCL 创建，读取/快照源/修改共用文件 FD；链接替换与跨设备路径拒绝，search/context 共用。五项 walker/六项 ToolFile 单元、三个工具/CLI 集成与上下文过滤单元进入原生 CI；本地 Linux 220 Rust/14 离线评测通过，macOS 原生结果待确认。同设备挂载别名、宿主目录移动、快照输出/行政 API、范围 rules 与 shell 仍待办。见 [边界说明](docs/audit-boundary.md)。
+
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
-最新运行时代码/基线为 `b8464f9`：[socket 回归](evals/baselines/2026-10-04-sockets/report.md) 30/30，通过 45 轮用量/持久化、30 次 prune、恢复及长会话各 3/3；实现 CI 全部通过（含 Linux x86 原生与 Windows 硬链接）。初版 `edc3118` 的 27/30 独立保留，Rust 编译/子进程握手回归已补；例外仅 AF_UNIX 匿名 pair 与无地址收发，外部命名 socket、SCM_RIGHTS 等仍拒绝。完整 P0-3、Linux 路径级 metadata/读取/宿主资源及其他平台继续待办。
+最近的 Linux 模型基线为 `b8464f9`；其后新增 macOS 直接文件工具描述符入口，原生 CI 待确认，本轮不重跑模型基线：[macOS 边界](docs/audit-boundary.md)。此前 [socket 回归](evals/baselines/2026-10-04-sockets/report.md) 30/30，通过 45 轮用量/持久化、30 次 prune、恢复及长会话各 3/3；实现 CI 全部通过（含 Linux x86 原生与 Windows 硬链接）。初版 `edc3118` 的 27/30 独立保留，Rust 编译/子进程握手回归已补；例外仅 AF_UNIX 匿名 pair 与无地址收发，外部命名 socket、SCM_RIGHTS 等仍拒绝。完整 P0-3、Linux 路径级 metadata/读取/宿主资源及其他平台继续待办。
 
 前轮补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，Windows x64 六项原生测试已通过；Linux 209 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过，见实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962)。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
 
@@ -74,7 +76,7 @@
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围与 Windows 直接工具保守硬链接检查已交付，继续补 OS 读取/元数据边界、非 Linux 描述符/恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
+- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围、macOS 直接工具描述符与 Windows 保守硬链接检查已交付，继续补 OS 读取/元数据边界、其余平台描述符与非 Linux 恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux 显式 UDP/Unix socket syscall 限制已交付，继续 metadata、外部读取、主动继承资源及 macOS/Windows 原生隔离，按平台报告支持范围；Landlock 与 seccomp 共用，非 Linux、ABI/架构不支持或过滤安装失败仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null`、git 内部 `/dev/null` 设备访问与重复策略拒绝样本；跟踪长会话约束位置遗漏。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 
