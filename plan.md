@@ -121,7 +121,7 @@ P2 共用门槛：至少一个实际任务或集成消费者证明需求；已�
 
 ## 接下来执行什么
 
-本轮交付 Linux 两种受限模式的显式 socket syscall 限制：UDP/Unix socket 创建/收发、io_uring 和外部 FD 导入禁止，socketpair/本地服务也限制；pipes/文件兼容。214 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过。主动继承 socket 的通用 I/O、预建立共享映射、元数据与完整 OS 读取边界仍未交付；x86 原生与固定模型任务由 CI/基线另验，见 [实际边界](docs/audit-boundary.md)。
+本轮交付 Linux 两种受限模式的显式 socket syscall 限制：UDP/Unix socket 创建/收发、io_uring 和外部 FD 导入禁止，匿名 AF_UNIX socketpair/无地址收发允许，命名本地服务受限；pipes/文件兼容。215 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过。主动继承 socket 的通用 I/O、预建立共享映射、元数据与完整 OS 读取边界仍未交付；x86 原生与固定模型任务由 CI/基线另验，见 [实际边界](docs/audit-boundary.md)。
 
 本次交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 已全部通过；Windows x64 六项测试与 Linux 209 个 Rust/14 个离线评测分别验证。未重跑模型基线，Linux 历史报告保持原样。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
 

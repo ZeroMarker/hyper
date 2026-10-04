@@ -62,7 +62,7 @@
 
 - [x] **Windows 直接工具保守硬链接检查**：解析路径与实际 I/O 句柄拒绝所有多链接文件及计数查询失败，search/context 共用，审计存储启动检查复用；普通仓库硬链接同样拒绝。Windows x64 原生 3 单元 + 3 集成通过，Linux 回归通过。P0-3b2b2 其余隔离仍待办。见 [边界与 CI](docs/audit-boundary.md)。
 
-- [x] **Linux 受限 shell 显式 socket 限制**：两种受限模式共用 seccomp，拒绝 socket 创建/显式收发、io_uring 与外部描述符导入，兼容 pipes/文件及 workspace-write chmod；线程/exec/预开 FD 原生验证通过。socketpair/工作区本地 socket 同样禁止，主动继承 socket 的通用 I/O 不覆盖。214 个 Rust/14 个离线评测通过；完整 P0-3 不关闭。见 [边界说明](docs/audit-boundary.md)。
+- [x] **Linux 受限 shell 显式 socket 限制**：两种受限模式共用 seccomp，拒绝 socket 创建/连接及带地址或消息式收发、io_uring 与外部描述符导入，兼容 pipes/文件及 workspace-write chmod；线程/exec/预开 FD 原生验证通过。匿名 AF_UNIX socketpair/无地址收发允许，命名本地 socket 禁止，主动继承 socket 的通用 I/O 不覆盖。215 个 Rust/14 个离线评测通过；完整 P0-3 不关闭。见 [边界说明](docs/audit-boundary.md)。
 
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 

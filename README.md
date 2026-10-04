@@ -443,8 +443,9 @@ so a tool cannot consume TUI keyboard events.
 `--sandbox` applies to CLI and TUI runs. The default is `workspace-write`:
 on Linux, shell commands and their child processes use Landlock to confine
 filesystem writes to the workspace and deny TCP connections. Both restricted
-modes also use seccomp to deny socket creation and explicit socket I/O, covering
-UDP and Unix sockets. `read-only`
+modes also use seccomp to deny external socket creation/connections and addressed
+socket I/O, covering UDP and Unix sockets. Anonymous AF_UNIX socketpair and
+address-free send/recv remain available for process IPC. `read-only`
 also denies `write`/`edit` tools and shell writes, and on Linux rejects explicit
 metadata mutation syscalls with EPERM. `unrestricted` explicitly
 removes shell isolation and the dangerous-command check; tool permission
@@ -465,17 +466,17 @@ seccomp filtering on native 64-bit x86-64 or little-endian aarch64; unsupported
 architectures or filter installation failures refuse to start the shell. The
 filter also rejects compat/x32 syscall ABIs, io_uring, pidfd_getfd, ptrace and
 process_vm_writev. Read-only additionally rejects ioctl. Socket-based build
-servers, local network tests and Unix socket IPC (including socketpair) cannot
-run in restricted modes, even inside the workspace; ordinary pipes still work. To run shell commands on unsupported hosts, select
+servers and local network tests cannot run in restricted modes, even inside
+the workspace; ordinary pipes and anonymous Unix socketpair still work. To run
+shell commands on unsupported hosts, select
 `unrestricted` explicitly.
 
 This boundary limits writes and explicit socket syscalls. It does not revoke
-generic read/write on sockets deliberately inherited by a library caller,
-control shared mappings prepared by the host, or restrict every metadata
+generic read/write or address-free send/recv on connected sockets deliberately
+inherited by a library caller, control shared mappings prepared by the host, or restrict every metadata
 operation. Library callers must supply trusted inherited descriptors and use
 `Sandbox::apply_prepared_in_child`; `apply_in_child` applies only Landlock.
-Workspace-write metadata
-isolation remains pending. Read-only restrictions cover explicit mutation
+Workspace-write metadata isolation remains pending. Read-only restrictions cover explicit mutation
 syscalls, including fchmodat2 and new xattr-at/file_setattr calls, inherited by
 threads and child processes; normal reads may still update access times and locks
 are not forbidden. Commands can still read files

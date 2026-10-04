@@ -59,12 +59,21 @@ def check():
     operations = [lambda f=f, k=k: socket.socket(f, k)
                   for f in (socket.AF_INET, socket.AF_INET6, socket.AF_UNIX)
                   for k in (socket.SOCK_DGRAM, socket.SOCK_STREAM)]
-    operations.append(socket.socketpair)
     for operation in operations:
         try: operation()
         except OSError as e: assert e.errno == errno.EPERM, e
         else: raise AssertionError('socket creation allowed')
 check()
+# Anonymous AF_UNIX pairs support the Rust process spawn handshake. They can
+# only exchange data within the creating process tree; addressed sends are denied.
+left, right = socket.socketpair()
+left.sendall(b'pair'); assert right.recv(4) == b'pair'
+for operation in [lambda:left.sendmsg([b'FORGED']),lambda:right.recvmsg(100),
+                  lambda:left.connect('external.sock')]:
+ try: operation()
+ except OSError as e: assert e.errno == errno.EPERM,e
+ else: raise AssertionError('socketpair allowed explicit external operation')
+left.close(); right.close()
 errors = []
 def threaded():
     try: check()
@@ -89,16 +98,13 @@ assert open('readable').read() == 'available'
 fn restricted_shell_denies_raw_socket_async_and_descriptor_import_syscalls() {
     let syscalls = vec![
         libc::SYS_socket,
-        libc::SYS_socketpair,
         libc::SYS_connect,
         libc::SYS_bind,
         libc::SYS_listen,
         libc::SYS_accept,
         libc::SYS_accept4,
-        libc::SYS_sendto,
         libc::SYS_sendmsg,
         libc::SYS_sendmmsg,
-        libc::SYS_recvfrom,
         libc::SYS_recvmsg,
         libc::SYS_recvmmsg,
         libc::SYS_shutdown,
@@ -111,7 +117,9 @@ fn restricted_shell_denies_raw_socket_async_and_descriptor_import_syscalls() {
         libc::SYS_process_vm_writev,
     ];
     let script = format!(
-        "import ctypes,errno\nc=ctypes.CDLL(None,use_errno=True)\nfor nr in {syscalls:?}:\n ctypes.set_errno(0)\n result=c.syscall(ctypes.c_long(nr),0,0,0,0,0,0)\n assert result == -1 and ctypes.get_errno() == errno.EPERM,(nr,result,ctypes.get_errno())\n"
+        "import ctypes,errno\nc=ctypes.CDLL(None,use_errno=True)\nfor nr in {syscalls:?}:\n ctypes.set_errno(0)\n result=c.syscall(ctypes.c_long(nr),0,0,0,0,0,0)\n assert result == -1 and ctypes.get_errno() == errno.EPERM,(nr,result,ctypes.get_errno())\nfor nr in [{},{}]:\n for pointer in [1,1<<32,(1<<64)-1]:\n  ctypes.set_errno(0)\n  result=c.syscall(ctypes.c_long(nr),ctypes.c_long(-1),0,0,0,ctypes.c_void_p(pointer),0)\n  assert result == -1 and ctypes.get_errno() == errno.EPERM,(nr,pointer,ctypes.get_errno())\n ctypes.set_errno(0)\n result=c.syscall(ctypes.c_long(nr),ctypes.c_long(-1),0,0,0,ctypes.c_void_p(0),0)\n assert result == -1 and ctypes.get_errno() == errno.EBADF,(nr,ctypes.get_errno())\n",
+        libc::SYS_sendto,
+        libc::SYS_recvfrom
     );
     for mode in [ExecutionMode::WorkspaceWrite, ExecutionMode::ReadOnly] {
         let root = tempfile::tempdir().unwrap();
@@ -135,7 +143,7 @@ udp=socket.socket(fileno=200)
 unix=socket.socket(fileno=201)
 operations=[lambda:udp.connect(('127.0.0.1',{})),
             lambda:udp.sendto(b'FORGED',('127.0.0.1',{})),
-            lambda:udp.recvfrom(100),lambda:unix.send(b'FORGED'),
+            lambda:udp.recvfrom(100),lambda:unix.sendto(b'FORGED','external.sock'),
             lambda:unix.sendmsg([b'FORGED']),lambda:unix.recvmsg(100)]
 for operation in operations:
  try: operation()
@@ -204,4 +212,37 @@ fn unrestricted_shell_can_reach_udp_pathname_and_abstract_unix_endpoints() {
         stream.read_exact(&mut buffer[..6]).unwrap();
         assert_eq!(&buffer[..6], b"marker");
     }
+}
+
+#[test]
+fn workspace_write_can_compile_rust_and_spawn_child_processes() {
+    let root = tempfile::tempdir().unwrap();
+    let source = r#"use std::os::unix::process::CommandExt;
+    fn main() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf child"]);
+        unsafe { command.pre_exec(|| Ok(())); }
+        if std::env::args().any(|arg| arg == "--status-only") {
+            assert!(command.status().unwrap().success());
+        } else {
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"child");
+        }
+        let mut missing = std::process::Command::new("/hyper-no-such-program");
+        unsafe { missing.pre_exec(|| Ok(())); }
+        assert_eq!(missing.spawn().unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }"#;
+    fs::write(root.path().join("probe.rs"), source).unwrap();
+    run_python(
+        root.path(),
+        "import subprocess\nsubprocess.run(['rustc','probe.rs','-o','probe'],check=True)\nsubprocess.run(['./probe'],check=True)",
+        ExecutionMode::WorkspaceWrite,
+    );
+    // The built program also uses Rust's socketpair spawn handshake in read-only.
+    run_python(
+        root.path(),
+        "import subprocess\nsubprocess.run(['./probe','--status-only'],check=True)",
+        ExecutionMode::ReadOnly,
+    );
 }

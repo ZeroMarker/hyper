@@ -63,6 +63,32 @@ impl SyscallFilter {
                 program.push(instruction(0x35, 0x4000_0000, 0, 1));
                 program.push(instruction(RETURN, DENY, 0, 0));
             }
+            // Rust's Unix process spawn handshake uses an anonymous socketpair.
+            // Allow only AF_UNIX pairs: no named peer
+            // is contacted, and connect/sendmsg/recvmsg remain denied below.
+            // seccomp_data.args[0] starts at byte 16; these native ABIs are LE.
+            program.extend([
+                instruction(EQUAL, libc::SYS_socketpair as u32, 0, 4),
+                instruction(LOAD_WORD, 16, 0, 0),
+                instruction(EQUAL, libc::AF_UNIX as u32, 1, 0),
+                instruction(RETURN, DENY, 0, 0),
+                instruction(RETURN, ALLOW, 0, 0),
+            ]);
+            // Rust Socket::read/write use recv/send (recvfrom/sendto with a
+            // null address). Permit address-free I/O on existing connections;
+            // new external sockets/connections and SCM_RIGHTS remain denied.
+            // Check BOTH halves of the 64-bit pointer, never dereference it.
+            for syscall in [libc::SYS_sendto, libc::SYS_recvfrom] {
+                program.extend([
+                    instruction(EQUAL, syscall as u32, 0, 6),
+                    instruction(LOAD_WORD, 48, 0, 0),
+                    instruction(EQUAL, 0, 0, 3),
+                    instruction(LOAD_WORD, 52, 0, 0),
+                    instruction(EQUAL, 0, 0, 1),
+                    instruction(RETURN, ALLOW, 0, 0),
+                    instruction(RETURN, DENY, 0, 0),
+                ]);
+            }
             let mut denied = denied_socket_syscalls();
             if mode == ExecutionMode::ReadOnly {
                 denied.extend(denied_metadata_syscalls());
@@ -139,7 +165,6 @@ fn denied_metadata_syscalls() -> Vec<libc::c_long> {
 fn denied_socket_syscalls() -> Vec<libc::c_long> {
     vec![
         libc::SYS_socket,
-        libc::SYS_socketpair,
         libc::SYS_connect,
         libc::SYS_bind,
         libc::SYS_listen,
@@ -176,12 +201,35 @@ mod tests {
     use super::*;
 
     fn evaluate(filter: &SyscallFilter, arch: u32, syscall: u32) -> u32 {
+        evaluate_with_arg(filter, arch, syscall, 0)
+    }
+
+    fn evaluate_with_arg(filter: &SyscallFilter, arch: u32, syscall: u32, arg0: u32) -> u32 {
+        evaluate_with_args(filter, arch, syscall, arg0, 1)
+    }
+
+    fn evaluate_with_args(
+        filter: &SyscallFilter,
+        arch: u32,
+        syscall: u32,
+        arg0: u32,
+        arg4: u64,
+    ) -> u32 {
         let mut acc = 0;
         let mut pc = 0;
         loop {
             let op = &filter.program[pc];
             match op.code {
-                LOAD_WORD => acc = if op.k == 4 { arch } else { syscall },
+                LOAD_WORD => {
+                    acc = match op.k {
+                        0 => syscall,
+                        4 => arch,
+                        16 => arg0,
+                        48 => arg4 as u32,
+                        52 => (arg4 >> 32) as u32,
+                        _ => panic!("unexpected offset"),
+                    }
+                }
                 EQUAL | 0x35 => {
                     let yes = if op.code == EQUAL {
                         acc == op.k
@@ -225,6 +273,40 @@ mod tests {
             for syscall in denied_socket_syscalls() {
                 assert_eq!(evaluate(&filter, arch, syscall as u32), DENY);
             }
+            for syscall in [libc::SYS_sendto, libc::SYS_recvfrom] {
+                assert_eq!(
+                    evaluate_with_args(&filter, arch, syscall as u32, 0, 0),
+                    ALLOW
+                );
+                for pointer in [1, 1_u64 << 32, u64::MAX] {
+                    assert_eq!(
+                        evaluate_with_args(&filter, arch, syscall as u32, 0, pointer),
+                        DENY
+                    );
+                }
+            }
+            assert_eq!(
+                evaluate_with_arg(
+                    &filter,
+                    arch,
+                    libc::SYS_socketpair as u32,
+                    libc::AF_UNIX as u32
+                ),
+                ALLOW
+            );
+            assert_eq!(
+                evaluate_with_arg(
+                    &filter,
+                    arch,
+                    libc::SYS_socketpair as u32,
+                    libc::AF_INET as u32
+                ),
+                DENY
+            );
+            assert_eq!(
+                evaluate_with_arg(&filter, arch, libc::SYS_socket as u32, libc::AF_UNIX as u32),
+                DENY
+            );
             for syscall in [
                 libc::SYS_read,
                 libc::SYS_write,

@@ -199,10 +199,13 @@ metadata 隔离继续待办，需要允许仓库内构建操作而保护外部�
 ## Linux 受限 shell 显式 socket 限制
 
 workspace-write 与 read-only 在 Landlock 后安装共用 seccomp BPF，禁止 socket、
-socketpair、connect/bind/listen/accept、send/recv 的单次与批量 syscall、shutdown、
-setsockopt，返回 EPERM。socket 创建整体拒绝，不按路径/域猜测外部服务，因此 UDP、
+connect/bind/listen/accept、带地址的 sendto/recvfrom、sendmsg/recvmsg 及批量 syscall、shutdown、
+setsockopt，返回 EPERM。socket 创建拒绝，不按路径/域猜测外部服务，因此 UDP、
 路径/抽象 Unix socket、IPv6、netlink 与其他 socket 家族都不可新建，工作区内也同样
-拒绝。io_uring 的 setup/enter/register 拒绝，防止异步 socket 操作绕过；pidfd_getfd、
+拒绝。仅 AF_UNIX 匿名 socketpair 与地址参数为完整 64 位 null 的 sendto/recvfrom
+允许，供 Rust 子进程启动握手使用，不创建命名/外部连接；BPF 同时检查指针高低
+32 位，不解引用用户地址。sendmsg/recvmsg（含 SCM_RIGHTS）与 connect 仍拒绝。
+io_uring 的 setup/enter/register 拒绝，防止异步 socket 操作绕过；pidfd_getfd、
 ptrace 与 process_vm_writev 拒绝，防止导入外部描述符或篡改宿主进程代为执行。
 
 [内核 seccomp 文档](https://docs.kernel.org/userspace-api/seccomp_filter.html)
@@ -211,18 +214,20 @@ ptrace 与 process_vm_writev 拒绝，防止导入外部描述符或篡改宿主
 Linux 原生 64 位 x86-64 或小端 aarch64。unrestricted 不安装此过滤，宿主 provider
 请求不在 shell 子进程内，保持可用。
 
-本地 Linux/aarch64 新增一个 BPF 单元与四个原生集成，覆盖两模式、线程/exec 继承、
+本地 Linux/aarch64 新增一个 BPF 单元与五个原生集成，覆盖两模式、线程/exec 继承、
 UDP/Unix 预打开 FD 的显式收发拒绝、raw syscall 的 EPERM、管道/普通文件兼容；
 宿主接收端确认没有收到字节。unrestricted 在真实 UDP、路径与抽象 Unix 端点正向
 送达 marker。原只读 metadata 四项测试仍通过，workspace-write 的合法 chmod/utime
-保持兼容。完整本地 214 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过；
+保持兼容。新增 Rust 编译及成功/失败子进程启动回归验证匿名通信；read-only 只验证
+status 启动，Rust output 的 ioctl/非阻塞管道操作仍受既有 ioctl 限制。
+完整本地 215 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过；
 x86-64 原生执行由 CI 验证，固定模型任务兼容结果另行记录。
 
-这会限制 socketpair 内部 IPC、依赖 Unix socket 的编译缓存/服务与本地网络测试，
+这会限制依赖命名 Unix socket 的编译缓存/服务与本地网络测试，
 不提供工作区内 socket 例外；需要此能力的任务须由宿主显式选 unrestricted。
 此交付是显式 socket syscall 边界，不是完整网络 namespace 或宿主描述符隔离。
-若库调用者主动继承已连接 socket，普通 read/write/readv/writev/sendfile/splice 仍可
-传输字节；宿主预先建立的共享映射/异步队列也不由该过滤自动撤销。调用者须控制
+若库调用者主动继承已连接 socket，普通 read/write/readv/writev/sendfile/splice
+及无地址 send/recv 仍可传输字节；宿主预先建立的共享映射/异步队列也不由该过滤自动撤销。调用者须控制
 继承资源并使用 apply_prepared_in_child；既有 apply_in_child 仅应用 Landlock。
 workspace-write 的路径级 metadata、宿主并发修改、外部读取与其他平台仍待办。
 不据 syscall 禁止列表承诺未来所有新接口，完整 P0-3 继续未完成。
