@@ -62,11 +62,13 @@
 
 ## 下一步（2026-10-04 更新，竞品证据沿用前轮）
 
+本次补齐 P0-3b2b2 的 Windows 直接工具硬链接检查：解析路径及实际 I/O 句柄均拒绝多链接/计数查询失败，search/context 同样过滤；普通硬链接也拒绝。新增三个原生单元、三个集成与 Windows CI job，本地 Linux 不执行 Windows 测试。迁移、恢复及 shell 边界不扩展；完整 P0-3 保持未完成。见 [Windows 检查与限制](docs/audit-boundary.md)。
+
 对标范围、官方来源、现状与详细验收见 [plan.md](plan.md)。最新运行时代码/评测基线为 `f8a1cc7`；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，完整 P1-5 保持未完成。[本轮真实回归](evals/baselines/2026-10-04-completion/report.md) 30/30 通过，错误修改恢复、长会话、只读规划与 Python 深文件各 3/3；45 轮完整 usage 和持久化一致，30 次 prune 成功。没有触发完成失败诊断，拒绝行为由本地故障测试另验，不据此宣称前轮残缺参数根因已修复。Responses/Messages 各一次真实只读冒烟通过。此前恢复/快照基线的残缺参数失败与未知总用量仍保留；不重跑替换历史、不作竞品或小样本因果判断。外部 state 磁盘统计排除 workspace tmp，不与旧口径直接比较。
 
 ### P0：质量与运行控制
 
-- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围已交付，继续补 OS 读取/元数据边界、Windows 硬链接、非 Linux 描述符/恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
+- [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围与 Windows 直接工具保守硬链接检查已交付，继续补 OS 读取/元数据边界、非 Linux 描述符/恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux UDP/Unix socket、metadata、外部读取边界及 macOS/Windows 原生隔离，按平台报告支持范围；目前 Landlock 只覆盖部分写入和 TCP，非 Linux 或 ABI 不足仍拒绝受限 shell。与 P0-3 分阶段交付。
 - [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null`、git 内部 `/dev/null` 设备访问与重复策略拒绝样本；跟踪长会话约束位置遗漏。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 

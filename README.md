@@ -387,7 +387,12 @@ permission or gated approval behavior; their source is `legacy-library-api`.
 Use `run_task_with_control` for explicit decisions and the default ask policy.
 
 Agent file tools deny the retired `.harness` area, including resolved symlink
-aliases and Unix hardlinks; search/context also filter these files. Authoritative
+aliases and Unix hardlinks; search/context also filter these files. On Windows,
+file tools conservatively reject every file whose open handle reports a link
+count other than one, including ordinary workspace hardlinks. They check both
+the resolved path and the handle actually used for I/O; failure to query the
+count also denies access. This does not add Windows shell isolation or protect
+against concurrent alias creation after the check. Authoritative
 audit storage now lives outside the workspace. Restricted Linux shell commands
 cannot write, delete, rename or hardlink these external records. Pre-existing
 hardlink aliases fail closed before shell execution. Artifact output is collected

@@ -760,6 +760,10 @@ pub fn resolve_tool_path(root: &Path, target: &str) -> Result<PathBuf> {
     }
     if let Ok(metadata) = fs::metadata(&resolved) {
         check_tool_inode(root, &metadata)?;
+        #[cfg(windows)]
+        if metadata.is_file() {
+            crate::windows_file::require_single_link(&fs::File::open(&resolved)?)?;
+        }
     }
     Ok(resolved)
 }

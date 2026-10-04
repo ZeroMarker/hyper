@@ -396,6 +396,10 @@ pub(crate) fn validate_shell_boundary(root: &Path, audit: &Path) -> Result<()> {
             if metadata.file_type().is_symlink() {
                 bail!("protected audit storage contains a symlink");
             }
+            #[cfg(windows)]
+            if metadata.is_file() {
+                crate::windows_file::require_single_link(&fs::File::open(entry.path())?)?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;

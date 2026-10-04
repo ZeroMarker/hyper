@@ -52,6 +52,8 @@ impl ToolFile {
             bail!("file tool requires a regular file: {}", relative.display());
         }
         crate::workspace::check_tool_inode(root, &metadata)?;
+        #[cfg(windows)]
+        crate::windows_file::require_single_link(&file)?;
         Ok(Self {
             file,
             target,

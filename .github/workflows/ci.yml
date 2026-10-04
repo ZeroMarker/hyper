@@ -9,6 +9,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  windows-hardlinks:
+    name: Windows native hardlink boundary
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Handle and audit boundary tests
+        run: cargo test --lib windows_
+      - name: Direct tools and search integration
+        run: cargo test --test windows_hardlinks
+
   check:
     name: fmt + clippy + test
     runs-on: ubuntu-latest

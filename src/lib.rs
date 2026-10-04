@@ -19,6 +19,8 @@ pub mod sandbox;
 pub mod state;
 mod tool_file;
 pub mod tui;
+#[cfg(windows)]
+mod windows_file;
 pub mod workspace;
 
 pub use approval::{ApprovalGate, ApprovalRequest};

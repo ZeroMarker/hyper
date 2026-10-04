@@ -2,6 +2,8 @@
 
 ## 当前状态
 
+2026-10-04（第十四轮）：推进 P0-3b2b2 的 Windows 直接文件工具硬链接检查。通过 GetFileInformationByHandle 检查真实句柄链接数，解析路径和实际打开后均拒绝多链接/查询失败，search/context 共用，审计存储启动校验同样拒绝。保守拒绝全部普通硬链接，不依赖文件 ID；迁移仍复制新 inode，不改变行政恢复/独立快照。新增三个 Windows 单元、三个工具集成和原生 Windows CI；本地 Linux 209 个 Rust 测试通过，原生 Windows 结果以 CI 为准。Linux 默认模式元数据、其他平台描述符/恢复、宿主并发新增 alias 与目录移动仍待办，完整 P0-3 不关闭。见 [Windows 边界](docs/audit-boundary.md)。
+
 项目已经全面迁移到 Rust 1.94，核心运行时不依赖 Node.js 或 TypeScript；npm 仅作为预编译二进制的分发渠道。
 
 2026-10-04（第十三轮）：交付 Chat/Responses 明确未完成拒绝与有界流式诊断。length/content_filter 与 Responses incomplete/failed/矛盾完成状态拒绝整个工具批次；SSE/普通 JSON 兼容路径覆盖，缺终结/残缺参数继续失败。model.failed 与 step/run 失败 details 保留协议、终结、允许列表原因、帧/文本/调用计数、最多 16 项工具元数据、完整 reportedUsage 和 JSON 类别/位置，不含参数正文或任意 provider 错误文本；不自动重试已消费回复，取消/事件发布失败保持独立。Messages 缺计数不再补零。评测单独保存 completion_failures，失败用量仍不并入完整总量，不重算历史报告。新增七个协议单元、一个有界诊断单元和 CLI 集成验收；本地 209 个 Rust 测试、14 个评测测试、fmt、Clippy 与 release 构建通过。已有 PTY 退出检查的两次 poll 竞争补二次谓词核对。完整 P1-5 不关闭，见 [完成语义及后续](docs/model-completion.md)。

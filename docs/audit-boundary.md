@@ -196,6 +196,26 @@ apply_in_child(ruleset_fd) 只应用 Landlock，保留兼容，不含此过滤�
 不由此隔离，也不据 denylist 宣称覆盖未来所有新 syscall。workspace-write 的路径级
 metadata 隔离继续待办，需要允许仓库内构建操作而保护外部审计元数据。
 
+## Windows 直接文件工具硬链接检查
+
+Windows 路径解析及 ToolFile 实际打开后，分别通过
+[GetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle)
+读取句柄的 nNumberOfLinks；不是使用不稳定的 Rust MetadataExt 接口，也不以
+路径拼写判定 alias。计数不为 1 或查询失败即拒绝，read/write/edit、search 与
+自动上下文共用此入口；审计存储的 shell 启动前检查也采用同一规则。
+这是保守的所有硬链接拒绝：普通仓库硬链接同样不可用，删除别名恢复单链接后可用。
+Windows 不再仅因非 Unix 而跳过硬链接检查。
+
+新增三个 Windows 句柄/边界单元与三个工具集成测试，覆盖打开后原路径替换、
+解析后新增 alias、外部与旧审计 marker、read/write/edit 的显式 allow 拒绝、
+search 内容过滤、普通硬链接拒绝及单链接文件兼容。CI 增加 Windows 原生 job；
+本地 Linux 执行 209 个 Rust 测试，Windows 测试在本机不执行，原生结果以 CI 为准。
+
+本次不改变状态迁移的新 inode 复制语义，不将源硬链接变成迁移拒绝条件。
+没有增加 Windows 受限 shell、目录描述符或恢复/独立快照保护，行政 API 保持原边界。
+不保证检查后宿主并发新增 alias、同 inode 修改、reparse point 或目录移动的防护；
+支持边界是成功查询到真实计数的文件系统，不据本地 Linux 回归宣称 Windows 原生通过。
+
 ## 已验证的剩余限制与下一项
 
 前轮在一次性 Linux workspace，通过 workspace-write shell 对外部审计 marker 执行 `os.chmod(...,0o400)`，
@@ -205,6 +225,6 @@ metadata 隔离继续待办，需要允许仓库内构建操作而保护外部�
 因 uid_map 权限失败，不能把挂载 namespace 当作已可用能力。
 
 P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权；下一项为 P0-3b2b2：元数据、剩余路径竞争与 OS 范围隔离；显式 unrestricted 仍有
-宿主权限。Windows 硬链接及 macOS/Windows 原生受限 shell 继续分平台交付。
+宿主权限。Windows 直接工具已补保守硬链接检查，macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
 本轮仅在 Linux 实测，不宣称跨平台原生验证完成。
