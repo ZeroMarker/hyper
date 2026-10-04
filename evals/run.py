@@ -23,6 +23,23 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def usage_metrics(events):
+    iterations = [e['payload'] for e in events if e['type'] == 'model.iteration']
+    keys = ['prompt_tokens', 'completion_tokens', 'total_tokens']
+    known = [i['usage'] for i in iterations if isinstance(i.get('usage'), dict)
+             and all(type(i['usage'].get(k)) is int and i['usage'][k] >= 0 for k in keys)]
+    # A fitting budget is recorded before requesting each logical model reply.
+    # A failed stream can have no iteration event even after earlier replies.
+    requests = sum(e['type'] == 'model.context_budget' and e['payload'].get('fits') is True for e in events)
+    unobserved = max(0, requests - len(iterations))
+    complete = bool(iterations) and len(known) == len(iterations) and unobserved == 0
+    totals = {k: sum(u[k] for u in known) for k in keys}
+    return {'usage_complete': complete, 'usage': totals if complete else None,
+            'known_partial_usage': totals if known else None,
+            'missing_usage_iterations': len(iterations) - len(known) + unobserved,
+            'unobserved_model_replies': unobserved}
+
+
 def snapshot(root):
     return {str(p.relative_to(root)): digest(p) for p in sorted(root.rglob('*'))
             if p.is_file() and not any(part in {'.harness', '.hyper-tmp', 'target', '__pycache__', '.git'} for part in p.relative_to(root).parts)}
@@ -101,9 +118,6 @@ def invoke(command, root, env, output, timeout):
     events = [event for _, event in received]
     first = lambda kind: next((round(t, 4) for t, e in received if e['type'] == kind), None)
     iterations = [e['payload'] for e in events if e['type'] == 'model.iteration']
-    known = [i['usage'] for i in iterations if isinstance(i.get('usage'), dict)]
-    usage_complete = bool(iterations) and len(known) == len(iterations)
-    totals = {k: sum(u.get(k, 0) for u in known) for k in ['prompt_tokens', 'completion_tokens', 'total_tokens']}
     replies = [e['payload']['response'].get('content', '') or '' for e in events if e['type'] == 'model.finished']
     failures = [e['payload'] for e in events if e['type'] == 'step.failed']
     # Check stdout against persisted JSONL, not a provider-dependent summary.
@@ -123,9 +137,7 @@ def invoke(command, root, env, output, timeout):
         'exit_code': child.returncode, 'timed_out': timed_out,
         'duration_seconds': round(time.monotonic() - started, 4),
         'first_delta_seconds': first('model.delta'), 'first_tool_result_seconds': first('tool.finished'),
-        'model_iterations': len(iterations), 'usage_complete': usage_complete,
-        'usage': totals if usage_complete else None, 'known_partial_usage': totals if known else None,
-        'missing_usage_iterations': len(iterations) - len(known),
+        'model_iterations': len(iterations), **usage_metrics(events),
         'tool_results': sum(e['type'] == 'tool.finished' for e in events),
         'tools_used': sorted({e['payload'].get('tool', 'unknown') for e in events if e['type'] == 'tool.finished'}),
         'approval_events': sum(e['type'] == 'tool.approval' for e in events),

@@ -12,7 +12,7 @@ import unittest
 
 from fixtures import files, materialize
 from grade import check
-from run import audit_directory, invoke, recover, snapshot, write_report
+from run import audit_directory, invoke, recover, snapshot, write_report, usage_metrics
 
 HERE = Path(__file__).resolve().parent
 
@@ -58,6 +58,22 @@ class Graders(unittest.TestCase):
             self.assertIn('Costs are unknown', (root/'report.md').read_text())
             self.assertEqual((root/'results.jsonl').read_text(), '')
 
+    def test_unsent_context_budget_does_not_make_usage_unknown(self):
+        events = [{'type':'model.context_budget','payload':{'fits':True}},
+                  {'type':'model.iteration','payload':{'usage':{'prompt_tokens':11,'completion_tokens':7,'total_tokens':18}}},
+                  {'type':'model.context_budget','payload':{'fits':False}}]
+        metrics=usage_metrics(events)
+        self.assertTrue(metrics['usage_complete'])
+        self.assertEqual(metrics['unobserved_model_replies'],0)
+        self.assertEqual(metrics['usage']['total_tokens'],18)
+
+    def test_incomplete_usage_counters_are_unknown(self):
+        events=[{'type':'model.iteration','payload':{'usage':{'prompt_tokens':11}}}]
+        metrics=usage_metrics(events)
+        self.assertFalse(metrics['usage_complete'])
+        self.assertIsNone(metrics['usage'])
+        self.assertEqual(metrics['missing_usage_iterations'],1)
+
 
 class OfflineCLI(unittest.TestCase):
     @classmethod
@@ -67,12 +83,23 @@ class OfflineCLI(unittest.TestCase):
             raise unittest.SkipTest('cargo build --bin hyper before running offline CLI tests')
 
     @contextlib.contextmanager
-    def provider(self, usage=True, tool_first=False):
+    def provider(self, usage=True, tool_first=False, broken_second=False):
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
             def do_POST(self):
                 self.server.bodies.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if broken_second and len(self.server.bodies) == 2:
+                    self.send_response(200)
+                    self.send_header('Content-Type','text/event-stream')
+                    self.end_headers()
+                    chunks = [
+                        {'choices':[{'delta':{'tool_calls':[{'index':0,'id':'broken','type':'function','function':{'name':'read','arguments':'{"path":'}}]},'finish_reason':None}]},
+                        {'choices':[{'delta':{},'finish_reason':'tool_calls'}], 'usage':{'prompt_tokens':11,'completion_tokens':7,'total_tokens':18}},
+                    ]
+                    for chunk in chunks: self.wfile.write(('data: '+json.dumps(chunk)+'\n\n').encode())
+                    self.wfile.write(b'data: [DONE]\n\n')
+                    return
                 self.send_response(200)
                 self.send_header('Content-Type','application/json')
                 self.end_headers()
@@ -125,6 +152,22 @@ class OfflineCLI(unittest.TestCase):
             self.assertIsNone(metrics['usage'])
             self.assertFalse(metrics['usage_complete'])
             self.assertEqual(metrics['missing_usage_iterations'],1)
+
+    def test_failed_final_stream_keeps_observed_usage_partial(self):
+        with tempfile.TemporaryDirectory() as temp, self.provider(tool_first=True, broken_second=True) as server:
+            root = Path(temp)
+            materialize('readonly-plan',root)
+            env = os.environ.copy()
+            env.update({'DEEPSEEK_API_KEY':'stub','DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1','DEEPSEEK_MODEL':'stub','DEEPSEEK_PROTOCOL':'chat'})
+            metrics, _ = invoke([str(self.binary),'--jsonl','plan','inspect'],root,env,root/'trace.jsonl',10)
+            self.assertEqual(len(server.bodies),2)
+            self.assertNotEqual(metrics['exit_code'],0)
+            self.assertFalse(metrics['usage_complete'])
+            self.assertIsNone(metrics['usage'])
+            self.assertEqual(metrics['known_partial_usage']['total_tokens'],18)
+            self.assertEqual(metrics['missing_usage_iterations'],1)
+            self.assertEqual(metrics['unobserved_model_replies'],1)
+            self.assertTrue(metrics['persisted_stream_matches'])
 
     def test_timeout_stops_cli_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as temp:
