@@ -53,8 +53,10 @@ API Key 来自 `DEEPSEEK_API_KEY` 或 `--config` 指定的 Hyper 配置；默认
 
 输出目录必须不存在，权限为 0700。`metadata.json`、`results.jsonl`、`report.md` 是可审阅汇总；其余目录含 fixture 副本、原始事件、回答和 stderr，仅留在本地，`results/` 被 Git 忽略。汇总不包含 API Key、模型正文或 shell 输出。分享报告前仍需检查端点、路径和错误字段。
 
-每次记录独立行为判定、CLI 完成状态、stdout 与落盘事件的一致性、每轮首次文本/工具结果延迟、总耗时、usage、错误、批准/拒绝次数、恢复结果和修改文件。JSONL 消费端计时包含启动、网络、执行和持久化开销，不是 provider 内部延迟。JSON 响应回退没有 delta 时，首次文本指标为 `null`。
+每次记录独立行为判定、CLI 完成状态、stdout 与落盘事件的一致性、每轮首次文本/工具结果延迟、总耗时、usage、错误、批准/拒绝次数、恢复结果和修改文件。JSONL 消费端计时包含启动、网络、执行和持久化开销，不是 provider 内部延迟。普通 JSON 兼容路径等完整响应后才发布文本，不能把它的首次文本时延当作 SSE 首片时延；没有文本时为 `null`。
 
 缺失 usage 为未知，部分已知用量单列；满足预算的逻辑请求如果没有 model.iteration 回复事件，也算未观测回复（unobserved_model_replies），不能因为前几轮已知就把全轮总数标成完整。预算拒绝的未发送请求不计入缺口；必需计数缺失也标未知。不以零替代，也不臆测价格，成本目前为 `null`。任何任务失败都返回非零退出码，汇总仍保留。评测结果与离线 stub 测试分开统计。
+
+完成失败另记录 `completion_failures`，包含 `model.failed` 的有界结束原因、计数、JSON 位置和完整 `reportedUsage`，不包含参数正文。失败回复的计数不加入完整总用量，缺失接受回复仍标未知；已接受回复的已知部分保持单列。行为与未完成范围见 [完成语义](../docs/model-completion.md)。
 
 每个 attempt 使用 repo 外独立 `HYPER_STATE_DIR`，根据权威 state 位置验证持久化事件，并在完成后测量外部审计目录的文件数量、逻辑字节和磁盘分配字节，再运行 `prune --runs --keep 1` 并复测。保留策略只作用于该 attempt 的新仓库；会话和最终修改仍保留。单 run 任务本就没有可删除的旧 run，多轮任务可展示事件/checkpoint 清理效果。外部原始 JSONL 副本不计入审计容量，也不由 prune 删除。`.hyper-tmp`/编译产物留在工作区，不计入外部审计存储；这与旧 `.harness/tmp` 的存储口径不同，不直接比较容量。

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "suite_version": 1,
+  "started_at": "2026-10-04T08:52:11.956402+00:00",
+  "revision": "f8a1cc734b94291be4b7eb40fc229d675a6db95d",
+  "dirty": false,
+  "binary_sha256": "388485c1689a9c6028257bfcaba8b018fdffc036b84d76b6f1b69430ad666643",
+  "suite_sha256": "a50693c3683300f30cd2d84206f953d0f9bb410f29719f9a755bee1eef19f1c1",
+  "grader_sha256": "45df6817a20aec7a602a4ccfb606974603ee61ddf5c1c44b06cb744293c0bde9",
+  "fixtures_sha256": "006e153d32a89b1e25a4f7c6b22eef343c4ba30201e30d08e7cd3608d73583f5",
+  "runner_sha256": "a2d77c53cb782dc2685309b572df86f8892698af52e5fb6f7cb7e9999199a515",
+  "model": "grok-4.6",
+  "base_url": "https://opencode.ai/zen/go/v1",
+  "protocol": "responses",
+  "context_tokens": 128000,
+  "output_tokens": 8192,
+  "history_tokens": 16000,
+  "max_model_turns": 12,
+  "repetitions": 1,
+  "jobs": 1,
+  "turn_timeout_seconds": 180.0,
+  "platform": "linux",
+  "approval_policy": "explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply",
+  "audit_storage": "layout 1; explicit per-attempt external state; workspace .hyper-tmp excluded from audit storage metrics",
+  "tools": [
+    "read",
+    "search",
+    "bash",
+    "write",
+    "edit"
+  ],
+  "cost": null,
+  "tool_versions": {
+    "python3": "Python 3.12.3",
+    "node": "v22.23.2",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+  }
+}
