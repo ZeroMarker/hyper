@@ -117,6 +117,33 @@ def verification_metrics(events):
             'passed': (finished[-1]['payload'].get('passed') is True) if started else None}
 
 
+def constraint_metrics(task, root):
+    """Where a task's required constraint ended up in its target file.
+
+    Tracks the long-session baseline failure: the model kept the release code
+    but not as the required first line. `first_line_ok` is the signal; a present
+    token that is not on the first line is `misplaced`.
+    """
+    spec = task.get('constraint')
+    if not spec:
+        return None
+    path = Path(root)/spec['file']
+    try:
+        text = path.read_text()
+    except OSError:
+        return {'required': True, 'file': spec['file'], 'present': False,
+                'first_line_ok': False, 'token_present': False,
+                'misplaced': False, 'line_index': None}
+    lines = text.splitlines()
+    token = spec['token']
+    token_present = token in text
+    return {'required': True, 'file': spec['file'], 'present': True,
+            'first_line_ok': bool(lines) and lines[0] == spec['first_line'],
+            'token_present': token_present,
+            'misplaced': token_present and not (bool(lines) and lines[0] == spec['first_line']),
+            'line_index': next((i for i, line in enumerate(lines) if token in line), None)}
+
+
 def attempt_edit_metrics(turns):
     """Merge per-turn edit metrics into one attempt view.
 
@@ -353,6 +380,7 @@ def attempt(task, repetition, args, env):
               'error': None if passed else error, 'grader': verdict, 'harness_ok': harness_ok,
               'recovery_passed': recovery, 'changed_files': changed, 'unexpected_changes': unexpected,
               'recovery_invalid_edit_confirmed': recovery_invalid_edit,
+              'constraint': constraint_metrics(task, root),
               'edit': attempt_edit_metrics(turns), 'verification': attempt_verification_metrics(turns),
               'repeated_failures': sum(turn.get('repeated_failures', 0) for turn in turns),
               'duration_seconds': round(time.monotonic() - started, 4), 'turns': turns,
@@ -372,6 +400,9 @@ def write_report(output, metadata, results):
     verify_attempts = sum(r.get('verification', {}).get('attempts', 0) for r in results)
     verify_retries = sum(r.get('verification', {}).get('retries', 0) for r in results)
     repeated = sum(r.get('repeated_failures', 0) for r in results)
+    constraints = [r['constraint'] for r in results if r.get('constraint')]
+    constraint_ok = sum(c['first_line_ok'] for c in constraints)
+    constraint_misplaced = sum(c['misplaced'] for c in constraints)
     first_pass = f"{first_pass_successes}/{first_pass_resolved}" if first_pass_resolved else 'n/a'
     toolchain = metadata.get('toolchain_environment') or {}
     path_entries = len([entry for entry in (toolchain.get('path') or '').split(os.pathsep) if entry])
@@ -382,6 +413,7 @@ def write_report(output, metadata, results):
              f"Passed: **{passed}/{len(results)}**. This is a Hyper/model baseline, not a competitor comparison.",
              f"First-pass edit success: **{first_pass}** files; edit retries: {edit_retries}.",
              f"Verification attempts: {verify_attempts}; verification retries: {verify_retries}; repeated-failure stops: {repeated}.",
+             f"Long-session constraint placement: {constraint_ok}/{len(constraints)} as the required first line; {constraint_misplaced} misplaced.",
              '', 'Usage is unknown if any iteration omits usage. Costs are unknown; no price assumptions are made.',
              'Latencies are measured at the JSONL consumer, including persistence overhead. Raw traces are private.',
              '', '| Task | Passed | Attempts | Mean wall seconds | Complete usage attempts | First-pass edits | Edit retries |', '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']

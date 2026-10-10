@@ -14,7 +14,7 @@ from fixtures import files, materialize
 from grade import check
 from run import (audit_directory, invoke, recover, snapshot, write_report, usage_metrics,
                  edit_metrics, verification_metrics, attempt_edit_metrics,
-                 attempt_verification_metrics, toolchain_environment)
+                 attempt_verification_metrics, toolchain_environment, constraint_metrics)
 
 HERE = Path(__file__).resolve().parent
 
@@ -141,6 +141,51 @@ class EditAndVerificationMetrics(unittest.TestCase):
             self.assertIn('First-pass edit success: **1/2**', report)
             self.assertIn('Verification attempts: 2; verification retries: 1', report)
             self.assertIn('| First-pass edits | Edit retries |', report)
+
+
+class ConstraintTracking(unittest.TestCase):
+    spec = {'file':'bounds.py','first_line':'# release: ORCHID-731','token':'ORCHID-731'}
+
+    def test_constraint_tracks_first_line_placement(self):
+        task = {'id':'long-session','constraint':self.spec}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'bounds.py').write_text('# release: ORCHID-731\ndef clamp(): return 0\n')
+            correct = constraint_metrics(task, root)
+            self.assertTrue(correct['first_line_ok'])
+            self.assertFalse(correct['misplaced'])
+            self.assertEqual(correct['line_index'], 0)
+            (root/'bounds.py').write_text('def clamp():\n    # release: ORCHID-731\n    return 0\n')
+            misplaced = constraint_metrics(task, root)
+            self.assertFalse(misplaced['first_line_ok'])
+            self.assertTrue(misplaced['misplaced'])
+            self.assertEqual(misplaced['line_index'], 1)
+            (root/'bounds.py').write_text('def clamp(): return 0\n')
+            missing = constraint_metrics(task, root)
+            self.assertTrue(missing['present'])
+            self.assertFalse(missing['token_present'])
+            self.assertFalse(missing['misplaced'])
+            self.assertIsNone(missing['line_index'])
+            (root/'bounds.py').unlink()
+            absent = constraint_metrics(task, root)
+            self.assertFalse(absent['present'])
+            self.assertFalse(absent['first_line_ok'])
+        self.assertIsNone(constraint_metrics({'id':'readonly-plan'}, Path('.')))
+
+    def test_report_tracks_constraint_placement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            metadata = {'started_at':'fixed','revision':'abc','dirty':False,'model':'stub',
+                        'base_url':'http://localhost','protocol':'chat'}
+            results = [
+                {'task':'long-session','passed':True,'duration_seconds':1.0,'usage':None,
+                 'constraint':{'first_line_ok':True,'misplaced':False}},
+                {'task':'long-session','passed':False,'duration_seconds':1.0,'usage':None,
+                 'constraint':{'first_line_ok':False,'misplaced':True}},
+            ]
+            write_report(root, metadata, results)
+            report = (root/'report.md').read_text()
+            self.assertIn('Long-session constraint placement: 1/2 as the required first line; 1 misplaced.', report)
 
 
 class EnvironmentRecording(unittest.TestCase):

@@ -110,6 +110,11 @@
       "reply_contains": [
         "ORCHID-731"
       ],
+      "constraint": {
+        "file": "bounds.py",
+        "first_line": "# release: ORCHID-731",
+        "token": "ORCHID-731"
+      },
       "turns": [
         {
           "mode": "plan",

@@ -2,6 +2,10 @@
 
 ## 当前状态
 
+2026-10-10（第二十五轮，P0 收尾）：交付评测项「跟踪长会话约束位置遗漏」。`evals/suite.json` 的 long-session 任务新增可选 `constraint`（目标文件、要求首行、token）；`evals/run.py` 新增 `constraint_metrics(task, root)`，记录目标文件是否存在、要求的首行是否成立（`first_line_ok`）、token 是否出现、是否出现但不在首行（`misplaced`）以及首个含 token 的行号；`results.jsonl` 每轮带 `constraint`，`report.md` 汇总「Long-session constraint placement: N/M as the required first line; K misplaced.」，未配置的任务为 `null`。新增 2 个离线评测测试（放置正确/错位/缺失/文件不存在/未配置，以及报告汇总行）。共 26 个离线评测测试（+2）、253 个 Rust 测试不变、fmt/Clippy/release 通过；未改固定任务集（仍 10 个任务），未跑真实模型基线，成本未知。
+
+P0 中平台无关、可本地交付的部分至此全部完成：P0-1 固定任务集、P0-2 共享取消、P0-3a 共用权限与直接审计保护、P0-3b1 外部内容存储与显式迁移、P0-3b2a Linux 描述符入口、P0-3b2b1 工具范围授权、评测环境与失败样本项、仓库内容不可信验证、审计身份 inode 锚定、macOS 行政快照/恢复描述符入口（由 CI 验证）。剩余 P0 为受阻或跨平台并如实保留：workspace-write 元数据/读取隔离（Landlock/seccomp/同 UID/无 namespace 使其无法用现有原语交付）、已有挂载别名（需 mount 权限）、Windows 描述符/恢复保护与 Windows stdout 背压取消（跨平台）。
+
 2026-10-10（第二十四轮）：推进 P0-3b2b2 的宿主目录移动竞争（平台无关部分）。审计身份 `workspace.json` 在 Unix 现在记录工作区根的设备号与 inode，`Workspace::open` 打开时校验：把真实 checkout 移走后在同一 canonical 路径放另一个目录，路径派生的 key 不变，但记录的根 inode 不匹配，因此以 `protected audit identity does not match the workspace root inode` 拒绝复用审计存储；字段为可选（非 Unix 或旧版写出的身份缺失时不校验），既有状态继续可用。新增 2 个测试：同一路径换成不同目录被拒绝、剥离 inode 字段的旧身份仍能打开并列出运行。共 253 个 Rust 测试（+2）、24 个离线评测、fmt/Clippy/release 通过；未改其他平台路径，未跑真实模型基线，成本未知。
 
 2026-10-10（第二十三轮）：交付 P0-3b2b2 的 macOS 行政快照/恢复描述符入口。新增 [posix_admin.rs](src/posix_admin.rs)（Apple 平台，Linux 测试也编译）：快照源经工作区 [posix_file](src/posix_file.rs) 逐层 `openat`/`O_NOFOLLOW` 打开并固定 inode；宿主选定输出目录从 `/` 逐层 `openat`/`O_NOFOLLOW` 打开（允许跨 mount），缺失目录先 `create_dir_all` 再重新打开；快照与临时清单 `O_CREAT|O_EXCL` 创建，清单以 `linkat` 发布——目标存在时返回 `EEXIST` 而非覆盖，随后删除临时名；恢复按存储的 canonical 绝对路径逐层 `O_NOFOLLOW` 重开（父目录被替换为链接即拒绝），目标父目录走工作区描述符，提交用外部 staging + `renameat` 原子替换，新建文件用 `unlinkat` 删除。`workspace::create_checkpoint`、`ToolFile::checkpoint`、`restore_file` 在 macOS 改走该入口，`posix_file::parent`/`open_at` 提升为 `pub(crate)`。13 个单元测试（源/输出/目标的最终与父目录替换、打开后替换与 rewind、碰撞保留、失败回滚、硬链接别名、缺失幂等、跨 ext4/tmpfs 真实复制恢复）在 Linux 通过；新增 macOS 原生集成 `tests/macos_admin.rs`（二进制/权限/相对根往返、替换链接拒绝）并加入 macOS CI job。本机 Linux 251 个 Rust 测试、24 个离线评测、fmt/Clippy/release 通过；macOS 结果由新增 CI job 验证，未改其他平台路径，未跑真实模型基线，成本未知。
