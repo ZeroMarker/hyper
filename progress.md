@@ -2,6 +2,8 @@
 
 ## 当前状态
 
+2026-10-10（第二十轮）：交付 P1-3 的评测指标统计。`evals/run.py` 从事件派生并汇总：首轮编辑成功率（按文件，第一次 `edit` 尝试即成功；长会话跨轮合并，未解析尝试不入分母）、编辑重试次数（同一文件超过首次的尝试数）、显式验证命令的尝试/失败/模型重试次数、任务成功率，以及 `agent.repeated_failure` 停止次数；`report.md` 新增总览行与每任务「First-pass edits / Edit retries」列，`results.jsonl` 每轮带 `edit`/`verification`/`repeated_failures`。未配置 `verify` 的任务验证指标为未知（`null`），不以 0 冒充通过。新增 6 个离线评测测试（首轮/重试/跨轮合并、验证重试、未知即未知、报告列、真实 CLI 验证指标端到端）；20 个评测测试、237 个 Rust 测试、fmt/Clippy/release 通过。未改固定任务集，未重跑模型基线，成本未知；原子写入与 Hashline/patch 选型仍未交付，P1-3 保持未完成。
+
 2026-10-10（第十九轮）：交付 P1-3 的显式 lint/test 验证命令闭环。`StepSpec` 新增可选 `verify`（`commands` + `retries`，重试上限 5），仅允许 build 模型步骤：命令按顺序经 `bash` 同一路径执行（命令策略、审批门、Linux 沙箱、步骤超时与资源限制都生效），首个非零退出作为下一轮用户消息回给模型，最多重试 `retries` 次（共 `retries+1` 次）。尝试与结果记为 `verify.started`/`verify.finished`，反馈记为 `model.verification`（replay 据此重建同一请求，集成测试逐字节比对最后一轮 messages）；命令被拒/无法运行时是硬错误而非重试，重试耗尽以 `VerificationError` 失败。校验拒绝空命令、空字符串、超上限重试、plan 步骤与直接工具前缀步骤。新增 1 个 schema 校验测试、3 个 CLI 集成测试（失败回喂并修复、重试耗尽失败、审批门生效）；237 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过。首轮编辑成功率/重试次数/任务成功率统计、原子写入与 Hashline/patch 选型仍未交付，P1-3 保持未完成。
 
 2026-10-10（第十八轮）：推进 P1-3 编辑与验证闭环。模型的 `edit` 工具不再静默改第一个匹配：`search` 出现多次时要求 1-based `occurrence`，否则报错并列出匹配行号；越界 occurrence 明确报错。新增陈旧文件检查：`read` 返回工作区文件整文件 `sha256`（文本截断时仍返回完整摘要），`edit` 用显式 `expectedHash` 或本轮已读/已写哈希比对，字节已变则拒绝并提示重新读取；`edit`/`write` 成功后更新该哈希，保证 write→edit 一致。空替换（删除）与多字节/换行按字节偏移拼接保持兼容，快照仍在写入前创建。agent loop 增加有界重复失败保护：同一工具调用加相同失败连续 3 次写入 `agent.repeated_failure` 并停止（成功调用重置），不再耗尽 12 轮。新增 4 个引擎单元测试与 1 个 CLI 集成测试（stub 模型重复失败）；233 个 Rust 测试、14 个离线评测、fmt/Clippy/release 通过。显式 lint/test 验证命令闭环（经策略/审批/有限重试）、首轮编辑成功率统计与 Hashline/patch 选型仍未交付，P1-3 保持未完成。

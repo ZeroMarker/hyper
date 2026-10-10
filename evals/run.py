@@ -40,6 +40,87 @@ def usage_metrics(events):
             'unobserved_model_replies': unobserved}
 
 
+def edit_metrics(events):
+    """Edit calls, per-file first-attempt outcome, and extra attempts.
+
+    An edit emits `tool.started` carrying its path and then either
+    `tool.finished` (success) or a `model.observation` that starts with
+    "tool error". Pairing a start with the next outcome gives the first-pass
+    result for each file, so a file that only succeeds on a later attempt is not
+    counted as a first-pass success.
+    """
+    paths = {}
+    order = []
+    calls = 0
+    successes = 0
+    pending = None
+    for event in events:
+        payload = event.get('payload') or {}
+        kind = event.get('type')
+        if kind == 'tool.started' and payload.get('tool') == 'edit':
+            path = payload.get('path', '')
+            calls += 1
+            pending = path
+            if path not in paths:
+                paths[path] = {'attempts': 0, 'first_success': None}
+                order.append(path)
+            paths[path]['attempts'] += 1
+        elif kind == 'tool.finished' and payload.get('tool') == 'edit':
+            successes += 1
+            if pending is not None and paths.get(pending, {}).get('first_success') is None:
+                paths[pending]['first_success'] = True
+            pending = None
+        elif kind == 'model.observation' and payload.get('tool') == 'edit':
+            if str(payload.get('observation', '')).startswith('tool error'):
+                if pending is not None and paths.get(pending, {}).get('first_success') is None:
+                    paths[pending]['first_success'] = False
+            pending = None
+    return {'calls': calls, 'successes': successes, 'files': {p: paths[p] for p in order}}
+
+
+def verification_metrics(events):
+    """Explicit lint/test attempts, failures, model retries and final outcome."""
+    started = [e for e in events if e.get('type') == 'verify.started']
+    finished = [e for e in events if e.get('type') == 'verify.finished']
+    return {'attempts': len(started),
+            'failures': sum(e['payload'].get('passed') is False for e in finished),
+            'retries': sum(e.get('type') == 'model.verification' for e in events),
+            'passed': (finished[-1]['payload'].get('passed') is True) if started else None}
+
+
+def attempt_edit_metrics(turns):
+    """Merge per-turn edit metrics into one attempt view.
+
+    A long-session attempt can edit the same file in several turns; the first
+    turn that touches a file decides whether it was a first-pass success.
+    """
+    merged = {}
+    for turn in turns:
+        for path, info in turn.get('edit', {}).get('files', {}).items():
+            entry = merged.setdefault(path, {'attempts': 0, 'first_success': None})
+            entry['attempts'] += info['attempts']
+            if entry['first_success'] is None:
+                entry['first_success'] = info['first_success']
+    resolved = [info['first_success'] for info in merged.values() if info['first_success'] is not None]
+    first_pass_successes = sum(1 for value in resolved if value)
+    return {'calls': sum(turn.get('edit', {}).get('calls', 0) for turn in turns),
+            'successes': sum(turn.get('edit', {}).get('successes', 0) for turn in turns),
+            'files': len(merged),
+            'first_pass_successes': first_pass_successes,
+            'first_pass_resolved': len(resolved),
+            'first_pass_rate': (first_pass_successes / len(resolved)) if resolved else None,
+            'retries': sum(max(0, info['attempts'] - 1) for info in merged.values())}
+
+
+def attempt_verification_metrics(turns):
+    turns = [turn.get('verification', {}) for turn in turns]
+    configured = [turn for turn in turns if turn.get('attempts', 0) > 0]
+    return {'attempts': sum(turn.get('attempts', 0) for turn in turns),
+            'failures': sum(turn.get('failures', 0) for turn in turns),
+            'retries': sum(turn.get('retries', 0) for turn in turns),
+            'passed': all(turn.get('passed') for turn in configured) if configured else None}
+
+
 def snapshot(root):
     return {str(p.relative_to(root)): digest(p) for p in sorted(root.rglob('*'))
             if p.is_file() and not any(part in {'.harness', '.hyper-tmp', 'target', '__pycache__', '.git'} for part in p.relative_to(root).parts)}
@@ -147,6 +228,8 @@ def invoke(command, root, env, output, timeout):
         'invalid_event_lines': len(invalid_lines), 'persisted_stream_matches': identical,
         'finished': any(e['type'] == 'run.finished' for e in events),
         'run_ids': sorted({e['runId'] for e in events}),
+        'edit': edit_metrics(events), 'verification': verification_metrics(events),
+        'repeated_failures': sum(e['type'] == 'agent.repeated_failure' for e in events),
     }
     return metrics, '\n'.join(replies)
 
@@ -241,6 +324,8 @@ def attempt(task, repetition, args, env):
               'error': None if passed else error, 'grader': verdict, 'harness_ok': harness_ok,
               'recovery_passed': recovery, 'changed_files': changed, 'unexpected_changes': unexpected,
               'recovery_invalid_edit_confirmed': recovery_invalid_edit,
+              'edit': attempt_edit_metrics(turns), 'verification': attempt_verification_metrics(turns),
+              'repeated_failures': sum(turn.get('repeated_failures', 0) for turn in turns),
               'duration_seconds': round(time.monotonic() - started, 4), 'turns': turns,
               'usage': usage, 'cost': None, 'storage_before_prune': before_prune,
               'storage_after_prune': after_prune, 'prune_exit_code': pruning.returncode}
@@ -252,16 +337,29 @@ def write_report(output, metadata, results):
     (output/'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     (output/'results.jsonl').write_text(''.join(json.dumps(r, sort_keys=True) + '\n' for r in results))
     passed = sum(r['passed'] for r in results)
+    first_pass_successes = sum(r.get('edit', {}).get('first_pass_successes', 0) for r in results)
+    first_pass_resolved = sum(r.get('edit', {}).get('first_pass_resolved', 0) for r in results)
+    edit_retries = sum(r.get('edit', {}).get('retries', 0) for r in results)
+    verify_attempts = sum(r.get('verification', {}).get('attempts', 0) for r in results)
+    verify_retries = sum(r.get('verification', {}).get('retries', 0) for r in results)
+    repeated = sum(r.get('repeated_failures', 0) for r in results)
+    first_pass = f"{first_pass_successes}/{first_pass_resolved}" if first_pass_resolved else 'n/a'
     lines = ['# Hyper task baseline', '', f"UTC: {metadata['started_at']}",
              f"Revision: `{metadata['revision']}`; dirty: `{metadata['dirty']}`",
              f"Model: `{metadata['model']}`; endpoint: `{metadata['base_url']}`; protocol: `{metadata['protocol']}`",
              f"Passed: **{passed}/{len(results)}**. This is a Hyper/model baseline, not a competitor comparison.",
+             f"First-pass edit success: **{first_pass}** files; edit retries: {edit_retries}.",
+             f"Verification attempts: {verify_attempts}; verification retries: {verify_retries}; repeated-failure stops: {repeated}.",
              '', 'Usage is unknown if any iteration omits usage. Costs are unknown; no price assumptions are made.',
              'Latencies are measured at the JSONL consumer, including persistence overhead. Raw traces are private.',
-             '', '| Task | Passed | Attempts | Mean wall seconds | Complete usage attempts |', '| --- | ---: | ---: | ---: | ---: |']
+             '', '| Task | Passed | Attempts | Mean wall seconds | Complete usage attempts | First-pass edits | Edit retries |', '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
     for task in sorted({r['task'] for r in results}):
         rows = [r for r in results if r['task'] == task]
-        lines.append(f"| {task} | {sum(r['passed'] for r in rows)} | {len(rows)} | {sum(r['duration_seconds'] for r in rows)/len(rows):.2f} | {sum(r['usage'] is not None for r in rows)} |")
+        task_successes = sum(r.get('edit', {}).get('first_pass_successes', 0) for r in rows)
+        task_resolved = sum(r.get('edit', {}).get('first_pass_resolved', 0) for r in rows)
+        task_first_pass = f"{task_successes}/{task_resolved}" if task_resolved else 'n/a'
+        task_retries = sum(r.get('edit', {}).get('retries', 0) for r in rows)
+        lines.append(f"| {task} | {sum(r['passed'] for r in rows)} | {len(rows)} | {sum(r['duration_seconds'] for r in rows)/len(rows):.2f} | {sum(r['usage'] is not None for r in rows)} | {task_first_pass} | {task_retries} |")
     lines += ['', 'See results.jsonl for per-turn latency, usage, errors, approvals, recovery and storage before/after pruning.', '']
     (output/'report.md').write_text('\n'.join(lines))
 

@@ -12,7 +12,8 @@ import unittest
 
 from fixtures import files, materialize
 from grade import check
-from run import audit_directory, invoke, recover, snapshot, write_report, usage_metrics
+from run import (audit_directory, invoke, recover, snapshot, write_report, usage_metrics,
+                 edit_metrics, verification_metrics, attempt_edit_metrics, attempt_verification_metrics)
 
 HERE = Path(__file__).resolve().parent
 
@@ -73,6 +74,72 @@ class Graders(unittest.TestCase):
         self.assertFalse(metrics['usage_complete'])
         self.assertIsNone(metrics['usage'])
         self.assertEqual(metrics['missing_usage_iterations'],1)
+
+
+class EditAndVerificationMetrics(unittest.TestCase):
+    def test_edit_first_pass_and_retries(self):
+        events = [
+            {'type':'tool.started','payload':{'tool':'edit','path':'a.py'}},
+            {'type':'model.observation','payload':{'tool':'edit','observation':'tool error: edit: search text not found in a.py'}},
+            {'type':'tool.started','payload':{'tool':'edit','path':'a.py'}},
+            {'type':'tool.finished','payload':{'tool':'edit','path':'a.py'}},
+            {'type':'tool.started','payload':{'tool':'edit','path':'b.py'}},
+            {'type':'tool.finished','payload':{'tool':'edit','path':'b.py'}},
+        ]
+        metrics = edit_metrics(events)
+        self.assertEqual(metrics['calls'], 3)
+        self.assertEqual(metrics['successes'], 2)
+        self.assertEqual(metrics['files']['a.py'], {'attempts':2, 'first_success':False})
+        self.assertEqual(metrics['files']['b.py'], {'attempts':1, 'first_success':True})
+        attempt = attempt_edit_metrics([{'edit': metrics}])
+        self.assertEqual(attempt['first_pass_successes'], 1)
+        self.assertEqual(attempt['first_pass_resolved'], 2)
+        self.assertEqual(attempt['retries'], 1)
+        self.assertAlmostEqual(attempt['first_pass_rate'], 0.5)
+
+    def test_edit_first_pass_merges_turns_and_keeps_unresolved_out(self):
+        first = {'edit':{'calls':1,'successes':1,'files':{'a.py':{'attempts':1,'first_success':True}}}}
+        second = {'edit':{'calls':1,'successes':0,'files':{'a.py':{'attempts':1,'first_success':None}}}}
+        attempt = attempt_edit_metrics([first, second])
+        self.assertEqual(attempt['files'], 1)
+        self.assertEqual(attempt['first_pass_successes'], 1)
+        self.assertEqual(attempt['first_pass_resolved'], 1)
+        self.assertEqual(attempt['retries'], 1)
+
+    def test_verification_metrics_count_retries(self):
+        events = [
+            {'type':'verify.started','payload':{'attempt':0}},
+            {'type':'verify.finished','payload':{'attempt':0,'passed':False}},
+            {'type':'model.verification','payload':{'attempt':1}},
+            {'type':'verify.started','payload':{'attempt':1}},
+            {'type':'verify.finished','payload':{'attempt':1,'passed':True}},
+        ]
+        metrics = verification_metrics(events)
+        self.assertEqual(metrics['attempts'], 2)
+        self.assertEqual(metrics['failures'], 1)
+        self.assertEqual(metrics['retries'], 1)
+        self.assertTrue(metrics['passed'])
+        attempt = attempt_verification_metrics([{'verification': metrics}])
+        self.assertTrue(attempt['passed'])
+        self.assertEqual(attempt['retries'], 1)
+
+    def test_absent_verification_is_unknown_not_passed(self):
+        self.assertIsNone(verification_metrics([])['passed'])
+        self.assertIsNone(attempt_verification_metrics([{}])['passed'])
+
+    def test_report_includes_first_pass_and_retry_metrics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            metadata = {'started_at':'fixed','revision':'abc','dirty':False,'model':'stub','base_url':'http://localhost','protocol':'chat'}
+            results = [{'task':'t','passed':True,'duration_seconds':1.0,'usage':None,
+                        'edit':{'first_pass_successes':1,'first_pass_resolved':2,'retries':1},
+                        'verification':{'attempts':2,'retries':1,'failures':1,'passed':True},
+                        'repeated_failures':1}]
+            write_report(root, metadata, results)
+            report = (root/'report.md').read_text()
+            self.assertIn('First-pass edit success: **1/2**', report)
+            self.assertIn('Verification attempts: 2; verification retries: 1', report)
+            self.assertIn('| First-pass edits | Edit retries |', report)
 
 
 class OfflineCLI(unittest.TestCase):
@@ -331,6 +398,27 @@ class OfflineCLI(unittest.TestCase):
             self.assertEqual(failure['exit_code'],1)
             self.assertFalse(failure['finished'])
             self.assertEqual(len(failure['errors']),1)
+
+    def test_invoke_records_verification_metrics(self):
+        with tempfile.TemporaryDirectory() as temp, self.provider() as server:
+            root = Path(temp)
+            (root/'README.md').write_text('verify fixture\n')
+            env = os.environ.copy()
+            env.update({'DEEPSEEK_API_KEY':'stub','DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1','DEEPSEEK_MODEL':'stub','DEEPSEEK_PROTOCOL':'chat'})
+            task = root/'task.json'
+            task.write_text(json.dumps({'name':'verify','steps':[{'id':'s','instruction':'answer','verify':{'commands':['true'],'retries':1}}]}))
+            metrics, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,env,root/'trace.jsonl',10)
+            self.assertEqual(metrics['exit_code'],0,(root/'trace.stderr').read_text())
+            self.assertEqual(metrics['verification']['attempts'],1)
+            self.assertTrue(metrics['verification']['passed'])
+            self.assertEqual(metrics['verification']['retries'],0)
+            task.write_text(json.dumps({'name':'verify','steps':[{'id':'s','instruction':'answer','verify':{'commands':['false'],'retries':0}}]}))
+            failed, _ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,env,root/'trace2.jsonl',10)
+            self.assertNotEqual(failed['exit_code'],0)
+            self.assertEqual(failed['verification']['attempts'],1)
+            self.assertEqual(failed['verification']['failures'],1)
+            self.assertFalse(failed['verification']['passed'])
+            self.assertEqual(failed['errors'],['VerificationError'])
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux descendant process-group cleanup')
     def test_timeout_kills_detached_descendant_group(self):
