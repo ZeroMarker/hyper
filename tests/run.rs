@@ -1721,6 +1721,47 @@ fn project_instructions_are_recorded_and_replayed() {
     assert_eq!(replayed["steps"][0]["messages"], request["messages"]);
 }
 
+/// The `read` tool accepts an explicit 1-based line window and reports the range
+/// it returned, so the model can page a large file without guessing offsets.
+#[test]
+fn read_line_window_is_reported_to_the_model() {
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"reading","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\"notes.txt\",\"line\":2,\"lines\":2}"}}]}}]}"#;
+    let final_reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![tool_round, final_reply]);
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("notes.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "inspect"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let followup: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+    let observation = followup["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(observation.contains("two\\nthree"), "{observation}");
+    assert!(observation.contains("\"startLine\":2"), "{observation}");
+    assert!(observation.contains("\"endLine\":3"), "{observation}");
+    assert!(observation.contains("\"totalLines\":4"), "{observation}");
+}
+
 /// A failing `verify` command is handed back to the model, which fixes it and
 /// passes on the retry. The retry request carries the failure text.
 #[test]

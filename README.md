@@ -546,6 +546,12 @@ whose bytes changed since the run read them (stale edit). `read` reports a
 workspace file's `sha256`, which the model can pass back as `expectedHash` to pin
 the exact content it edited.
 
+`read` also accepts a 1-based `line` window: `line` alone reads to the end of the
+file, and an optional `lines` bounds the count. The result carries
+`startLine`/`endLine`/`totalLines`, and `truncated` marks a window cut by the end
+of the file or the 64000-byte per-read cap. A byte `offset` and a line window are
+mutually exclusive; the whole-file `sha256` is returned either way.
+
 A step whose instruction has no tool prefix runs the **tool-calling agent**:
 the model inspects the workspace context, calls tools (`read`, `search`,
 `bash`, `write`, `edit`) in a loop, and feeds each result back until it

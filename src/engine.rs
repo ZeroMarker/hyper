@@ -277,7 +277,7 @@ fn tool(
         return bash(events, run, root, step, index, command.trim());
     }
     if let Some(path) = instruction.strip_prefix("read:") {
-        return read(events, root, step, index, path.trim(), 0);
+        return read(events, root, step, index, path.trim(), 0, None);
     }
     if let Some(query) = instruction.strip_prefix("search:") {
         return search(events, root, step, index, query.trim(), 100);
@@ -753,6 +753,7 @@ fn run_agent_tool(
                     index,
                     arg_str(&args, "path")?,
                     read_offset(&args)?,
+                    read_lines(&args)?,
                 ),
                 "search" => search(events, root, step, index, arg_str(&args, "query")?, 100),
                 "write" => write_file(
@@ -1359,6 +1360,103 @@ fn observation_failed(observation: &str) -> bool {
     observation.starts_with("tool error:") || observation.starts_with("tool failed")
 }
 
+/// Optional 1-based line window for `read`. `line` alone reads to the end of the
+/// file; `lines` bounds how many lines are returned.
+#[derive(Clone, Copy)]
+struct LineWindow {
+    start: usize,
+    count: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct LineInfo {
+    start: usize,
+    end: usize,
+    total: usize,
+    truncated: bool,
+}
+
+fn read_lines(args: &Value) -> Result<Option<LineWindow>> {
+    let start = match args.get("line") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|line| *line >= 1)
+            .context("tool argument 'line' must be a positive integer")?
+            as usize,
+    };
+    let count = match args.get("lines") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|lines| *lines >= 1)
+                .context("tool argument 'lines' must be a positive integer")? as usize,
+        ),
+    };
+    Ok(Some(LineWindow { start, count }))
+}
+
+/// Byte span of each line, excluding its trailing newline. A trailing newline
+/// terminates the last line rather than starting an empty one.
+fn line_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            ranges.push((start, index));
+            start = index + 1;
+        }
+    }
+    if start < bytes.len() {
+        ranges.push((start, bytes.len()));
+    }
+    ranges
+}
+
+/// Select the requested 1-based line window, capped by the same per-read byte
+/// budget the byte-offset path uses.
+fn slice_lines(bytes: &[u8], window: LineWindow) -> (Vec<u8>, LineInfo) {
+    const MAX: usize = 64_000;
+    let ranges = line_ranges(bytes);
+    let total = ranges.len();
+    if window.start > total {
+        return (
+            Vec::new(),
+            LineInfo {
+                start: window.start,
+                end: window.start - 1,
+                total,
+                truncated: false,
+            },
+        );
+    }
+    let first = window.start;
+    let last = match window.count {
+        Some(count) => (first + count - 1).min(total),
+        None => total,
+    };
+    let mut content = bytes[ranges[first - 1].0..ranges[last - 1].1].to_vec();
+    // Clipped means the request could not be fully satisfied: it asked for more
+    // lines than exist, or the byte budget cut the window. An open-ended window
+    // always reaches the last line, so it is not clipped.
+    let mut truncated = window.count.is_some_and(|count| first + count - 1 > total);
+    if content.len() > MAX {
+        content.truncate(MAX);
+        truncated = true;
+    }
+    (
+        content,
+        LineInfo {
+            start: first,
+            end: last,
+            total,
+            truncated,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn read(
     events: &EventWriter<'_>,
     root: &Path,
@@ -1366,47 +1464,71 @@ fn read(
     index: usize,
     path: &str,
     offset: u64,
+    window: Option<LineWindow>,
 ) -> Result<(bool, Value)> {
     if path.trim().is_empty() {
         bail!("read: path must not be empty")
+    }
+    if window.is_some() && offset != 0 {
+        bail!("read: pass either a byte offset or a line window, not both")
     }
     let artifact = events.artifacts.borrow().contains_key(path);
     let resolved = authorize(events, root, step, index, "read", "read", Some(path), None)?;
     if !artifact && resolved.is_none() {
         bail!("missing read target");
     }
+    let input = match window {
+        Some(window) => json!({"path":path,"line":window.start,"lines":window.count}),
+        None => json!({"path":path,"offset":offset}),
+    };
     events.write(
         "tool.started",
-        json!({"tool":"read","input":{"path":path,"offset":offset},"artifact":artifact}),
+        json!({"tool":"read","input":input,"artifact":artifact}),
         Some(&step.id),
         Some(index),
     )?;
     let target_key = resolved
         .as_ref()
         .map(|target| target.to_string_lossy().into_owned());
-    let (bytes, total, digest) = if let Some(resolved) = resolved {
+    let (content, total, digest, lines, truncated) = if let Some(resolved) = resolved {
         let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
         file.check_scope_links(&events.permissions, "read")?;
         let bytes = file.read()?;
         let total = bytes.len() as u64;
         let digest = content_hash(&bytes);
-        let start = offset.min(total) as usize;
-        (
-            bytes[start..start + 64_000.min(bytes.len() - start)].to_vec(),
-            total,
-            Some(digest),
-        )
+        match window {
+            Some(window) => {
+                let (content, info) = slice_lines(&bytes, window);
+                (content, total, Some(digest), Some(info), info.truncated)
+            }
+            None => {
+                let start = offset.min(total) as usize;
+                let end = (start + 64_000).min(bytes.len());
+                let content = bytes[start..end].to_vec();
+                let truncated = total.saturating_sub(offset) > content.len() as u64;
+                (content, total, Some(digest), None, truncated)
+            }
+        }
     } else {
+        if window.is_some() {
+            bail!("read: line windows are only supported for workspace files")
+        }
         let mut artifacts = events.artifacts.borrow_mut();
         let file = artifacts.get_mut(path).context("missing issued artifact")?;
         let total = file.metadata()?.len();
         file.seek(SeekFrom::Start(offset.min(total)))?;
         let mut bytes = Vec::new();
         file.take(64_000).read_to_end(&mut bytes)?;
-        (bytes, total, None)
+        let truncated = total.saturating_sub(offset) > bytes.len() as u64;
+        (bytes, total, None, None, truncated)
     };
-    let mut payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes),
-        "truncated":total.saturating_sub(offset)>bytes.len() as u64,"bytes":total});
+    let mut payload = json!({"path":path,"content":String::from_utf8_lossy(&content),
+        "truncated":truncated,"bytes":total});
+    if let Some(info) = &lines {
+        payload["startLine"] = json!(info.start);
+        payload["endLine"] = json!(info.end);
+        payload["totalLines"] = json!(info.total);
+    }
     // A workspace read pins the whole-file digest, even when the reported text is
     // truncated, so a later `edit` can refuse a file that moved underneath it.
     if let Some(digest) = &digest {
@@ -2761,6 +2883,70 @@ mod tests {
     }
 
     #[test]
+    fn read_line_windows_select_a_range_and_report_it() {
+        with_events(|events, run, root| {
+            fs::write(root.join("demo.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+            let step = gated_step(vec!["read"]);
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt","line":2,"lines":2}"#,
+            );
+            let payload: Value = serde_json::from_str(&observation).unwrap();
+            assert_eq!(payload["content"], "two\nthree");
+            assert_eq!(payload["startLine"], 2);
+            assert_eq!(payload["endLine"], 3);
+            assert_eq!(payload["totalLines"], 4);
+            assert_eq!(payload["truncated"], false);
+            assert!(payload["sha256"].is_string());
+            // An open-ended window runs to the end of the file.
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt","line":3}"#,
+            );
+            let payload: Value = serde_json::from_str(&observation).unwrap();
+            assert_eq!(payload["content"], "three\nfour");
+            assert_eq!(payload["endLine"], 4);
+            assert_eq!(payload["truncated"], false);
+            // A start past the end is an empty window, not an error.
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt","line":9,"lines":2}"#,
+            );
+            let payload: Value = serde_json::from_str(&observation).unwrap();
+            assert_eq!(payload["content"], "");
+            assert_eq!(payload["startLine"], 9);
+            assert_eq!(payload["endLine"], 8);
+            assert_eq!(payload["totalLines"], 4);
+            // A byte offset and a line window are mutually exclusive.
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt","offset":1,"line":1}"#,
+            );
+            assert!(observation.starts_with("tool error:"), "{observation}");
+        });
+    }
+
+    #[test]
     fn artifact_reads_are_bounded_run_scoped_and_permission_checked() {
         with_events(|events, run, root| {
             let body = format!("{}TAIL", "x".repeat(70_000));
@@ -2769,13 +2955,13 @@ mod tests {
                     .unwrap()
                     .unwrap();
             let step = gated_step(vec!["read"]);
-            let (_, first) = read(events, root, &step, 0, &reference, 0).unwrap();
+            let (_, first) = read(events, root, &step, 0, &reference, 0, None).unwrap();
             assert_eq!(first["content"].as_str().unwrap().len(), 64_000);
             assert_eq!(first["truncated"], true);
-            let (_, tail) = read(events, root, &step, 0, &reference, 70_000).unwrap();
+            let (_, tail) = read(events, root, &step, 0, &reference, 70_000, None).unwrap();
             assert_eq!(tail["content"], "TAIL");
             assert_eq!(tail["truncated"], false);
-            let (_, end) = read(events, root, &step, 0, &reference, u64::MAX).unwrap();
+            let (_, end) = read(events, root, &step, 0, &reference, u64::MAX, None).unwrap();
             assert_eq!(end["content"], "");
             // Existing host files, even other run artifacts, are not issued references.
             let other = run.artifacts.parent().unwrap().join("summary.json");
@@ -2785,27 +2971,27 @@ mod tests {
                 &format!("{reference}/../summary.json"),
             ] {
                 assert!(
-                    read(events, root, &step, 0, path, 0)
+                    read(events, root, &step, 0, path, 0, None)
                         .unwrap_err()
                         .to_string()
                         .contains("escapes workspace")
                 );
             }
             events.artifacts.borrow_mut().remove(&reference);
-            assert!(read(events, root, &step, 0, &reference, 0).is_err());
+            assert!(read(events, root, &step, 0, &reference, 0, None).is_err());
             let reference = write_output_artifact(events, run, "second.log", "ok", 2, 2)
                 .unwrap()
                 .unwrap();
             events.permissions.read = Permission::Deny;
             assert!(
-                read(events, root, &step, 0, &reference, 0)
+                read(events, root, &step, 0, &reference, 0, None)
                     .unwrap_err()
                     .to_string()
                     .contains("permission denies")
             );
             events.permissions.read = Permission::Ask;
             assert!(
-                read(events, root, &step, 0, &reference, 0)
+                read(events, root, &step, 0, &reference, 0, None)
                     .unwrap_err()
                     .to_string()
                     .contains("interactive approval")
@@ -2835,8 +3021,16 @@ mod tests {
             let other = root.join("other.txt");
             fs::write(&other, "replacement").unwrap();
             std::os::unix::fs::symlink(&other, &reference).unwrap();
-            let (_, result) =
-                read(events, root, &gated_step(vec!["read"]), 0, &reference, 0).unwrap();
+            let (_, result) = read(
+                events,
+                root,
+                &gated_step(vec!["read"]),
+                0,
+                &reference,
+                0,
+                None,
+            )
+            .unwrap();
             assert_eq!(result["content"], "original");
         });
     }
