@@ -182,21 +182,29 @@ trace is still there when you need it.
 
 ## Project instructions
 
-A model step reads a root `AGENTS.md`, if present, and delivers it as guidance:
+A model step reads every non-ignored `AGENTS.md` under the workspace and
+delivers each as its own labeled block:
 
 ```
 <project_instructions source="AGENTS.md" truncated="false">
 ...file text...
 </project_instructions>
+<project_instructions source="src/AGENTS.md" truncated="false">
+...file text...
+</project_instructions>
 ```
 
-The file is read through the same anchored entry as the file tools (a symlink
-escaping the workspace or an audit path is refused), is never executed, and is
-capped at 16000 bytes on a UTF-8 boundary with an explicit `truncated` marker.
-The block is fixed into the request and its provenance is recorded in
-`model.started`, so `ha replay` rebuilds the exact prompt. Project instructions
-are guidance for the model, not authority: they cannot change tool permissions,
-the sandbox, the workspace boundary or any audit protection.
+Files are ordered root first, then shallower before deeper, and share a 16000
+byte total budget applied on UTF-8 boundaries with an explicit `truncated`
+marker. The same ignore rules as search apply, so `.git`, `target` and audit
+directories never contribute; a symlinked instruction file is skipped, not
+followed. Each block is read through the same anchored entry as the file tools,
+is never executed, is fixed into the request, and its provenance (source, bytes,
+truncated) is recorded in `model.started`, so `ha replay` rebuilds the exact
+prompt. Project instructions are guidance for the model, not authority: they
+cannot change tool permissions, the sandbox, the workspace boundary or any audit
+protection. Directory-scoped overrides beyond this fixed order are not yet
+defined.
 
 ## Replay and retention
 

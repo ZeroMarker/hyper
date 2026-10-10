@@ -391,17 +391,19 @@ fn agent(
     let mut history = bounded_history(&events.history, history_budget);
     let system = system_prompt(step.mode);
     let context = workspace_context(root, &events.permissions)?;
-    // Root project instructions are guidance, not authority: they are read as
-    // data (never executed) and only shape the prompt. The block is fixed here,
-    // so the recorded input and any replay carry the same bytes.
+    // Project instructions are guidance, not authority: they are read as data
+    // (never executed) and only shape the prompt. Each file is a fixed, labeled
+    // block, so the recorded input and any replay carry the same bytes.
     let instructions = crate::instructions::load(root)?;
-    let instructions_block = match &instructions {
-        Some(instructions) => format!(
-            "<project_instructions source=\"{}\" truncated=\"{}\">\n{}\n</project_instructions>\n\n",
-            instructions.source, instructions.truncated, instructions.text
-        ),
-        None => String::new(),
-    };
+    let instructions_block: String = instructions
+        .iter()
+        .map(|instructions| {
+            format!(
+                "<project_instructions source=\"{}\" truncated=\"{}\">\n{}\n</project_instructions>\n\n",
+                instructions.source, instructions.truncated, instructions.text
+            )
+        })
+        .collect();
     // Exactly what the model is given, recorded once per step: a replay can
     // then rebuild this request without re-deriving a workspace context that
     // the run itself may since have changed.
@@ -439,7 +441,7 @@ fn agent(
     events.write(
         "model.started",
         json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input,
-            "projectInstructions":instructions.as_ref().map(|i| json!({"source":i.source,"bytes":i.bytes,"truncated":i.truncated})),
+            "projectInstructions":instructions.iter().map(|i| json!({"source":i.source,"bytes":i.bytes,"truncated":i.truncated})).collect::<Vec<_>>(),
             "systemPrompt":system,"history":history_messages,
             "historyBudget":{"maxEstimatedTokens":history_budget,"estimatedTokens":history.iter().map(estimated_tokens).sum::<usize>(),"keptMessages":history.len(),"droppedMessages":events.history.len()-history.len()}}),
         Some(&step.id),
@@ -910,7 +912,7 @@ fn truncate_head_tail(value: &str, max_bytes: usize) -> String {
     format!("{head}{MARKER}{}", &value[tail_start..])
 }
 
-fn workspace_files(root: &Path, include_hidden: bool, limit: usize) -> Vec<String> {
+pub(crate) fn workspace_files(root: &Path, include_hidden: bool, limit: usize) -> Vec<String> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(!include_hidden)

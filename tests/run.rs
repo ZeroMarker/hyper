@@ -1643,6 +1643,12 @@ fn project_instructions_are_recorded_and_replayed() {
         "Project rule: run `cargo test` before finishing.\n",
     )
     .unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("src/AGENTS.md"),
+        "Module rule: keep public APIs stable.\n",
+    )
+    .unwrap();
     let config_home = stub_config(root.path(), &url);
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
         .args(["--jsonl", "plan", "inspect the project"])
@@ -1670,6 +1676,12 @@ fn project_instructions_are_recorded_and_replayed() {
     let content = user["content"].as_str().unwrap();
     assert!(content.contains("<project_instructions source=\"AGENTS.md\" truncated=\"false\">"));
     assert!(content.contains("Project rule: run `cargo test` before finishing."));
+    // The nested file is delivered too, after the root file.
+    assert!(content.contains("<project_instructions source=\"src/AGENTS.md\""));
+    assert!(content.contains("Module rule: keep public APIs stable."));
+    let root_at = content.find("source=\"AGENTS.md\"").unwrap();
+    let nested_at = content.find("source=\"src/AGENTS.md\"").unwrap();
+    assert!(root_at < nested_at, "root instructions must come first");
     let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
         .unwrap()
         .lines()
@@ -1679,14 +1691,13 @@ fn project_instructions_are_recorded_and_replayed() {
         .iter()
         .find(|event| event["type"] == "model.started")
         .unwrap();
-    assert_eq!(
-        started["payload"]["projectInstructions"]["source"],
-        "AGENTS.md"
-    );
-    assert_eq!(
-        started["payload"]["projectInstructions"]["truncated"],
-        false
-    );
+    let recorded = started["payload"]["projectInstructions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0]["source"], "AGENTS.md");
+    assert_eq!(recorded[1]["source"], "src/AGENTS.md");
+    assert_eq!(recorded[0]["truncated"], false);
     assert!(
         started["payload"]["input"]
             .as_str()
