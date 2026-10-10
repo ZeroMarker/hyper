@@ -1,14 +1,14 @@
 # Hyper 竞品对标与执行计划
 
-更新：2026-10-04；最近 Linux 模型评测基线：`b8464f9`（其后 macOS 文件入口改动另由原生 CI 验证）；评测用量修正：`1d2c273`。竞品证据沿用 2026-10-03 对七个产品官方文档或维护者仓库的复核。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
+更新：2026-10-10；最近 Linux 模型评测基线：`b8464f9`（其后改动另由原生 CI 与本地测试验证）；评测用量修正：`1d2c273`。竞品证据沿用 2026-10-03 对七个产品官方文档或维护者仓库的复核。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
 
-本轮补 macOS 直接工具逐层 openat 描述符入口，共享读/快照源/修改 inode；跨设备路径与校验后链接替换拒绝。本地检查及实现 `cc5e81e` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37225246393) 全部通过，macOS arm64 原生 15 项通过；Linux 模型历史基线不冒充本轮 macOS 验证。macOS 行政快照/恢复已补描述符入口（`posix_admin`，Linux 单元测试 + macOS 原生集成），同设备挂载别名、宿主目录移动及完整 OS 范围隔离继续待办。见 [具体边界](docs/audit-boundary.md)。
+最近的第十八至二十九轮补齐：仓库内容按不可信输入验证、macOS 行政快照/恢复与直接工具描述符入口（`posix_admin`/`posix_file`）、审计身份按工作区根 inode 锚定；`edit` 要求唯一匹配或显式 `occurrence` 并校验陈旧 hash，build 步骤新增可配置的显式 lint/test 闭环（`verify`，有限重试）；项目说明扩展为工作区内所有非忽略 `AGENTS.md`（固定顺序、共享 16000 字节预算）；`read` 新增 1-based 行窗口；测试不再读写宿主状态目录。这些改动由本地测试与原生 CI 验证，未重跑模型基线。完整 P0-3 与 P1-1/P1-5/P1-6 仍未关闭，见 [具体边界](docs/audit-boundary.md)。
 
 ## 定位与已完成基线
 
 Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地终端编码 Agent。下一阶段目标是可靠完成真实仓库任务，并在取消、编辑和长会话失败时提供清楚的恢复路径。
 
-最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架、共享取消、共用权限与外部审计内容存储及 Linux 直接工具描述符边界、工具路径/命令授权与 Linux restore/undo、read-only 显式元数据修改限制与 Linux 独立库快照/共用提交；这些功能从待办基线中移除。220 个本地 Linux Rust 测试及 14 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
+最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架、共享取消、共用权限与外部审计内容存储及 Linux 直接工具描述符边界、工具路径/命令授权与 Linux restore/undo、read-only 显式元数据修改限制与 Linux 独立库快照/共用提交、`edit` 唯一匹配与陈旧校验、显式验证命令闭环、工作区内 `AGENTS.md` 项目说明与 `read` 行窗口；这些功能从待办基线中移除。262 个本地 Linux Rust 测试及 26 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
 
 [前一轮基线](evals/baselines/2026-10-03/report.md)（`369a415`）：10 个 Rust/Python/JS 任务各跑 3 次，固定 OpenCode Go / deepseek-v4-flash / Chat、预算与并发参数，28/30 通过。3/3 错误编辑恢复通过；两次失败分别为长会话注释位置约束遗漏，以及代码正确但反复遇到策略拒绝、耗尽 12 轮。所有原始事件仅留本地，提交的逐次汇总与元数据可审阅。宿主编译环境仍被继承，后续比较须保持或隔离该环境。
 
@@ -59,7 +59,7 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 
 | 维度 | 当前实现 | 剩余差距 |
 | --- | --- | --- |
-| 质量 | 220 个本地 Linux Rust 测试、14 个评测测试、10 个固定任务及多轮各 30 次真实基线、范围授权与其他协议单次模型冒烟；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
+| 质量 | 262 个本地 Linux Rust 测试、26 个评测测试、10 个固定任务及多轮各 30 次真实基线、范围授权与其他协议单次模型冒烟；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
 | 运行控制 | 12 轮上限、共享取消、shell 超时/组清理、审批释放、独立取消结算和崩溃恢复；Linux 门控与 PTY 验证 | Windows stdout/终端渲染背压、OS 阻塞 I/O 及脱离组的 daemon 尚无完整有界取消验证 |
 | 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
 | 工具 | read/search/bash/write/edit，artifact、diff、快照；read 行/字节范围、edit 唯一匹配/occurrence/陈旧 hash 校验、显式验证命令闭环 | 缺按 prompt/语言的相关性摘录与 repo map；原子写入未交付 |
@@ -81,7 +81,7 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 
 验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。已有门控测试检查网络/审批/shell/Unix JSONL 等待取消在 2 秒内结算，真实 Linux PTY 验证审批 Ctrl-C 取消、同会话续聊与退出。Windows stdout、终端渲染背压和 OS 阻塞文件 I/O 列为后续，不将协作取消视为 daemon 隔离。
 
-**P0-3 审计区保护与执行策略（部分交付，未完成）。** 工具级 allow/ask/deny、来源记录、逐次审批、CLI 非交互 ask 拒绝与直接工具/搜索/上下文的审计路径保护已交付。默认写工具均 ask，自动化需明确 `--approval allow`。前轮已复现的 shell 内容篡改由外部存储阻断，旧目录不再权威；201 个 Rust 测试包含迁移与原生 Linux 攻击回归。workspace-write 的 chmod 元数据修改仍已复现，不能将内容边界宣称为完整防伪/防拒绝服务；细节见 [审计边界说明](docs/audit-boundary.md)。P0-3b1 外部内容存储、显式迁移、WAL/session/checkpoint/replay、tmp/artifact 分离已交付；P0-3b2a Linux read/write/edit、search/context 的 openat2 入口和同 inode 快照/修改已交付，非 Linux 及宿主目录移动竞争未覆盖，Linux restore/undo 已补目录描述符与外部 staging 原子提交。P0-3b2b1 工具 literal 路径/完整命令授权、审批固定目标和 read 范围投影已交付，未缩小 shell OS 读取范围。read-only 显式元数据接口 seccomp 拒绝已补，含 ABI 校验、继承与原生测试；Linux 独立库快照源和共用输出提交已补 FD 边界与 NOREPLACE 清单发布，六个确定性/四个 API 测试覆盖；workspace-write 路径级 metadata 仍未保护，读取 atime/锁/外部服务另列边界。下一阶段继续 P0-3b2b2 元数据与 OS 范围隔离。已评估：workspace-write 的元数据/读取隔离无法用现有原语交付（Landlock 权限只并集授权、不中介 chmod/chown/utime；seccomp 不能解引用路径；同 UID 属主可改自身权限且本环境无用户 mount namespace），唯一更重的 `SECCOMP_RET_USER_NOTIF` 监督方案保留候选；仓库内容已按不可信输入验证。见 [审计边界](docs/audit-boundary.md)。
+**P0-3 审计区保护与执行策略（部分交付，未完成）。** 工具级 allow/ask/deny、来源记录、逐次审批、CLI 非交互 ask 拒绝与直接工具/搜索/上下文的审计路径保护已交付。默认写工具均 ask，自动化需明确 `--approval allow`。前轮已复现的 shell 内容篡改由外部存储阻断，旧目录不再权威；262 个 Rust 测试包含迁移与原生 Linux 攻击回归。workspace-write 的 chmod 元数据修改仍已复现，不能将内容边界宣称为完整防伪/防拒绝服务；细节见 [审计边界说明](docs/audit-boundary.md)。P0-3b1 外部内容存储、显式迁移、WAL/session/checkpoint/replay、tmp/artifact 分离已交付；P0-3b2a Linux read/write/edit、search/context 的 openat2 入口和同 inode 快照/修改已交付，非 Linux 及宿主目录移动竞争未覆盖，Linux restore/undo 已补目录描述符与外部 staging 原子提交。P0-3b2b1 工具 literal 路径/完整命令授权、审批固定目标和 read 范围投影已交付，未缩小 shell OS 读取范围。read-only 显式元数据接口 seccomp 拒绝已补，含 ABI 校验、继承与原生测试；Linux 独立库快照源和共用输出提交已补 FD 边界与 NOREPLACE 清单发布，六个确定性/四个 API 测试覆盖；workspace-write 路径级 metadata 仍未保护，读取 atime/锁/外部服务另列边界。下一阶段继续 P0-3b2b2 元数据与 OS 范围隔离。已评估：workspace-write 的元数据/读取隔离无法用现有原语交付（Landlock 权限只并集授权、不中介 chmod/chown/utime；seccomp 不能解引用路径；同 UID 属主可改自身权限且本环境无用户 mount namespace），唯一更重的 `SECCOMP_RET_USER_NOTIF` 监督方案保留候选；仓库内容已按不可信输入验证。见 [审计边界](docs/audit-boundary.md)。
 
 进一步解决 metadata 与剩余路径竞争，补 OS 范围隔离。外部状态通过 `ha state` 定位，旧工作区和移动/备份在目标第一次使用前用 `ha migrate-state --from` 导入；源写者须停止。导入不读取仓库定位文件、不覆盖已有目标，验证原始源保持、活动源拒绝、原子回滚和内容边界。
 
@@ -125,9 +125,9 @@ P2 共用门槛：至少一个实际任务或集成消费者证明需求；已�
 
 ## 接下来执行什么
 
-本轮交付 Linux 两种受限模式的显式 socket syscall 限制：UDP/Unix socket 创建/收发、io_uring 和外部 FD 导入禁止，匿名 AF_UNIX socketpair/无地址收发允许，命名本地服务受限；pipes/文件兼容。215 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过。主动继承 socket 的通用 I/O、预建立共享映射、元数据与完整 OS 读取边界仍未交付；x86 原生已由 CI 验证，固定模型任务 30/30 通过（初版 27/30 独立保留），见 [实际边界](docs/audit-boundary.md)。
+第十五轮交付 Linux 两种受限模式的显式 socket syscall 限制：UDP/Unix socket 创建/收发、io_uring 和外部 FD 导入禁止，匿名 AF_UNIX socketpair/无地址收发允许，命名本地服务受限；pipes/文件兼容。215 个 Rust 测试、14 个离线评测与 fmt/Clippy/release 通过。主动继承 socket 的通用 I/O、预建立共享映射、元数据与完整 OS 读取边界仍未交付；x86 原生已由 CI 验证，固定模型任务 30/30 通过（初版 27/30 独立保留），见 [实际边界](docs/audit-boundary.md)。
 
-本次交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 已全部通过；Windows x64 六项测试与 Linux 209 个 Rust/14 个离线评测分别验证。未重跑模型基线，Linux 历史报告保持原样。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
+第十四轮交付 P0-3b2b2 中 Windows 直接工具硬链接检查：真实句柄查询失败或链接计数不为 1 拒绝，解析/打开双检查，read/write/edit/search/context 共用；普通硬链接也拒绝。新增 Windows 原生 CI（3 单元 + 3 集成），实现 `9c801d9` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37215937962) 已全部通过；Windows x64 六项测试与 Linux 209 个 Rust/14 个离线评测分别验证。未重跑模型基线，Linux 历史报告保持原样。Windows shell/目录描述符/恢复及 Linux 元数据仍待交付，完整 P0-3 不关闭，见 [边界说明](docs/audit-boundary.md)。
 
 P0 收尾：平台无关、可本地交付的部分已完成——P0-3b2b2 除元数据/读取隔离外，仓库内容不可信验证、审计身份 inode 锚定与 macOS 行政描述符入口均已交付；元数据/读取隔离经评估无法用现有原语交付（Landlock/seccomp/同 UID/无 namespace），挂载别名需 mount 权限，Windows 描述符/恢复与 Windows stdout 背压取消属跨平台，均如实保留未完成。P0-3a 共用权限、P0-3b1 外部内容存储与显式迁移已交付，完整 P0-3 保持未完成。P0-2 共享取消及 Linux 门控/PTY 验证已交付。P0-1 的 fixture、独立成功判定、脚手架及当前版本真实基线已交付；后续运行控制与 P1-2/P1-3 的改动使用同一任务集验证。已完成的 streaming、预算和 JSONL 保持回归，不重复列为新功能。
 
