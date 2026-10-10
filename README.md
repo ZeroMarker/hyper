@@ -513,12 +513,46 @@ writes an empty file, while `"write:a.txt"` (no content line at all) is rejected
 rather than silently emptying an existing file. `edit:` expects
 `path\nsearch\nreplace` and replaces the first occurrence of `search`.
 
+The model's `edit` tool is stricter than the instruction: when `search` appears
+more than once it requires an `occurrence` (1-based) and reports the matching
+line numbers instead of silently editing the first block, and it refuses a file
+whose bytes changed since the run read them (stale edit). `read` reports a
+workspace file's `sha256`, which the model can pass back as `expectedHash` to pin
+the exact content it edited.
+
 A step whose instruction has no tool prefix runs the **tool-calling agent**:
 the model inspects the workspace context, calls tools (`read`, `search`,
 `bash`, `write`, `edit`) in a loop, and feeds each result back until it
-produces a final answer (capped at 12 turns). In plan mode the model only sees
-the read-only tools. The optional per-step `tools` field acts as an allowlist:
-`"tools": ["read", "search"]` restricts that step to the listed tools.
+produces a final answer (capped at 12 turns). A model that repeats the same tool
+call with the same failure three times in a row is stopped with an
+`agent.repeated_failure` event instead of spending every remaining turn. In plan
+mode the model only sees the read-only tools. The optional per-step `tools`
+field acts as an allowlist: `"tools": ["read", "search"]` restricts that step to
+the listed tools.
+
+A model step can declare explicit lint/test commands to run once the model says
+it is done. They run through the same policy, approval, sandbox, timeout and
+resource limits as a `bash` tool call; the first non-zero exit is handed back to
+the model as the next user turn so it can fix the cause, up to `retries` times
+(`retries + 1` attempts total, `retries` capped at 5). Verification is a build-
+step feature — a plan step or a direct `bash:`/`read:`/… instruction has no model
+loop to feed a failure back to and is rejected by validation. Attempts and
+results are recorded as `verify.started`/`verify.finished`, and the feedback is
+recorded as `model.verification` so `replay` stays exact. A step whose
+verification still fails after its retries fails with `VerificationError`.
+
+```json
+{
+  "name": "fix and test",
+  "steps": [
+    {
+      "id": "build",
+      "instruction": "make the failing test pass",
+      "verify": { "commands": ["cargo test"], "retries": 1 }
+    }
+  ]
+}
+```
 
 On Linux, every `bash` process receives a default limit of 8 GiB virtual
 address space and 1 GiB per output file. Its CPU time limit defaults to the

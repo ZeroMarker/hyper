@@ -22,6 +22,7 @@ fn task(name: &str, mode: AgentMode, instruction: &str) -> TaskSpec {
             tools: None,
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -39,6 +40,7 @@ fn task_with_tools(name: &str, tools: Vec<String>, instruction: &str) -> TaskSpe
             tools: Some(tools),
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -379,6 +381,98 @@ fn sandbox_boundary_survives_symlinks_and_child_shells() {
         fs::read_to_string(root.path().join("inside.txt")).unwrap(),
         "allowed\n"
     );
+}
+
+/// The null device is a discard sink, so a confined shell must be able to use
+/// it: `git` and many build tools open `/dev/null` read-write and fail closed
+/// otherwise. The exception grants exactly this device, not `/dev` as a whole.
+#[cfg(target_os = "linux")]
+#[test]
+fn sandboxed_shell_can_use_the_null_device() {
+    let root = tempdir().unwrap();
+
+    let redirect = run_task(
+        &task(
+            "null-redirect",
+            AgentMode::Build,
+            "bash:echo discarded > /dev/null",
+        ),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(redirect.status, "finished", "{:?}", redirect.failure);
+
+    // A tool opening `/dev/null` read-write, as `git` does internally.
+    let read_write = run_task(
+        &task(
+            "null-read-write",
+            AgentMode::Build,
+            "bash:python3 -c \"import os; fd = os.open('/dev/null', os.O_RDWR); os.write(fd, b'x'); os.close(fd)\"",
+        ),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(read_write.status, "finished", "{:?}", read_write.failure);
+
+    // `git` opens `/dev/null` read-write while running; a confined shell must
+    // not break it. `2>/dev/null` also exercises the policy exemption.
+    let repo = tempdir().unwrap();
+    if Command::new("git").arg("--version").output().is_ok() {
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "harness@example.invalid"],
+            vec!["config", "user.name", "harness"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(repo.path().join("tracked.txt"), "hi\n").unwrap();
+        let git = run_task(
+            &task(
+                "git",
+                AgentMode::Build,
+                "bash:git status --short 2>/dev/null || git status --short",
+            ),
+            repo.path(),
+        )
+        .unwrap();
+        assert_eq!(git.status, "finished", "{:?}", git.failure);
+        let (_, events) = get_run_details(repo.path(), &git.run_id).unwrap();
+        assert!(
+            !events.iter().any(|e| e.event_type == "tool.denied"),
+            "git was rejected by policy: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_type == "tool.finished" && e.payload["exitCode"] == 0),
+            "git did not run successfully: {events:?}"
+        );
+    }
+
+    // The grant does not extend to any other path outside the workspace.
+    let outside = tempdir().unwrap();
+    let target = outside.path().join("escaped.txt");
+    let escaped = run_task(
+        &task(
+            "escape",
+            AgentMode::Build,
+            &format!(
+                "bash:python3 -c \"open('{}', 'w').write('x')\"",
+                target.display()
+            ),
+        ),
+        root.path(),
+    )
+    .unwrap();
+    assert_eq!(escaped.status, "failed", "{:?}", escaped.failure);
+    assert!(!target.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -1426,6 +1520,227 @@ fn malformed_model_write_and_edit_calls_preserve_existing_content() {
             .iter()
             .any(|event| event["type"] == "checkpoint.created" || event["type"] == "tool.started")
     );
+}
+
+/// A model that repeats the same failing tool call verbatim is stopped once the
+/// result stops changing, instead of burning every remaining turn.
+#[test]
+fn repeated_identical_failing_calls_stop_the_agent_early() {
+    let failing = r#"{"model":"stub","choices":[{"message":{"tool_calls":[
+        {"id":"c1","type":"function","function":{"name":"edit","arguments":"{\"path\":\"missing.txt\",\"search\":\"x\",\"replace\":\"y\"}"}}
+    ]}}]}"#;
+    let (url, _bodies, server) = stub_model(vec![failing, failing, failing]);
+    let root = tempdir().unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "fix the file"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    server.join().unwrap();
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "agent.repeated_failure"),
+        "expected a repeated-failure event"
+    );
+    let failed = events
+        .iter()
+        .find(|event| event["type"] == "run.failed")
+        .unwrap();
+    let message = failed["payload"]["failure"]["message"].as_str().unwrap();
+    assert!(message.contains("repeated the identical"), "{message}");
+    // It stopped after three identical calls, not the twelve-turn limit.
+    assert!(!message.contains("exceeded 12"), "{message}");
+}
+
+/// A failing `verify` command is handed back to the model, which fixes it and
+/// passes on the retry. The retry request carries the failure text.
+#[test]
+fn verification_failure_is_fed_back_and_can_be_fixed() {
+    let first = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let fix = r#"{"model":"stub","choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"write","arguments":"{\"path\":\"done.txt\",\"content\":\"ok\"}"}}]}}]}"#;
+    let second = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![first, fix, second]);
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("task.json"),
+        r#"{"name":"verify","steps":[{"id":"s","instruction":"make done.txt","verify":{"commands":["test -f done.txt"],"retries":1}}]}"#,
+    )
+    .unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "run", "task.json"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let verify: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "verify.finished")
+        .collect();
+    assert_eq!(verify.len(), 2, "{events:?}");
+    assert_eq!(verify[0]["payload"]["passed"], false);
+    assert_eq!(verify[1]["payload"]["passed"], true);
+    assert_eq!(
+        fs::read_to_string(root.path().join("done.txt")).unwrap(),
+        "ok"
+    );
+    // The retry request carries the verification feedback, and the feedback is
+    // recorded so replay rebuilds the same conversation.
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1].contains("verification failed"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "model.verification"),
+        "feedback must be recorded for replay"
+    );
+    // Replay rebuilds the final request, feedback turn included.
+    let run_id = events[0]["runId"].as_str().unwrap();
+    let replay = harness::replay_messages(root.path(), run_id).unwrap();
+    let sent: serde_json::Value = serde_json::from_str(&requests[2]).unwrap();
+    assert_eq!(
+        serde_json::to_value(&replay[0].messages).unwrap(),
+        sent["messages"],
+        "replay must include the verification feedback turn"
+    );
+}
+
+/// A verification that keeps failing exhausts its retries and fails the step.
+#[test]
+fn exhausted_verification_fails_the_step() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![reply, reply]);
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("task.json"),
+        r#"{"name":"verify","steps":[{"id":"s","instruction":"make it pass","verify":{"commands":["false"],"retries":1}}]}"#,
+    )
+    .unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "run", "task.json"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    server.join().unwrap();
+    // One attempt plus one retry, and no more requests after the failure.
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let verify: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "verify.finished")
+        .collect();
+    assert_eq!(verify.len(), 2);
+    assert!(
+        verify
+            .iter()
+            .all(|event| event["payload"]["passed"] == false)
+    );
+    let failed = events
+        .iter()
+        .find(|event| event["type"] == "run.failed")
+        .unwrap();
+    assert_eq!(
+        failed["payload"]["failure"]["errorType"],
+        "VerificationError"
+    );
+    assert!(
+        failed["payload"]["failure"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("verification failed after 2 attempt(s)")
+    );
+}
+
+/// Verification runs through the same approval gate as a `bash` call: without
+/// an approval handler, an `ask` decision denies it and the step fails.
+#[test]
+fn verification_respects_the_approval_gate() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, _bodies, server) = stub_model(vec![reply]);
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("task.json"),
+        r#"{"name":"verify","steps":[{"id":"s","instruction":"make it pass","verify":{"commands":["true"]}}]}"#,
+    )
+    .unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "run", "task.json"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("HYPER_APPROVAL")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    server.join().unwrap();
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|event| event["type"] == "verify.started"),
+        "verification should have started"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "verify.finished"),
+        "a denied command must not report a verification result"
+    );
+    let failed = events
+        .iter()
+        .find(|event| event["type"] == "run.failed")
+        .unwrap();
+    assert_eq!(failed["payload"]["failure"]["errorType"], "PolicyError");
 }
 
 /// A conversation keeps the user's prompt and the model's answer, and later

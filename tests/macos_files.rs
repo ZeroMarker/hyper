@@ -18,6 +18,7 @@ fn task(instruction: &str) -> TaskSpec {
             tools: None,
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }],
     }

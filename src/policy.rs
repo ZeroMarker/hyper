@@ -121,7 +121,7 @@ fn check_segment(segment: &Segment, workspace_root: &Path, depth: usize) -> Resu
             .skip_while(|word| !is_redirect(word))
             .filter(|word| !is_redirect(word))
         {
-            if is_protected_path(target, workspace_root) {
+            if is_protected_path(target, workspace_root) && !is_null_device(target) {
                 bail!("command matches dangerous pattern: writing to {target}")
             }
         }
@@ -294,6 +294,14 @@ fn is_protected_path(raw: &str, workspace_root: &Path) -> bool {
         return true;
     }
     SYSTEM_ROOTS.iter().any(|root| first == *root)
+}
+
+/// The null device is a discard sink, so redirecting output (`2>/dev/null`) or
+/// input into it can never destroy anything, unlike the other device nodes under
+/// `/dev`. It sits under the protected `dev` system root, so it needs an explicit
+/// exception; tools such as `git` and build scripts use it constantly.
+fn is_null_device(raw: &str) -> bool {
+    expand_home(raw) == "/dev/null"
 }
 
 fn expand_home(raw: &str) -> String {
@@ -514,8 +522,34 @@ mod tests {
             // A wrapper running an ordinary command is not suspicious either.
             "timeout 30 cargo test",
             "xargs -0 rm -f",
+            // The null device discards whatever is written to it, so redirections
+            // and reads involving it are ordinary shell plumbing, not damage.
+            "cargo test 2>/dev/null",
+            "git status --short 2>/dev/null",
+            "git log 2>&1 | cat",
+            "echo hi > /dev/null",
+            "cat /dev/null",
+            "python3 - <<'PY' 2>/dev/null\nprint('ok')\nPY",
         ] {
             assert_allowed(command)
+        }
+    }
+
+    /// The null device is exempt, but every other device node and system path
+    /// stays protected: only `/dev/null` is a safe sink.
+    #[test]
+    fn only_the_null_device_is_exempt_from_redirect_protection() {
+        assert!(check_command("echo x > /dev/null", &root()).is_ok());
+        assert!(check_command("echo x 2>/dev/null", &root()).is_ok());
+        for command in [
+            "echo x > /dev/sda",
+            "echo x > /dev/stdout",
+            "echo x > /dev/tty",
+            "echo x 2>/dev/console",
+            "echo x > /dev/null.bak",
+            "rm /dev/null",
+        ] {
+            assert_blocked(command);
         }
     }
 

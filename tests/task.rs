@@ -1,5 +1,18 @@
-use harness::{AgentMode, StepSpec, TaskSpec, Workspace};
+use harness::{AgentMode, StepSpec, TaskSpec, VerifySpec, Workspace};
 use std::collections::HashMap;
+
+fn model_step(id: &str) -> StepSpec {
+    StepSpec {
+        id: id.into(),
+        mode: AgentMode::Build,
+        instruction: "make it pass".into(),
+        tools: None,
+        timeout_ms: None,
+        limits: None,
+        verify: None,
+        metadata: HashMap::new(),
+    }
+}
 
 fn step(id: &str) -> StepSpec {
     StepSpec {
@@ -9,6 +22,7 @@ fn step(id: &str) -> StepSpec {
         tools: None,
         timeout_ms: None,
         limits: None,
+        verify: None,
         metadata: HashMap::new(),
     }
 }
@@ -59,6 +73,71 @@ fn zero_resource_limits_are_rejected() {
             .to_string()
             .contains("cpuSeconds")
     );
+}
+
+/// `verify` is explicit lint/test configuration for a model step: it needs at
+/// least one command, a bounded retry count, a build step, and a model loop to
+/// feed a failure back to.
+#[test]
+fn verify_requires_a_bounded_model_step() {
+    let mut task = TaskSpec {
+        id: None,
+        name: "verify".into(),
+        steps: vec![model_step("one")],
+        metadata: Default::default(),
+    };
+
+    task.steps[0].verify = Some(VerifySpec {
+        commands: vec![],
+        retries: 1,
+    });
+    assert!(
+        task.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("at least one command")
+    );
+
+    task.steps[0].verify = Some(VerifySpec {
+        commands: vec!["  ".into()],
+        retries: 1,
+    });
+    assert!(
+        task.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty")
+    );
+
+    task.steps[0].verify = Some(VerifySpec {
+        commands: vec!["cargo test".into()],
+        retries: 99,
+    });
+    assert!(task.validate().unwrap_err().to_string().contains("at most"));
+
+    task.steps[0].verify = Some(VerifySpec {
+        commands: vec!["cargo test".into()],
+        retries: 1,
+    });
+    task.steps[0].mode = AgentMode::Plan;
+    assert!(
+        task.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("build step")
+    );
+
+    task.steps[0].mode = AgentMode::Build;
+    task.steps[0].instruction = "bash:cargo test".into();
+    assert!(
+        task.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("model step")
+    );
+
+    task.steps[0].instruction = "make it pass".into();
+    assert!(task.validate().is_ok());
 }
 
 #[test]

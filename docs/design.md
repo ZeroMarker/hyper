@@ -37,14 +37,14 @@ flowchart LR
 
 ## 任务与执行流程
 
-`TaskSpec` 包含可选 `id`、`name`、非空的 `steps` 和元数据。每个 `StepSpec` 有唯一 `id`、`mode`（`plan`/`build`）、`instruction`，以及可选的工具白名单、超时和 Shell 资源限制。CLI 的自然语言提示被转换成单步骤任务；JSON 任务可定义多步骤。
+`TaskSpec` 包含可选 `id`、`name`、非空的 `steps` 和元数据。每个 `StepSpec` 有唯一 `id`、`mode`（`plan`/`build`）、`instruction`，以及可选的工具白名单、超时、Shell 资源限制和 `verify` 验证命令。CLI 的自然语言提示被转换成单步骤任务；JSON 任务可定义多步骤。`verify` 只允许 build 模型步骤：命令按顺序经 `bash` 同一条路径（策略、审批、沙箱、超时、资源限制）执行，首个非零退出作为下一轮用户消息回给模型，最多重试 `retries` 次（共 `retries+1` 次，上限 5）；尝试与结果记为 `verify.started`/`verify.finished`，反馈记为 `model.verification` 以保持 replay 一致，重试耗尽以 `VerificationError` 失败。
 
 1. 校验任务，打开工作区并修复索引或中断的旧运行。
 2. 创建运行目录和运行锁，写入 `task.json`，在 SQLite 中建立 `running` 行。若有会话，先读取此前消息，再追加当前用户消息。
 3. 写入 `run.started`，依序执行步骤。每一步有 `step.started`，完成时写 `step.finished`；失败时写失败事件并停止后续步骤。
 4. 写入终态事件和 `summary.json`；会话任务随后追加助手消息。运行锁随执行结束释放。
 
-以 `bash:`、`read:`、`search:`、`write:`、`edit:` 开头的指令直接调用对应工具。其他指令进入最多 12 轮的模型工具循环。模型能看到工作区文件清单及部分文件摘录（摘录使用约 64 KB 的目标预算、单文件最多约 6 KB），并获得步骤允许的工具定义。文件清单和用户提示会另占空间，整个模型输入没有严格的 64 KB 上限。模型发出的调用按顺序执行，结果作为 `tool` 消息送回；白名单会在执行时再次检查。工具观察文本最长约 4 KB。
+以 `bash:`、`read:`、`search:`、`write:`、`edit:` 开头的指令直接调用对应工具。其他指令进入最多 12 轮的模型工具循环。模型能看到工作区文件清单及部分文件摘录（摘录使用约 64 KB 的目标预算、单文件最多约 6 KB），并获得步骤允许的工具定义。文件清单和用户提示会另占空间，整个模型输入没有严格的 64 KB 上限。模型发出的调用按顺序执行，结果作为 `tool` 消息送回；白名单会在执行时再次检查。工具观察文本最长约 4 KB。模型的 `edit` 要求 `search` 唯一，重复时须给出 1-based `occurrence`，否则报出匹配行号而不是改第一个块；`read` 返回工作区文件的 `sha256`，`edit` 可用 `expectedHash` 或本轮已读内容哈希拒绝陈旧文件（字节已变则不改）。同一个工具调用连同相同失败连续重复 3 次时写入 `agent.repeated_failure` 并停止，不耗尽剩余轮次。`edit:` 直接指令仍按首个匹配替换。
 
 每个事件先追加到 `events.jsonl`，再写入 SQLite，最后送往事件接收端。CLI 的 `--jsonl` 支持 run/plan/build/直接 prompt，每条完整事件立即写入并 flush stdout，不输出普通答案或 summary；慢消费者产生背压，输出错误返回非零状态，已存事件保留。JSONL 模式不打开配置向导，provider 配置错误在运行中记录为失败。成功以 `run.finished`（含 summary）、任务失败以 `run.failed`（含 failure）结束；进程或输出异常可能留下待启动恢复的 interrupted run。TUI 使用工作线程运行任务，主线程处理输入与绘制；简短状态队列最多保留 128 条，增量模型文本另有 128 KiB 的显示缓冲，完整事件仍在事件文件中。TUI 的 `bash`、`write`、`edit` 经审批门等待用户响应，超时 600 秒视为拒绝。没有审批门的 CLI 调用不经过这一交互审批。
 

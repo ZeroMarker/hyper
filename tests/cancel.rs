@@ -32,6 +32,7 @@ fn task(instructions: &[&str]) -> TaskSpec {
                 tools: None,
                 timeout_ms: None,
                 limits: None,
+                verify: None,
                 metadata: HashMap::new(),
             })
             .collect(),

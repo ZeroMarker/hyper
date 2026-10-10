@@ -18,6 +18,7 @@ fn run(root: &std::path::Path, instruction: &str) -> harness::RunSummary {
             tools: None,
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }],
     };

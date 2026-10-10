@@ -413,6 +413,7 @@ mod linux {
                     tools: None,
                     timeout_ms: None,
                     limits: None,
+                    verify: None,
                     metadata: Default::default(),
                 }],
             };

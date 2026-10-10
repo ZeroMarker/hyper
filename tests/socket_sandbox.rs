@@ -37,6 +37,7 @@ fn run_python(root: &Path, script: &str, mode: ExecutionMode) {
             tools: None,
             timeout_ms: Some(10_000),
             limits: None,
+            verify: None,
             metadata: Default::default(),
         }],
     };

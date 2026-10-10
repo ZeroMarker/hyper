@@ -78,7 +78,7 @@
 
 - [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围、macOS 直接工具描述符与 Windows 保守硬链接检查已交付，继续补 OS 读取/元数据边界、其余平台描述符与非 Linux 恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux 显式 UDP/Unix socket syscall 限制已交付，继续 metadata、外部读取、主动继承资源及 macOS/Windows 原生隔离，按平台报告支持范围；Landlock 与 seccomp 共用，非 Linux、ABI/架构不支持或过滤安装失败仍拒绝受限 shell。与 P0-3 分阶段交付。
-- [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入良性 `2>/dev/null`、git 内部 `/dev/null` 设备访问与重复策略拒绝样本；跟踪长会话约束位置遗漏。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
+- [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入重复策略拒绝样本；跟踪长会话约束位置遗漏。**（2026-10-10 已修复其中两个缺陷）** 良性 `2>/dev/null`/`> /dev/null` 不再被命令策略误拒绝（只豁免空设备 `/dev/null`，其余 `/dev/*` 仍拒绝），受限 shell 已对 `/dev/null` 授予 Landlock `WRITE_FILE`，`git` 等读写打开空设备不再 `Permission denied`；仍需把这些场景固化为评测 fixture。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 
 - [ ] **取消的原生 I/O 后续**：Windows stdout 背压、终端渲染背压和 OS 阻塞文件 I/O 的有界取消；自定义同步 event writer 需自行可中断。Unix shell 仍按进程组清理，脱离该组的 daemon/继承管道场景需另测并纳入平台隔离交付。
 
@@ -86,7 +86,7 @@
 
 - [ ] **P1-1 可审计压缩**：手动后自动；摘要保留目标、约束、改动和剩余工作，记录来源边界、模型、usage 和实际消息投影；保留原始会话/事件，保证 call/result 成对和 replay 一致，失败或取消时保留可用历史并限制重试。
 - [ ] **P1-2 相关上下文与范围读取**：先显式文件选择、read 行/字节范围，再按 prompt/路径/语言选择摘录；覆盖 Python/JS，记录范围和截断，遵守预算与敏感路径排除；空仓库的 rg --files 退出码 1 应视为空集合，而不是启动失败。repo map/语法索引以固定任务集比较收益。
-- [ ] **P1-3 编辑和验证闭环**：唯一匹配/显式 occurrence、陈旧文件 hash 检查、原子写入与可定位错误；显式 lint/test 命令走执行策略与审批、有限重试，记录首轮编辑成功率。重复块、并发变更、快照与 Unicode 必须验证，再选 Hashline/patch。
+- [ ] **P1-3 编辑和验证闭环**：唯一匹配/显式 occurrence、陈旧文件 hash 检查、原子写入与可定位错误；显式 lint/test 命令走执行策略与审批、有限重试，记录首轮编辑成功率。重复块、并发变更、快照与 Unicode 必须验证，再选 Hashline/patch。**（2026-10-10 已交付大部分）** 模型 `edit` 现在要求唯一匹配或显式 `occurrence`（重复时报匹配行号），`read` 返回整文件 `sha256`，`edit` 用 `expectedHash` 或本轮已读/已写哈希拒绝陈旧文件；空替换/换行/Unicode 兼容，快照仍在写入前创建；agent loop 对「同一调用+相同失败」连续 3 次即停止（`agent.repeated_failure`）。`StepSpec.verify`（build 模型步骤）显式配置 lint/test 命令，经策略/审批/沙箱/超时/资源限制执行，失败回喂模型有限重试（`retries+1` 次，上限 5），耗尽以 `VerificationError` 失败，`verify.started`/`verify.finished`/`model.verification` 落事件且 replay 一致。仍未交付：首轮编辑成功率/重试次数/任务成功率统计、原子写入、Hashline/patch 选型。
 - [ ] **P1-4 项目说明**：根 AGENTS.md 起步，随后目录作用域和 override；固定加载顺序、来源、预算及实际 prompt，说明不能改变宿主授权/工具权限。不在读取时执行脚本；按需 skills 后续接入。
 - [ ] **P1-5 模型能力与完成语义**：可配置 provider/model 上限、协议路径与能力，支持可用的 tokenizer/服务端计数及明确回退；检测输出长度截断与残缺工具调用，不把截断当成功；恢复及快照基线的 Python 深文件任务均出现残缺参数失败，保留为回归样本；Chat/Responses 明确未完成拒绝与有界流式诊断已交付，缺失模型回复的总用量保持未知；继续统一独立非流式与 Messages 停止语义、缺失/未知原因的 provider 策略。为重复失败调用设置可审计阈值，避免误伤分页/测试重跑。
 - [ ] **P1-6 命名 provider profile**：兼容旧配置和 DEEPSEEK 环境变量，list/use/test、认证来源、三协议 endpoint 覆盖；运行固定有效配置，stub 区分认证/路径/协议/模型/限流/超时，不记录密钥。

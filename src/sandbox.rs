@@ -57,6 +57,8 @@ use std::{
 #[cfg(target_os = "linux")]
 const WRITE_FILE: u64 = 1 << 1;
 #[cfg(target_os = "linux")]
+const NULL_DEVICE: &str = "/dev/null";
+#[cfg(target_os = "linux")]
 const REMOVE_DIR: u64 = 1 << 4;
 #[cfg(target_os = "linux")]
 const REMOVE_FILE: u64 = 1 << 5;
@@ -177,6 +179,26 @@ impl Sandbox {
                 if result < 0 {
                     return Err(io::Error::last_os_error());
                 }
+            }
+            // The null device is a discard sink, not a workspace or audit path.
+            // `git` and many build tools open it read-write, so grant exactly
+            // that one device without widening the boundary anywhere else.
+            let null_file = File::open(NULL_DEVICE)?;
+            let null_rule = PathBeneathAttr {
+                allowed_access: WRITE_FILE,
+                parent_fd: null_file.as_raw_fd(),
+            };
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_landlock_add_rule,
+                    ruleset.as_raw_fd(),
+                    1, // LANDLOCK_RULE_PATH_BENEATH
+                    &null_rule,
+                    0,
+                )
+            };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
             }
             let syscall_filter = crate::syscall_sandbox::SyscallFilter::prepare(mode)?;
             Ok(Self {

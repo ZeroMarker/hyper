@@ -14,6 +14,7 @@ use diffy::create_patch;
 use ignore::WalkBuilder;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use wait_timeout::ChildExt;
 
 use crate::{
@@ -47,6 +48,10 @@ struct EventWriter<'a> {
     history: Vec<SessionMessage>,
     /// Only output files issued by this run can cross the workspace read boundary.
     artifacts: RefCell<HashMap<String, fs::File>>,
+    /// SHA-256 of the last content this run saw for a workspace file, keyed by
+    /// resolved target path. `edit` refuses to touch bytes that changed since the
+    /// run read them, so a stale edit applies to nothing instead of guessing.
+    observed_hashes: RefCell<HashMap<String, String>>,
     cancellation: CancellationToken,
 }
 impl EventWriter<'_> {
@@ -296,7 +301,9 @@ fn tool(
         if search.trim().is_empty() {
             bail!("edit: search text must not be empty")
         }
-        return edit_file(events, run, root, step, index, path, search, replace);
+        return edit_file(
+            events, run, root, step, index, path, search, replace, None, None, false,
+        );
     }
     agent(events, run, root, step, index, instruction)
 }
@@ -305,6 +312,62 @@ fn tool_allowed(step: &StepSpec, name: &str) -> bool {
     step.tools
         .as_ref()
         .is_none_or(|tools| tools.iter().any(|allowed| allowed == name))
+}
+
+/// Run a step's explicit lint/test commands through the normal `bash` path, so
+/// policy, approval, sandbox, timeout and resource limits all apply. Returns
+/// `None` when every command exits zero, or the model-facing feedback for the
+/// first failure. A command that cannot run at all (denied, no sandbox) is an
+/// error rather than a retry, because repeating it would not help.
+fn run_verification(
+    events: &EventWriter<'_>,
+    run: &RunPaths,
+    root: &Path,
+    step: &StepSpec,
+    index: usize,
+    commands: &[String],
+    attempt: usize,
+) -> Result<Option<String>> {
+    events.write(
+        "verify.started",
+        json!({"attempt":attempt,"commands":commands}),
+        Some(&step.id),
+        Some(index),
+    )?;
+    let mut results = Vec::new();
+    let mut failure: Option<Value> = None;
+    for command in commands {
+        let (passed, payload) = bash(events, run, root, step, index, command)?;
+        let result = json!({
+            "command": command,
+            "exitCode": payload.get("exitCode").cloned().unwrap_or(Value::Null),
+            "stdout": payload.get("stdout").cloned().unwrap_or(Value::Null),
+            "stderr": payload.get("stderr").cloned().unwrap_or(Value::Null),
+        });
+        results.push(result.clone());
+        if !passed {
+            failure = Some(result);
+            break;
+        }
+    }
+    let passed = failure.is_none();
+    events.write(
+        "verify.finished",
+        json!({"attempt":attempt,"passed":passed,"results":results}),
+        Some(&step.id),
+        Some(index),
+    )?;
+    let Some(failure) = failure else {
+        return Ok(None);
+    };
+    let command = failure["command"].as_str().unwrap_or("");
+    let code = failure["exitCode"].as_i64().unwrap_or(-1);
+    let stdout = failure["stdout"].as_str().unwrap_or("");
+    let stderr = failure["stderr"].as_str().unwrap_or("");
+    let output = truncate_head_tail(&format!("{stdout}{stderr}"), 4_000);
+    Ok(Some(format!(
+        "<verification>\nThe configured verification failed after your changes. Fix the cause, then continue.\nCommand: {command}\nExit code: {code}\nOutput:\n{output}\n</verification>"
+    )))
 }
 
 /// The tool-calling agent loop: the model chooses tools to call, each call is
@@ -319,6 +382,9 @@ fn agent(
     prompt: &str,
 ) -> Result<(bool, Value)> {
     const MAX_TURNS: usize = 12;
+    /// Identical tool call plus identical failure, repeated this many times in a
+    /// row, is a loop with no new information; stop rather than burn every turn.
+    const MAX_IDENTICAL_FAILURES: usize = 3;
     let mut config = DeepSeekConfig::from_env()?;
     config.cancellation = events.cancellation.clone();
     let history_budget = history_budget()?;
@@ -367,6 +433,9 @@ fn agent(
         Some(&step.id),
         Some(index),
     )?;
+    let mut last_failed_call: Option<(String, String, String)> = None;
+    let mut identical_failures = 0_usize;
+    let mut verify_attempts = 0_usize;
     for turn in 0..MAX_TURNS {
         events.cancellation.check()?;
         let estimated = config.estimated_request_tokens(&messages, Some(&specs))?;
@@ -414,6 +483,36 @@ fn agent(
             Some(index),
         )?;
         if reply.tool_calls.is_empty() {
+            // The model believes it is done. If the step configures lint/test
+            // commands, run them and hand a failure back for a bounded retry.
+            let mut verify_failed = false;
+            if let Some(verify) = &step.verify {
+                match run_verification(
+                    events,
+                    run,
+                    root,
+                    step,
+                    index,
+                    &verify.commands,
+                    verify_attempts,
+                )? {
+                    Some(feedback) if verify_attempts < verify.retries => {
+                        verify_attempts += 1;
+                        // Recorded so replay rebuilds the same request; the model
+                        // sees the failing check as the next user turn.
+                        events.write(
+                            "model.verification",
+                            json!({"turn":turn,"attempt":verify_attempts,"feedback":feedback}),
+                            Some(&step.id),
+                            Some(index),
+                        )?;
+                        messages.push(json!({"role":"user","content":feedback}));
+                        continue;
+                    }
+                    Some(_) => verify_failed = true,
+                    None => {}
+                }
+            }
             let payload = serde_json::to_value(&reply)?;
             events.write(
                 "model.finished",
@@ -421,6 +520,12 @@ fn agent(
                 Some(&step.id),
                 Some(index),
             )?;
+            if verify_failed {
+                bail!(
+                    "verification failed after {} attempt(s)",
+                    verify_attempts + 1
+                );
+            }
             return Ok((true, payload));
         }
         let message = assistant_message(&reply);
@@ -450,6 +555,41 @@ fn agent(
                 &call.function.name,
                 &call.function.arguments,
             );
+            // Stop a model that repeats the same failing call verbatim: identical
+            // input and identical failure carry no new information, and waiting
+            // for the turn limit only wastes the remaining budget. A successful
+            // call resets the guard, so a genuine retry after progress is fine.
+            if !observation_failed(&observation) {
+                last_failed_call = None;
+                identical_failures = 0;
+            } else {
+                let key = (
+                    call.function.name.clone(),
+                    call.function.arguments.clone(),
+                    observation.clone(),
+                );
+                if last_failed_call.as_ref() == Some(&key) {
+                    identical_failures += 1;
+                } else {
+                    identical_failures = 1;
+                    last_failed_call = Some(key);
+                }
+                if identical_failures >= MAX_IDENTICAL_FAILURES {
+                    events.write(
+                        "agent.repeated_failure",
+                        json!({"turn":turn,"tool":call.function.name,
+                            "arguments":call.function.arguments,"repetitions":identical_failures}),
+                        Some(&step.id),
+                        Some(index),
+                    )?;
+                    bail!(
+                        "agent repeated the identical {} call {identical_failures} times with the same result; \
+                         stopping instead of exhausting {MAX_TURNS} turns. Last error: {}",
+                        call.function.name,
+                        observation.lines().next().unwrap_or("")
+                    );
+                }
+            }
             // What the model is told back is derived from the tool payload at
             // call time; storing it keeps a replay from having to re-derive a
             // different one from whatever the payload holds later.
@@ -493,7 +633,7 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "read",
-            description: "Read a workspace text file or an output artifact path returned by bash (up to 64 KB). Use offset to read later bytes.",
+            description: "Read a workspace text file or an output artifact path returned by bash (up to 64 KB). A workspace file reports its sha256; pass that as expectedHash to edit. Use offset to read later bytes.",
             parameters: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["path"]}),
         },
         ToolSpec {
@@ -513,8 +653,8 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit",
-            description: "Replace the first occurrence of a search string in a file with a replacement.",
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"}},"required":["path","search","replace"]}),
+            description: "Replace a search string in a workspace file. Fails if the search text is absent, and requires occurrence (1-based) when it appears more than once. Pass expectedHash (the sha256 from read) to refuse a file that changed since it was read.",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"},"occurrence":{"type":"integer","minimum":1},"expectedHash":{"type":"string"}},"required":["path","search","replace"]}),
         },
     ];
     let mut specs = all;
@@ -531,6 +671,32 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .with_context(|| format!("tool argument '{key}' must be a string"))
+}
+
+/// Optional 1-based occurrence for `edit`. Absent keeps the strict default:
+/// the model must name an occurrence when the search text is ambiguous.
+fn edit_occurrence(args: &Value) -> Result<Option<usize>> {
+    match args.get("occurrence") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|occurrence| *occurrence >= 1)
+            .map(|occurrence| occurrence as usize)
+            .map(Some)
+            .context("tool argument 'occurrence' must be a positive integer"),
+    }
+}
+
+/// Optional SHA-256 the file must still have for `edit` to apply.
+fn edit_expected_hash(args: &Value) -> Result<Option<&str>> {
+    match args.get("expectedHash") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|hash| !hash.trim().is_empty())
+            .map(Some)
+            .context("tool argument 'expectedHash' must be a non-empty string"),
+    }
 }
 
 fn read_offset(args: &Value) -> Result<u64> {
@@ -593,6 +759,9 @@ fn run_agent_tool(
                     arg_str(&args, "path")?,
                     arg_str(&args, "search")?,
                     arg_str(&args, "replace")?,
+                    edit_occurrence(&args)?,
+                    edit_expected_hash(&args)?,
+                    true,
                 ),
                 other => Err(anyhow::anyhow!("unknown tool: {other}")),
             }
@@ -1164,6 +1333,18 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// Lowercase SHA-256 of a file's bytes. Used for the edit stale check and for
+/// the hash `read` hands back so the model can pin what it is editing.
+fn content_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Whether a tool observation records a failure rather than a result. `edit`'s
+/// stale/duplicate checks and the repeated-call guard both key off this shape.
+fn observation_failed(observation: &str) -> bool {
+    observation.starts_with("tool error:") || observation.starts_with("tool failed")
+}
+
 fn read(
     events: &EventWriter<'_>,
     root: &Path,
@@ -1186,15 +1367,20 @@ fn read(
         Some(&step.id),
         Some(index),
     )?;
-    let (bytes, total) = if let Some(resolved) = resolved {
+    let target_key = resolved
+        .as_ref()
+        .map(|target| target.to_string_lossy().into_owned());
+    let (bytes, total, digest) = if let Some(resolved) = resolved {
         let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
         file.check_scope_links(&events.permissions, "read")?;
         let bytes = file.read()?;
         let total = bytes.len() as u64;
+        let digest = content_hash(&bytes);
         let start = offset.min(total) as usize;
         (
             bytes[start..start + 64_000.min(bytes.len() - start)].to_vec(),
             total,
+            Some(digest),
         )
     } else {
         let mut artifacts = events.artifacts.borrow_mut();
@@ -1203,10 +1389,21 @@ fn read(
         file.seek(SeekFrom::Start(offset.min(total)))?;
         let mut bytes = Vec::new();
         file.take(64_000).read_to_end(&mut bytes)?;
-        (bytes, total)
+        (bytes, total, None)
     };
-    let payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes),
+    let mut payload = json!({"path":path,"content":String::from_utf8_lossy(&bytes),
         "truncated":total.saturating_sub(offset)>bytes.len() as u64,"bytes":total});
+    // A workspace read pins the whole-file digest, even when the reported text is
+    // truncated, so a later `edit` can refuse a file that moved underneath it.
+    if let Some(digest) = &digest {
+        payload["sha256"] = json!(digest);
+        if let Some(key) = target_key {
+            events
+                .observed_hashes
+                .borrow_mut()
+                .insert(key, digest.clone());
+        }
+    }
     let mut event_payload = payload.clone();
     event_payload["tool"] = json!("read");
     event_payload["offset"] = json!(offset);
@@ -1315,6 +1512,10 @@ fn write_file(
     let before = String::from_utf8_lossy(&file.read()?).into_owned();
     let cp = file.checkpoint(root, &run.checkpoints)?;
     file.replace(content.as_bytes())?;
+    events.observed_hashes.borrow_mut().insert(
+        file.target.to_string_lossy().into_owned(),
+        content_hash(content.as_bytes()),
+    );
     let diff = create_patch(&before, content).to_string();
     events.write(
         "checkpoint.created",
@@ -1331,6 +1532,52 @@ fn write_file(
     )?;
     Ok((true, payload))
 }
+/// Which occurrence of `search` to replace, and how many exist. The model edit
+/// path requires a unique match unless `occurrence` names one; the explicit
+/// `edit:` instruction keeps first-occurrence semantics for compatibility.
+fn choose_occurrence(
+    before: &str,
+    path: &str,
+    search: &str,
+    occurrence: Option<usize>,
+    require_unique: bool,
+) -> Result<(usize, usize, usize)> {
+    let offsets: Vec<usize> = before
+        .match_indices(search)
+        .map(|(offset, _)| offset)
+        .collect();
+    let total = offsets.len();
+    if total == 0 {
+        bail!("edit: search text not found in {path}")
+    }
+    let chosen = match occurrence {
+        Some(0) => bail!("edit: occurrence must be at least 1"),
+        Some(n) if n > total => bail!(
+            "edit: occurrence {n} is out of range: search text appears {total} time(s) in {path}"
+        ),
+        Some(n) => n,
+        None if require_unique && total > 1 => {
+            let lines = offsets
+                .iter()
+                .take(10)
+                .map(|offset| line_number(before, *offset).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "edit: search text appears {total} times in {path} (lines {lines}); \
+                 pass occurrence to choose one or use a more specific search"
+            )
+        }
+        None => 1,
+    };
+    Ok((offsets[chosen - 1], chosen, total))
+}
+
+/// 1-based line number of a byte offset, for locating duplicate matches.
+fn line_number(text: &str, offset: usize) -> usize {
+    text[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1
+}
+
 #[allow(clippy::too_many_arguments)]
 fn edit_file(
     events: &EventWriter<'_>,
@@ -1341,6 +1588,9 @@ fn edit_file(
     path: &str,
     search: &str,
     replace: &str,
+    occurrence: Option<usize>,
+    expected_hash: Option<&str>,
+    require_unique: bool,
 ) -> Result<(bool, Value)> {
     if path.trim().is_empty() {
         bail!("edit: path must not be empty")
@@ -1356,15 +1606,41 @@ fn edit_file(
         Some(&step.id),
         Some(index),
     )?;
+    let target_key = resolved.to_string_lossy().into_owned();
     let mut file = ToolFile::open_resolved(root, resolved, true, false)?;
     file.check_scope_links(&events.permissions, "edit")?;
     let before = file.read_text()?;
-    if !before.contains(search) {
-        bail!("search text not found in {path}")
+    // Stale check: an explicit hash wins, otherwise compare against what this run
+    // last read or wrote. A mismatch refuses rather than editing changed bytes.
+    let before_hash = content_hash(before.as_bytes());
+    if let Some(expected) = expected_hash {
+        if !expected.eq_ignore_ascii_case(&before_hash) {
+            bail!(
+                "edit: {path} changed since it was read (expected sha256 {expected}, \
+                 found {before_hash}); read the file again before editing"
+            )
+        }
+    } else if let Some(known) = events.observed_hashes.borrow().get(&target_key)
+        && known != &before_hash
+    {
+        bail!(
+            "edit: {path} changed since this run last read it (found sha256 {before_hash}, \
+             expected {known}); read the file again before editing"
+        )
     }
-    let after = before.replacen(search, replace, 1);
+    let (offset, chosen, total) =
+        choose_occurrence(&before, path, search, occurrence, require_unique)?;
+    let mut after = String::with_capacity(before.len() + replace.len());
+    after.push_str(&before[..offset]);
+    after.push_str(replace);
+    after.push_str(&before[offset + search.len()..]);
+    let after_hash = content_hash(after.as_bytes());
     let cp = file.checkpoint(root, &run.checkpoints)?;
     file.replace(after.as_bytes())?;
+    events
+        .observed_hashes
+        .borrow_mut()
+        .insert(target_key, after_hash.clone());
     let diff = create_patch(&before, &after).to_string();
     events.write(
         "checkpoint.created",
@@ -1372,10 +1648,12 @@ fn edit_file(
         Some(&step.id),
         Some(index),
     )?;
-    let payload = json!({"path":path,"checkpointId":cp.id,"diff":diff});
+    let payload = json!({"path":path,"checkpointId":cp.id,"diff":diff,
+        "sha256":after_hash,"occurrence":chosen,"occurrences":total});
     events.write(
         "tool.finished",
-        json!({"tool":"edit","path":path,"checkpointId":cp.id,"diff":diff}),
+        json!({"tool":"edit","path":path,"checkpointId":cp.id,"diff":diff,
+            "sha256":after_hash,"occurrence":chosen,"occurrences":total}),
         Some(&step.id),
         Some(index),
     )?;
@@ -1610,6 +1888,7 @@ fn run_task_inner(
         execution_mode,
         history,
         artifacts: RefCell::new(HashMap::new()),
+        observed_hashes: RefCell::new(HashMap::new()),
         cancellation,
     };
     events.write(
@@ -1845,6 +2124,8 @@ fn classify_error(message: &str) -> &'static str {
         "TimeoutError"
     } else if message.contains("resource limit") {
         "ResourceLimitError"
+    } else if message.contains("verification failed") {
+        "VerificationError"
     } else if message.contains("DeepSeek") || message.contains("agent exceeded") {
         "ModelError"
     } else if message.contains("not found in")
@@ -1907,6 +2188,7 @@ pub fn prompt_to_task(prompt: &str, mode: AgentMode) -> TaskSpec {
             tools: None,
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }],
         metadata: HashMap::new(),
@@ -2120,6 +2402,21 @@ pub fn replay_messages(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<Repla
                     }
                 }
             }
+            "model.verification" => {
+                let Some(index) = current else {
+                    continue;
+                };
+                let feedback = event
+                    .payload
+                    .get("feedback")
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!("run {run_id} predates replayable events: verification feedback was not recorded")
+                    })?;
+                steps[index]
+                    .messages
+                    .push(json!({"role":"user","content":feedback}));
+            }
             "model.observation" => {
                 let Some(index) = current else {
                     continue;
@@ -2211,6 +2508,7 @@ mod tests {
             tools: Some(tools.into_iter().map(str::to_owned).collect()),
             timeout_ms: None,
             limits: None,
+            verify: None,
             metadata: HashMap::new(),
         }
     }
@@ -2232,9 +2530,174 @@ mod tests {
             execution_mode: ExecutionMode::default(),
             history: Vec::new(),
             artifacts: RefCell::new(HashMap::new()),
+            observed_hashes: RefCell::new(HashMap::new()),
             cancellation: CancellationToken::new(),
         };
         test(&mut events, &run, dir.path());
+    }
+
+    /// Ambiguous search text is refused with the match lines rather than editing
+    /// the first block; an explicit occurrence selects one, out-of-range is named.
+    #[test]
+    fn edit_requires_a_unique_match_or_an_explicit_occurrence() {
+        with_events(|events, run, root| {
+            fs::write(root.join("demo.txt"), "alpha\nbeta\nalpha\n").unwrap();
+            let step = gated_step(vec!["edit"]);
+            let ambiguous = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"alpha","replace":"gamma"}"#,
+            );
+            assert!(ambiguous.contains("appears 2 times"), "{ambiguous}");
+            assert!(ambiguous.contains("lines 1, 3"), "{ambiguous}");
+            assert_eq!(
+                fs::read_to_string(root.join("demo.txt")).unwrap(),
+                "alpha\nbeta\nalpha\n"
+            );
+
+            let out_of_range = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"alpha","replace":"gamma","occurrence":3}"#,
+            );
+            assert!(out_of_range.contains("out of range"), "{out_of_range}");
+
+            let second = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"alpha","replace":"gamma","occurrence":2}"#,
+            );
+            assert!(!second.starts_with("tool error:"), "{second}");
+            assert_eq!(
+                fs::read_to_string(root.join("demo.txt")).unwrap(),
+                "alpha\nbeta\ngamma\n"
+            );
+        });
+    }
+
+    /// Byte-offset splicing keeps multibyte text intact, and an empty
+    /// replacement is a deliberate deletion, not a malformed edit.
+    #[test]
+    fn edit_preserves_unicode_and_allows_empty_replacement() {
+        with_events(|events, run, root| {
+            fs::write(root.join("demo.txt"), "héllo 世界\nsecond 世界\n").unwrap();
+            let step = gated_step(vec!["edit"]);
+            let ambiguous = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"世界","replace":""}"#,
+            );
+            assert!(ambiguous.contains("appears 2 times"), "{ambiguous}");
+            let removed = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"世界","replace":"","occurrence":2}"#,
+            );
+            assert!(!removed.starts_with("tool error:"), "{removed}");
+            assert_eq!(
+                fs::read_to_string(root.join("demo.txt")).unwrap(),
+                "héllo 世界\nsecond \n"
+            );
+        });
+    }
+
+    /// A file that changed after the run read it is refused, both through the
+    /// remembered hash and through an explicit `expectedHash`.
+    #[test]
+    fn edit_refuses_a_file_changed_since_it_was_read() {
+        with_events(|events, run, root| {
+            fs::write(root.join("demo.txt"), "original\n").unwrap();
+            let step = gated_step(vec!["read", "edit"]);
+            let read = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt"}"#,
+            );
+            let digest = serde_json::from_str::<Value>(&read).unwrap()["sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+
+            // A change between read and edit invalidates the remembered hash.
+            fs::write(root.join("demo.txt"), "original\nextra\n").unwrap();
+            let stale = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"original","replace":"changed"}"#,
+            );
+            assert!(stale.contains("changed since"), "{stale}");
+            assert_eq!(
+                fs::read_to_string(root.join("demo.txt")).unwrap(),
+                "original\nextra\n"
+            );
+
+            // An explicit hash catches the mismatch without a remembered read.
+            let explicit = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                &format!(
+                    r#"{{"path":"demo.txt","search":"original","replace":"changed","expectedHash":"{digest}"}}"#
+                ),
+            );
+            assert!(explicit.contains("changed since"), "{explicit}");
+
+            // Re-reading refreshes the hash, so the edit then applies.
+            run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"demo.txt"}"#,
+            );
+            let applied = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "edit",
+                r#"{"path":"demo.txt","search":"original","replace":"changed"}"#,
+            );
+            assert!(!applied.starts_with("tool error:"), "{applied}");
+            assert_eq!(
+                fs::read_to_string(root.join("demo.txt")).unwrap(),
+                "changed\nextra\n"
+            );
+        });
     }
 
     #[test]
@@ -2417,6 +2880,7 @@ mod tests {
             execution_mode: ExecutionMode::default(),
             history: Vec::new(),
             artifacts: RefCell::new(HashMap::new()),
+            observed_hashes: RefCell::new(HashMap::new()),
             cancellation: CancellationToken::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the

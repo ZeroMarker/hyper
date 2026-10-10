@@ -36,9 +36,37 @@ pub struct StepSpec {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<BashResourceLimits>,
+    /// Explicit lint/test commands run after the model step, with the failure
+    /// fed back to the model for a bounded number of retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifySpec>,
     #[serde(default)]
     pub metadata: Metadata,
 }
+
+/// A step's explicit verification: commands that must all exit zero once the
+/// model is done. They run through the same policy, approval, sandbox, timeout
+/// and resource limits as a `bash` tool call.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifySpec {
+    /// Commands run in order; the first non-zero exit stops the attempt.
+    pub commands: Vec<String>,
+    /// How many times a failing verification is handed back to the model. The
+    /// total number of attempts is `retries + 1`.
+    #[serde(default = "default_verify_retries")]
+    pub retries: usize,
+}
+
+fn default_verify_retries() -> usize {
+    1
+}
+
+/// The most retries a step may configure, so a verification loop stays bounded.
+pub const MAX_VERIFY_RETRIES: usize = 5;
+
+/// Instruction prefixes that call a tool directly instead of the model loop.
+const DIRECT_TOOL_PREFIXES: [&str; 5] = ["bash:", "read:", "search:", "write:", "edit:"];
 
 /// Optional per-step overrides for the shell's Linux process limits. Each
 /// unspecified value retains the default limit.
@@ -93,6 +121,38 @@ impl TaskSpec {
                     if value.is_some_and(|mb| mb.checked_mul(1024 * 1024).is_none()) {
                         bail!("step {}: {name} is too large", step.id)
                     }
+                }
+            }
+            if let Some(verify) = &step.verify {
+                if verify.commands.is_empty() {
+                    bail!("step {}: verify must list at least one command", step.id)
+                }
+                if verify
+                    .commands
+                    .iter()
+                    .any(|command| command.trim().is_empty())
+                {
+                    bail!("step {}: verify commands must not be empty", step.id)
+                }
+                if verify.retries > MAX_VERIFY_RETRIES {
+                    bail!(
+                        "step {}: verify retries must be at most {MAX_VERIFY_RETRIES}",
+                        step.id
+                    )
+                }
+                if step.mode == AgentMode::Plan {
+                    bail!("step {}: verify requires a build step", step.id)
+                }
+                // Verification feeds a failure back to the model, so a step that
+                // runs one tool directly has nowhere to send it.
+                if DIRECT_TOOL_PREFIXES
+                    .iter()
+                    .any(|prefix| step.instruction.trim_start().starts_with(prefix))
+                {
+                    bail!(
+                        "step {}: verify requires a model step; remove the tool prefix from instruction",
+                        step.id
+                    )
                 }
             }
         }
