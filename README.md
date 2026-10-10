@@ -41,6 +41,15 @@ cargo build --release   # target/release/{hyper,ha}
 cargo test
 ```
 
+`cargo test` keeps its audit state in the system temporary directory instead of
+the developer's real state directory, so a test run never accumulates throwaway
+workspaces under `~/.local/state` and still works where that directory is not
+writable. A test harness is detected from the unit-test build or from cargo's
+`CARGO_BIN_EXE_*` environment (set for integration-test and benchmark targets
+only), and parent and child processes resolve the same location so a test can
+read the events a spawned `hyper` wrote. Set `HYPER_STATE_DIR` to override it,
+as for any other run.
+
 Neither binary is on `PATH` until it is installed, so a bare `cargo build`
 leaves `hyper: command not found`. Install them into `~/.cargo/bin`, which a Rust
 toolchain already puts on `PATH`:

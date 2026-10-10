@@ -745,3 +745,22 @@ fn import_rejects_sqlite_triggers_before_registry_repairs() {
     );
     assert!(!state::directory(moved.path()).unwrap().exists());
 }
+
+#[test]
+fn test_harness_keeps_audit_state_under_the_temporary_directory() {
+    // Cargo hands `CARGO_BIN_EXE_*` to integration-test and benchmark targets
+    // only, so `directory` has to redirect the audit base away from the real
+    // state directory. Without that, every workspace open fails with EACCES in
+    // a sandbox that permits the checkout and the temporary directory only, and
+    // an ordinary `cargo test` writes throwaway runs into the developer's own
+    // state directory.
+    let root = tempdir().unwrap();
+    let workspace = state::directory(root.path()).unwrap();
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        workspace.starts_with(&temporary),
+        "{} is not under {}",
+        workspace.display(),
+        temporary.display()
+    );
+}

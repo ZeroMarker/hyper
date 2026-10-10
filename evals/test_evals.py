@@ -18,6 +18,13 @@ from run import (audit_directory, invoke, recover, snapshot, write_report, usage
 
 HERE = Path(__file__).resolve().parent
 
+# The CLI runs this suite makes are throwaway, so they must not land in the
+# developer's real state directory: it accumulates one workspace per temporary
+# repository, and it is not writable in every container or sandbox. Tests that
+# assert on a specific location still set their own HYPER_STATE_DIR.
+_EVAL_STATE = tempfile.TemporaryDirectory(prefix='hyper-evals-state-')
+os.environ.setdefault('HYPER_STATE_DIR', _EVAL_STATE.name)
+
 
 class Graders(unittest.TestCase):
     def test_each_original_fails_and_a_valid_solution_passes(self):
@@ -380,7 +387,12 @@ class OfflineCLI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as state_temp:
             root = Path(temp)
             (root/'README.md').write_text('TUI cancellation fixture\n')
-            master, slave = os.openpty()
+            try:
+                master, slave = os.openpty()
+            except OSError as error:
+                # A sandbox without /dev/ptmx cannot open a pseudo-terminal;
+                # the Linux PTY coverage is unavailable there, not broken.
+                self.skipTest(f'no pseudo-terminal available: {error}')
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
             env = os.environ.copy()
             env.update({'TERM':'xterm-256color', 'HYPER_LANG':'en', 'HYPER_APPROVAL':'ask', 'HYPER_STATE_DIR':state_temp, 'DEEPSEEK_API_KEY':'stub', 'XDG_CONFIG_HOME':str(root/'config')})

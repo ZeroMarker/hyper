@@ -56,6 +56,25 @@ fn verify_workspace_anchor(_identity: &Identity, _root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A test harness must not read or write the developer's real state directory,
+/// and has to keep working where that directory is not writable (containers and
+/// sandboxes that only permit the checkout and the system temporary directory).
+/// Cargo sets `CARGO_BIN_EXE_*` for integration-test and benchmark targets only,
+/// and a unit-test build is compiled with `cfg(test)`, so either marks a test
+/// process.
+///
+/// The base is deliberately not process-specific: a test that spawns the
+/// `hyper` binary afterwards opens the same workspace to read the events that
+/// child wrote, so parent and child have to resolve the same location.
+fn test_state_base() -> Option<PathBuf> {
+    let harness = cfg!(test)
+        || std::env::vars_os().any(|(key, _)| {
+            key.to_str()
+                .is_some_and(|key| key.starts_with("CARGO_BIN_EXE_"))
+        });
+    harness.then(|| std::env::temp_dir().join("hyper-cargo-test-state"))
+}
+
 /// The checkout never supplies the locator. Configuration comes from the host
 /// environment, and the key is a digest of the canonical workspace path.
 pub fn directory(root: &Path) -> Result<PathBuf> {
@@ -63,10 +82,13 @@ pub fn directory(root: &Path) -> Result<PathBuf> {
     let base = match std::env::var_os("HYPER_STATE_DIR") {
         Some(value) if !value.is_empty() => PathBuf::from(value),
         Some(_) => bail!("HYPER_STATE_DIR must not be empty"),
-        None => dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .context("cannot locate state directory; set HYPER_STATE_DIR")?
-            .join("hyper"),
+        None => match test_state_base() {
+            Some(base) => base,
+            None => dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .context("cannot locate state directory; set HYPER_STATE_DIR")?
+                .join("hyper"),
+        },
     };
     if !base.is_absolute() {
         bail!("HYPER_STATE_DIR must be absolute");

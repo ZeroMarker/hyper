@@ -28,6 +28,8 @@ python3 -m unittest discover -s evals -v
 
 测试覆盖所有 fixture 的正反例、确定性与深文件位置、未知用量、超时，以及真实 Hyper CLI 对本地 HTTP stub 的端到端运行；Linux 另用 PTY 验证 TUI 审批中的 Ctrl-C 取消、继续同一会话和正常退出。可以通过 `HYPER_EVAL_BINARY` 指定其他二进制。
 
+套件默认把 `HYPER_STATE_DIR` 指向一个临时目录，让这些一次性运行离开开发者真实状态目录；显式设置该变量仍然优先。没有 `/dev/ptmx` 的环境会跳过 PTY 用例，汇总报告 `skipped=1`，而不是把环境缺失当成失败。
+
 失败样本同时固化为离线用例，不依赖真实模型、可确定性复现：良性 `2>/dev/null`、`> /dev/null` 与受限 shell 以读写方式打开 `/dev/null` 必须成功，`/dev/tty` 等其他设备仍被命令策略拒绝；模型连续三次提交同一被策略拒绝的调用时，`agent.repeated_failure` 提前停止而不是耗尽 12 轮。`toolchain_environment()` 另记录继承的 `PATH`、Cargo 配置路径与摘要、`RUSTC_WRAPPER`、`RUSTFLAGS` 和目标三元组。
 
 ## 真实模型基线
