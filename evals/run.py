@@ -23,6 +23,35 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def toolchain_environment():
+    """Record the inherited host toolchain so results are attributable.
+
+    The evaluation still runs with the host PATH and Cargo configuration rather
+    than a pinned compiler. Recording the exact values keeps a run auditable and
+    makes a later "pin it properly" change measurable instead of invisible.
+    """
+    home = Path(os.environ.get('HOME', str(Path.home())))
+    cargo_home = Path(os.environ.get('CARGO_HOME', str(home/'.cargo')))
+    def config_digest(path):
+        try:
+            return digest(path) if path.is_file() else None
+        except OSError:
+            return None
+    cargo_config = cargo_home/'config.toml'
+    if not cargo_config.is_file():
+        cargo_config = cargo_home/'config'
+    return {
+        'path': os.environ.get('PATH'),
+        'cargo_home': str(cargo_home),
+        'rustup_home': os.environ.get('RUSTUP_HOME'),
+        'rustc_wrapper': os.environ.get('RUSTC_WRAPPER'),
+        'cargo_config_path': str(cargo_config) if cargo_config.is_file() else None,
+        'cargo_config_sha256': config_digest(cargo_config),
+        'rustflags': os.environ.get('RUSTFLAGS') or os.environ.get('CARGO_ENCODED_RUSTFLAGS'),
+        'cargo_build_target': os.environ.get('CARGO_BUILD_TARGET'),
+    }
+
+
 def usage_metrics(events):
     iterations = [e['payload'] for e in events if e['type'] == 'model.iteration']
     keys = ['prompt_tokens', 'completion_tokens', 'total_tokens']
@@ -344,9 +373,12 @@ def write_report(output, metadata, results):
     verify_retries = sum(r.get('verification', {}).get('retries', 0) for r in results)
     repeated = sum(r.get('repeated_failures', 0) for r in results)
     first_pass = f"{first_pass_successes}/{first_pass_resolved}" if first_pass_resolved else 'n/a'
+    toolchain = metadata.get('toolchain_environment') or {}
+    path_entries = len([entry for entry in (toolchain.get('path') or '').split(os.pathsep) if entry])
     lines = ['# Hyper task baseline', '', f"UTC: {metadata['started_at']}",
              f"Revision: `{metadata['revision']}`; dirty: `{metadata['dirty']}`",
              f"Model: `{metadata['model']}`; endpoint: `{metadata['base_url']}`; protocol: `{metadata['protocol']}`",
+             f"Host toolchain is inherited, not pinned: PATH entries={path_entries}; cargo config recorded={'yes' if toolchain.get('cargo_config_sha256') else 'no'}; rustc wrapper={'yes' if toolchain.get('rustc_wrapper') else 'no'}.",
              f"Passed: **{passed}/{len(results)}**. This is a Hyper/model baseline, not a competitor comparison.",
              f"First-pass edit success: **{first_pass}** files; edit retries: {edit_retries}.",
              f"Verification attempts: {verify_attempts}; verification retries: {verify_retries}; repeated-failure stops: {repeated}.",
@@ -421,6 +453,7 @@ def main():
                 'approval_policy': 'explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply',
                 'audit_storage': 'layout 1; explicit per-attempt external state; workspace .hyper-tmp excluded from audit storage metrics',
                 'tools': ['read','search','bash','write','edit'], 'cost': None,
+                'toolchain_environment': toolchain_environment(),
                 'tool_versions': {tool: subprocess.check_output([tool, '--version'], text=True).splitlines()[0] for tool in ['python3','node','rustc']}}
     results = []
     write_report(args.output, metadata, results)

@@ -78,7 +78,7 @@
 
 - [ ] **P0-3b2b2 元数据、剩余路径竞争与 OS 范围隔离（下一项）**：外部内容/目录边界已完成，read-only 已补显式元数据 syscall 拒绝，但 Linux 实测 workspace-write shell chmod 可改变外部审计文件权限，存在可用性风险；需要独立 OS 元数据边界，不能靠命令过滤。工具调用范围、macOS 直接工具描述符与 Windows 保守硬链接检查已交付，继续补 OS 读取/元数据边界、其余平台描述符与非 Linux 恢复/独立库快照保护和宿主目录移动竞争，验证审计区 metadata/读取、已有挂载别名、仓库 prompt injection 与旧 source 写者协调；不能扩大 OS 边界。当前环境用户 mount namespace 不可用。
 - [ ] **平台隔离后续**：Linux 显式 UDP/Unix socket syscall 限制已交付，继续 metadata、外部读取、主动继承资源及 macOS/Windows 原生隔离，按平台报告支持范围；Landlock 与 seccomp 共用，非 Linux、ABI/架构不支持或过滤安装失败仍拒绝受限 shell。与 P0-3 分阶段交付。
-- [ ] **评测环境与失败样本扩展**：固定或记录 PATH/Cargo 配置/编译 wrapper，加入重复策略拒绝样本；跟踪长会话约束位置遗漏。**（2026-10-10 已修复其中两个缺陷）** 良性 `2>/dev/null`/`> /dev/null` 不再被命令策略误拒绝（只豁免空设备 `/dev/null`，其余 `/dev/*` 仍拒绝），受限 shell 已对 `/dev/null` 授予 Landlock `WRITE_FILE`，`git` 等读写打开空设备不再 `Permission denied`；仍需把这些场景固化为评测 fixture。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
+- [ ] **评测环境与失败样本扩展**：跟踪长会话约束位置遗漏。**（2026-10-10 已修复两个缺陷并固化为 fixture）** 良性 `2>/dev/null`/`> /dev/null` 不再被命令策略误拒绝（只豁免空设备 `/dev/null`，其余 `/dev/*` 仍拒绝），受限 shell 已对 `/dev/null` 授予 Landlock `WRITE_FILE`，`git` 等读写打开空设备不再 `Permission denied`；这些场景已固化为离线评测用例（良性重定向与 `/dev/null` 读写必须成功、`/dev/tty` 等其他设备仍拒绝、连续三次同一策略拒绝触发 `agent.repeated_failure` 提前停止）。`evals/run.py` 现在把继承的 PATH、Cargo 配置路径与 SHA-256、`RUSTC_WRAPPER`、`RUSTFLAGS`、`CARGO_BUILD_TARGET` 记入 metadata 并在报告注明「继承而非固定」，但尚未把宿主编译环境固定为可复现镜像。恢复基线曾出现代码判定通过但耗尽 12 轮的失败，归入 P0-3/P1-5 策略与重复检测验收，不放宽外部路径边界。
 
 - [ ] **取消的原生 I/O 后续**：Windows stdout 背压、终端渲染背压和 OS 阻塞文件 I/O 的有界取消；自定义同步 event writer 需自行可中断。Unix shell 仍按进程组清理，脱离该组的 daemon/继承管道场景需另测并纳入平台隔离交付。
 

@@ -28,6 +28,8 @@ python3 -m unittest discover -s evals -v
 
 测试覆盖所有 fixture 的正反例、确定性与深文件位置、未知用量、超时，以及真实 Hyper CLI 对本地 HTTP stub 的端到端运行；Linux 另用 PTY 验证 TUI 审批中的 Ctrl-C 取消、继续同一会话和正常退出。可以通过 `HYPER_EVAL_BINARY` 指定其他二进制。
 
+失败样本同时固化为离线用例，不依赖真实模型、可确定性复现：良性 `2>/dev/null`、`> /dev/null` 与受限 shell 以读写方式打开 `/dev/null` 必须成功，`/dev/tty` 等其他设备仍被命令策略拒绝；模型连续三次提交同一被策略拒绝的调用时，`agent.repeated_failure` 提前停止而不是耗尽 12 轮。`toolchain_environment()` 另记录继承的 `PATH`、Cargo 配置路径与摘要、`RUSTC_WRAPPER`、`RUSTFLAGS` 和目标三元组。
+
 ## 真实模型基线
 
 先构建 release，再显式固定模型、端点、协议和预算：
@@ -47,7 +49,7 @@ API Key 来自 `DEEPSEEK_API_KEY` 或 `--config` 指定的 Hyper 配置；默认
 
 `--task` 可重复指定子集。默认每项 3 次；`--jobs` 只控制相互独立的评测进程数量，不代表 Hyper 支持并行工具/Agent。吞吐与延迟对比需保持该参数一致。每一轮都有外部 wall deadline；Linux 超时清理包括 shell 单独创建的进程组。正常构建轮使用 workspace-write，规划轮使用 read-only，显式指定 `--approval allow` 授权 bash/write/edit，不扩展到 unrestricted；这与旧基线的 CLI 自动放行范围相同，但新版本默认 ask 的交互行为需要单独验证。首轮恢复任务明确要求 direct edit，因为 shell 改动没有同等快照保证。
 
-报告记录代码 revision/dirty、二进制和评测文件 SHA-256、工具版本、模型配置、预算与并发参数；无法固定远端模型权重、采样随机性、provider 缓存或服务负载。每轮最多 12 次模型请求，沿用当前产品行为。长会话场景检查约束保留，不声称穷尽了上下文溢出或自动压缩。
+报告记录代码 revision/dirty、二进制和评测文件 SHA-256、工具版本、模型配置、预算与并发参数；宿主编译环境尚未固定为可复现镜像，因此另记录继承的 `PATH`、Cargo 配置路径与 `SHA-256`、`RUSTC_WRAPPER`、`RUSTFLAGS` 与 `CARGO_BUILD_TARGET`，并在 `report.md` 注明工具链是继承而非固定。无法固定远端模型权重、采样随机性、provider 缓存或服务负载。每轮最多 12 次模型请求，沿用当前产品行为。长会话场景检查约束保留，不声称穷尽了上下文溢出或自动压缩。
 
 ## 结果与存储
 

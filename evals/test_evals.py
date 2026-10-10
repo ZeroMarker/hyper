@@ -13,7 +13,8 @@ import unittest
 from fixtures import files, materialize
 from grade import check
 from run import (audit_directory, invoke, recover, snapshot, write_report, usage_metrics,
-                 edit_metrics, verification_metrics, attempt_edit_metrics, attempt_verification_metrics)
+                 edit_metrics, verification_metrics, attempt_edit_metrics,
+                 attempt_verification_metrics, toolchain_environment)
 
 HERE = Path(__file__).resolve().parent
 
@@ -142,6 +143,27 @@ class EditAndVerificationMetrics(unittest.TestCase):
             self.assertIn('| First-pass edits | Edit retries |', report)
 
 
+class EnvironmentRecording(unittest.TestCase):
+    def test_toolchain_environment_records_path_and_cargo_config(self):
+        environment = toolchain_environment()
+        self.assertIn('path', environment)
+        self.assertTrue(environment['path'])
+        self.assertIn('cargo_config_sha256', environment)
+        self.assertIn('rustc_wrapper', environment)
+
+    def test_report_states_that_the_toolchain_is_inherited_not_pinned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            metadata = {'started_at':'fixed','revision':'abc','dirty':False,'model':'stub',
+                        'base_url':'http://localhost','protocol':'chat',
+                        'toolchain_environment': {'path':'/a:/b','cargo_config_sha256':'deadbeef','rustc_wrapper':'sccache'}}
+            write_report(root, metadata, [])
+            report = (root/'report.md').read_text()
+            self.assertIn('PATH entries=2', report)
+            self.assertIn('cargo config recorded=yes', report)
+            self.assertIn('rustc wrapper=yes', report)
+
+
 class OfflineCLI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -204,6 +226,9 @@ class OfflineCLI(unittest.TestCase):
             self.assertEqual(server.bodies[0]['max_tokens'],8192)
             for name in ['results.jsonl','metadata.json','report.md']:
                 self.assertNotIn('test-only-secret',(output/name).read_text())
+            metadata = json.loads((output/'metadata.json').read_text())
+            self.assertTrue(metadata['toolchain_environment']['path'])
+            self.assertIn('Host toolchain is inherited', (output/'report.md').read_text())
             again = subprocess.run([sys.executable,str(HERE/'run.py'),'--hyper',str(self.binary),'--output',str(output),
                                     '--model','stub','--base-url','http://localhost','--protocol','chat'],env=env,capture_output=True,timeout=10)
             self.assertNotEqual(again.returncode,0)
@@ -398,6 +423,79 @@ class OfflineCLI(unittest.TestCase):
             self.assertEqual(failure['exit_code'],1)
             self.assertFalse(failure['finished'])
             self.assertEqual(len(failure['errors']),1)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux device write boundary')
+    def test_null_device_is_exempt_but_other_devices_stay_refused(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as state_temp:
+            root = Path(temp)
+            (root/'README.md').write_text('null-device fixture\n')
+            env = os.environ.copy()
+            env.update({'HYPER_STATE_DIR': state_temp})
+            task = root/'task.json'
+            # `2>/dev/null` and `> /dev/null` are benign discard sinks; opening
+            # /dev/null read-write is what `git` and build tools do. All three
+            # must work in the default workspace-write sandbox.
+            task.write_text(json.dumps({'name':'redirects','steps':[
+                {'id':'stderr','mode':'build','instruction':'bash:printf ok > out.txt 2>/dev/null'},
+                {'id':'stdout','mode':'build','instruction':'bash:echo discarded > /dev/null'},
+                {'id':'rdwr','mode':'build','instruction':"bash:python3 -c \"import os; os.close(os.open('/dev/null', os.O_RDWR))\""},
+            ]}))
+            allowed,_ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,env,root/'allowed.jsonl',10)
+            self.assertEqual(allowed['exit_code'],0,(root/'allowed.stderr').read_text())
+            self.assertEqual((root/'out.txt').read_text(),'ok')
+            self.assertEqual(allowed['denial_events'],0)
+            self.assertEqual(allowed['errors'],[])
+            # The exemption is exactly the null device; every other node stays a
+            # protected system path and is still refused by the command policy.
+            task.write_text(json.dumps({'name':'device','steps':[
+                {'id':'tty','mode':'build','instruction':'bash:echo x > /dev/tty'}]}))
+            refused,_ = invoke([str(self.binary),'--jsonl','--approval','allow','run',str(task)],root,env,root/'refused.jsonl',10)
+            self.assertEqual(refused['exit_code'],1)
+            self.assertEqual(refused['errors'],['PolicyError'])
+            self.assertEqual(refused['denial_events'],1)
+
+    def test_repeated_policy_rejection_stops_instead_of_exhausting_turns(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.server.requests += 1
+                call = {'id':'denied','type':'function',
+                        'function':{'name':'bash','arguments':json.dumps({'command':'rm -rf /'})}}
+                body = json.dumps({'model':'stub','choices':[{'message':{'content':'','tool_calls':[call]},
+                                                              'finish_reason':'tool_calls'}]})
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.end_headers()
+                self.wfile.write(body.encode())
+        server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        server.requests = 0
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as state_temp:
+                root = Path(temp)
+                (root/'README.md').write_text('repeated-policy fixture\n')
+                env = os.environ.copy()
+                env.update({'DEEPSEEK_API_KEY':'stub','DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1',
+                            'DEEPSEEK_MODEL':'stub','DEEPSEEK_PROTOCOL':'chat','HYPER_STATE_DIR':state_temp})
+                metrics,_ = invoke([str(self.binary),'--jsonl','--approval','allow','build','inspect the workspace'],root,env,root/'trace.jsonl',10)
+                self.assertEqual(metrics['exit_code'],1)
+                self.assertEqual(metrics['repeated_failures'],1)
+                self.assertEqual(metrics['denial_events'],3)
+                # One request per turn: the guard stops at the third identical
+                # failure instead of spending the remaining nine turns.
+                self.assertEqual(server.requests,3)
+                self.assertTrue(metrics['persisted_stream_matches'])
+                events = [json.loads(line) for line in (root/'trace.jsonl').read_text().splitlines()]
+                stop = next(e for e in events if e['type']=='agent.repeated_failure')
+                self.assertEqual(stop['payload']['tool'],'bash')
+                self.assertEqual(stop['payload']['repetitions'],3)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
     def test_invoke_records_verification_metrics(self):
         with tempfile.TemporaryDirectory() as temp, self.provider() as server:
