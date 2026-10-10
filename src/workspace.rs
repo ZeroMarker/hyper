@@ -815,7 +815,11 @@ pub fn create_checkpoint(root: &Path, dir: &Path, target: &str) -> Result<Checkp
     {
         crate::checkpoint_file::create(root, dir, target)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::posix_admin::create(root, dir, target)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let absolute = resolve_path(root, target)?;
         fs::create_dir_all(dir)?;

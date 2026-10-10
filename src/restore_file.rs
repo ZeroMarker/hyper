@@ -3,7 +3,12 @@ use crate::workspace::Checkpoint;
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(any(not(target_os = "linux"), test))]
+// The legacy path copy is only used off Linux/macOS; its Linux tests reach `fs`
+// through `use super::*`. macOS uses the descriptor-anchored POSIX walker.
+#[cfg(any(
+    all(test, target_os = "linux"),
+    not(any(target_os = "linux", target_os = "macos"))
+))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -24,7 +29,11 @@ pub(crate) fn restore(root: &Path, cp: &Checkpoint) -> Result<()> {
     {
         linux::restore_resolved(&root, &target, cp)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::posix_admin::restore(&root, &target, cp)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         if !cp.existed {
             if target.exists() {

@@ -2,7 +2,7 @@
 
 更新：2026-10-04；最近 Linux 模型评测基线：`b8464f9`（其后 macOS 文件入口改动另由原生 CI 验证）；评测用量修正：`1d2c273`。竞品证据沿用 2026-10-03 对七个产品官方文档或维护者仓库的复核。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
 
-本轮补 macOS 直接工具逐层 openat 描述符入口，共享读/快照源/修改 inode；跨设备路径与校验后链接替换拒绝。本地检查及实现 `cc5e81e` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37225246393) 全部通过，macOS arm64 原生 15 项通过；Linux 模型历史基线不冒充本轮 macOS 验证。输出/行政 API、同设备挂载别名、宿主目录移动及完整 OS 范围隔离继续待办。见 [具体边界](docs/audit-boundary.md)。
+本轮补 macOS 直接工具逐层 openat 描述符入口，共享读/快照源/修改 inode；跨设备路径与校验后链接替换拒绝。本地检查及实现 `cc5e81e` 的 [CI](https://github.com/ZeroMarker/hyper/actions/runs/37225246393) 全部通过，macOS arm64 原生 15 项通过；Linux 模型历史基线不冒充本轮 macOS 验证。macOS 行政快照/恢复已补描述符入口（`posix_admin`，Linux 单元测试 + macOS 原生集成），同设备挂载别名、宿主目录移动及完整 OS 范围隔离继续待办。见 [具体边界](docs/audit-boundary.md)。
 
 ## 定位与已完成基线
 
@@ -63,7 +63,7 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 | 运行控制 | 12 轮上限、共享取消、shell 超时/组清理、审批释放、独立取消结算和崩溃恢复；Linux 门控与 PTY 验证 | Windows stdout/终端渲染背压、OS 阻塞 I/O 及脱离组的 daemon 尚无完整有界取消验证 |
 | 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
 | 工具 | read/search/bash/write/edit，artifact、diff、快照 | read 只有前 64000 字节，edit 只改第一个匹配；缺陈旧文件校验、范围读取与验证命令闭环 |
-| 执行策略 | 模式、路径校验、命令规则、共用工具级 allow/ask/deny、直接工具保护、外部审计内容边界与 Linux 描述符读取/修改与工具范围授权 | Linux chmod 仍能影响审计可用性；OS 范围隔离、非 Linux 路径授权/描述符边界、非 Linux restore/create_checkpoint、宿主目录移动竞争及完整跨平台隔离待完成 |
+| 执行策略 | 模式、路径校验、命令规则、共用工具级 allow/ask/deny、直接工具保护、外部审计内容边界与 Linux 描述符读取/修改与工具范围授权 | Linux chmod 仍能影响审计可用性（现有原语无法交付元数据隔离）；OS 范围隔离、Windows 路径授权/描述符边界与恢复/快照保护、宿主目录移动竞争及完整跨平台隔离待完成；macOS 直接工具与行政快照/恢复描述符入口已交付 |
 | 自动化 | 实时 JSONL、失败退出码、会话与 replay | 无显式事件版本/兼容性契约、结果 schema、双向控制或会话分支 |
 | 配置与扩展 | 单组 provider 参数、协议覆盖、任务工具白名单 | 无命名 provider profile、连接诊断、专门项目说明或 skills/MCP 生命周期 |
 

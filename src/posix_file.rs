@@ -25,7 +25,12 @@ fn component(path: &Path) -> std::io::Result<CString> {
     Ok(CString::new(path.as_os_str().as_bytes())?)
 }
 
-fn open_at(parent: &File, path: &Path, flags: i32, mode: libc::mode_t) -> std::io::Result<File> {
+pub(crate) fn open_at(
+    parent: &File,
+    path: &Path,
+    flags: i32,
+    mode: libc::mode_t,
+) -> std::io::Result<File> {
     let path = component(path)?;
     // Darwin's mode_t is u16; C variadic arguments require integer promotion.
     #[cfg(target_os = "macos")]
@@ -52,7 +57,7 @@ fn open_at(parent: &File, path: &Path, flags: i32, mode: libc::mode_t) -> std::i
     Ok(file)
 }
 
-fn parent(root: &Path, relative: &Path, create: bool) -> Result<(File, OsString)> {
+pub(crate) fn parent(root: &Path, relative: &Path, create: bool) -> Result<(File, OsString)> {
     // Validate the complete path before creating any directory. In particular,
     // do not let an absolute name or '..' bypass the descriptor traversal.
     let parts: Vec<_> = relative

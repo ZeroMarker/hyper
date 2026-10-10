@@ -26,6 +26,10 @@ jobs:
         run: cargo test --lib tool_file
       - name: Direct tools and JSONL integration
         run: cargo test --test macos_files
+      - name: POSIX checkpoint and restore walker
+        run: cargo test --lib posix_admin
+      - name: Administrative checkpoint and restore integration
+        run: cargo test --test macos_admin
       - name: Automatic context audit filtering
         run: cargo test --lib macos_automatic_context
 

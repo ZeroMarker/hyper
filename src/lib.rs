@@ -12,6 +12,8 @@ pub mod model;
 pub mod permissions;
 pub mod policy;
 #[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
+mod posix_admin;
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
 mod posix_file;
 pub mod resource;
 mod restore_file;

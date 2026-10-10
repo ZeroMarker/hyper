@@ -287,9 +287,26 @@ macOS 原生 aarch64-apple-darwin 上述 15 项测试通过，Linux x86 回归�
 
 仅拒绝跨设备路径，不宣称 Linux NO_XDEV 等价边界：同设备 mount alias、可信根的
 宿主 ancestor 替换、打开后宿主整体移动目录、同 inode 并发写入或新增 alias 仍未隔离。
-macOS 的 path rules 继续明确拒绝，受限 shell 继续不支持；独立 create_checkpoint、
-快照输出目录和 restore/undo 仍采用旧路径实现。本轮保证只扩展直接工具文件入口与
-快照源，不扩大这些行政 API 或 OS 元数据/读取边界。完整 P0-3 保持未完成。
+macOS 的 path rules 继续明确拒绝，受限 shell 继续不支持。独立 `create_checkpoint`、
+快照输出目录与 restore/undo 现已改用描述符入口（见下节），不再走旧路径复制。
+
+## macOS 行政快照与恢复的描述符入口（P0-3b2b2）
+
+[posix_admin.rs](../src/posix_admin.rs) 为 Apple 平台提供无 `openat2`、无
+`RENAME_NOREPLACE` 的等价边界：快照源经工作区 `posix_file` 逐层 `openat`/`O_NOFOLLOW`
+打开并固定 inode；宿主选定的输出目录从 `/` 逐层 `openat`/`O_NOFOLLOW` 打开（允许跨 mount），
+缺失目录先 `create_dir_all` 再重新打开；快照与临时清单用 `O_CREAT|O_EXCL` 创建，清单以
+[`linkat`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/link.html) 发布——目标已存在
+时返回 `EEXIST` 而非覆盖，随后删除临时名。恢复时快照按存储时的 canonical 绝对路径逐层
+`O_NOFOLLOW` 重开，父目录被替换为链接即拒绝；目标父目录走工作区描述符，提交用外部 staging
+目录 + `renameat` 原子替换，新建文件用 `unlinkat` 删除。该模块在 Linux 测试中同样编译，
+13 个单元测试覆盖源/输出/目标的最终与父目录替换、打开后替换与 rewind、碰撞保留、失败回滚、
+硬链接别名、缺失幂等以及跨 ext4/tmpfs 的真实复制恢复。
+
+新增 macOS 原生集成测试 [macos_admin.rs](../tests/macos_admin.rs)（二进制/权限/相对根往返、
+替换链接拒绝），并加入 macOS CI job；本机 Linux 251 个 Rust 测试通过，macOS 结果由该 job 验证。
+同设备 mount alias、宿主整体目录移动、打开后并发新增 alias、网络文件系统与断电持久性
+仍未隔离；行政 API 仍是宿主操作，不应用模型工具权限/审批。完整 P0-3 保持未完成。
 
 ## P0-3b2b2 可行性：workspace-write 元数据与读取边界（已评估，未交付）
 

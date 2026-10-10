@@ -1,6 +1,6 @@
 //! Direct file I/O anchored to the workspace, with Linux and macOS descriptor traversal.
 use anyhow::{Context, Result, bail};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::fs;
 use std::{
     fs::File,
@@ -118,7 +118,11 @@ impl ToolFile {
                 Some(&mut self.file),
             )
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            crate::posix_admin::write(root, dir, &self.target, self.existed, Some(&mut self.file))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             fs::create_dir_all(dir)?;
             let id = crate::workspace::id();
