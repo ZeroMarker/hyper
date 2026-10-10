@@ -180,6 +180,24 @@ the next turn — while the tool calls behind them stay in the run's
 `events.jsonl`. A conversation is therefore small and readable, and the full
 trace is still there when you need it.
 
+## Project instructions
+
+A model step reads a root `AGENTS.md`, if present, and delivers it as guidance:
+
+```
+<project_instructions source="AGENTS.md" truncated="false">
+...file text...
+</project_instructions>
+```
+
+The file is read through the same anchored entry as the file tools (a symlink
+escaping the workspace or an audit path is refused), is never executed, and is
+capped at 16000 bytes on a UTF-8 boundary with an explicit `truncated` marker.
+The block is fixed into the request and its provenance is recorded in
+`model.started`, so `ha replay` rebuilds the exact prompt. Project instructions
+are guidance for the model, not authority: they cannot change tool permissions,
+the sandbox, the workspace boundary or any audit protection.
+
 ## Replay and retention
 
 `ha replay <run-id>` rebuilds the conversation a run sent to the model — the

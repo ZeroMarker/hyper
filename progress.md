@@ -2,6 +2,8 @@
 
 ## 当前状态
 
+2026-10-10（第二十六轮，P1-4 起步）：交付根 `AGENTS.md` 项目说明加载。新增 [instructions.rs](src/instructions.rs)：每次模型步骤读工作区根 `AGENTS.md`，经既有锚定文件入口（`resolve_tool_path` + `ToolFile::open_resolved`）读取，拒绝逃逸符号链接与审计路径；不执行任何脚本，只当数据；按 16000 字节预算在 UTF-8 边界截断并加 `... [truncated to N of M bytes] ...` 标记。内容作为 `<project_instructions source="AGENTS.md" truncated="…">…</project_instructions>` 块固定进请求（在 workspace context 与 `<request>` 之间），`model.started` 新增 `projectInstructions`（来源/字节数/是否截断），实际 `input` 已含该块，因此 replay 逐字节一致；plan 与 build 都加载。说明只是指导，不能改变宿主授权/工具权限（由既有 `repository_instructions_cannot_widen_execution_boundaries` 覆盖）。新增 4 个单元测试（缺失/原样/超限 UTF-8 边界/逃逸符号链接拒绝）与 1 个集成测试（stub 请求含该块、事件记录来源、replay 与请求逐字节一致）。共 258 个 Rust 测试（+5）、26 个离线评测、fmt/Clippy/release 通过；未跑真实模型基线，成本未知。目录作用域、override 与 skills 仍待办，P1-4 未关闭。
+
 2026-10-10（第二十五轮，P0 收尾）：交付评测项「跟踪长会话约束位置遗漏」。`evals/suite.json` 的 long-session 任务新增可选 `constraint`（目标文件、要求首行、token）；`evals/run.py` 新增 `constraint_metrics(task, root)`，记录目标文件是否存在、要求的首行是否成立（`first_line_ok`）、token 是否出现、是否出现但不在首行（`misplaced`）以及首个含 token 的行号；`results.jsonl` 每轮带 `constraint`，`report.md` 汇总「Long-session constraint placement: N/M as the required first line; K misplaced.」，未配置的任务为 `null`。新增 2 个离线评测测试（放置正确/错位/缺失/文件不存在/未配置，以及报告汇总行）。共 26 个离线评测测试（+2）、253 个 Rust 测试不变、fmt/Clippy/release 通过；未改固定任务集（仍 10 个任务），未跑真实模型基线，成本未知。
 
 P0 中平台无关、可本地交付的部分至此全部完成：P0-1 固定任务集、P0-2 共享取消、P0-3a 共用权限与直接审计保护、P0-3b1 外部内容存储与显式迁移、P0-3b2a Linux 描述符入口、P0-3b2b1 工具范围授权、评测环境与失败样本项、仓库内容不可信验证、审计身份 inode 锚定、macOS 行政快照/恢复描述符入口（由 CI 验证）。剩余 P0 为受阻或跨平台并如实保留：workspace-write 元数据/读取隔离（Landlock/seccomp/同 UID/无 namespace 使其无法用现有原语交付）、已有挂载别名（需 mount 权限）、Windows 描述符/恢复保护与 Windows stdout 背压取消（跨平台）。

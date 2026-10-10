@@ -8,6 +8,7 @@ pub mod deepseek;
 pub mod engine;
 pub mod event_sink;
 pub mod i18n;
+mod instructions;
 pub mod model;
 pub mod permissions;
 pub mod policy;

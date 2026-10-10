@@ -1630,6 +1630,86 @@ fn repository_instructions_cannot_widen_execution_boundaries() {
     assert_eq!(bodies.lock().unwrap().len(), 2);
 }
 
+/// The root AGENTS.md is delivered as recorded, budgeted guidance: the model
+/// request carries it verbatim, the event records its provenance, and a replay
+/// rebuilds the exact request. It is data, not authority.
+#[test]
+fn project_instructions_are_recorded_and_replayed() {
+    let reply = r#"{"model":"stub","choices":[{"message":{"content":"inspected"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![reply]);
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("AGENTS.md"),
+        "Project rule: run `cargo test` before finishing.\n",
+    )
+    .unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "plan", "inspect the project"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    let user = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "user")
+        .unwrap();
+    let content = user["content"].as_str().unwrap();
+    assert!(content.contains("<project_instructions source=\"AGENTS.md\" truncated=\"false\">"));
+    assert!(content.contains("Project rule: run `cargo test` before finishing."));
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started = events
+        .iter()
+        .find(|event| event["type"] == "model.started")
+        .unwrap();
+    assert_eq!(
+        started["payload"]["projectInstructions"]["source"],
+        "AGENTS.md"
+    );
+    assert_eq!(
+        started["payload"]["projectInstructions"]["truncated"],
+        false
+    );
+    assert!(
+        started["payload"]["input"]
+            .as_str()
+            .unwrap()
+            .contains("Project rule")
+    );
+    // Replay reproduces exactly what the model was sent, instructions included.
+    let run_id = events[0]["runId"].as_str().unwrap();
+    let replayed = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["replay", run_id])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        replayed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let replayed: serde_json::Value = serde_json::from_slice(&replayed.stdout).unwrap();
+    assert_eq!(replayed["steps"][0]["messages"], request["messages"]);
+}
+
 /// A failing `verify` command is handed back to the model, which fixes it and
 /// passes on the retry. The retry request carries the failure text.
 #[test]
