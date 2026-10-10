@@ -56,6 +56,13 @@ search 及自动上下文也过滤这些文件，文件工具在审批之后重�
 Unix registry/store 目录 owner-only；状态落在 workspace 内、registry symlink、预先准备的
 审计文件硬链接会拒绝。metadata 与宿主创建的其他挂载别名不由此自动隔离。
 
+身份文件在 Unix 另记录工作区根的设备号与 inode，`Workspace::open` 打开时校验：把真实
+checkout 移走后在同一 canonical 路径放另一个目录，路径派生的 key 不变，但记录的根 inode
+不匹配，因此拒绝复用审计存储（`workspace root inode`）。字段为可选，缺失时（非 Unix 或
+旧版写出的身份）不校验，既有状态继续可用。这覆盖“同一路径换成不同目录”的宿主目录移动
+竞争；把同一个目录整体移到新路径仍按新 canonical 路径派生新 key，旧状态按原路径保留，
+不做跨路径重绑。
+
 `ha migrate-state --from` 显式导入旧 `.harness` 或外部目录备份，永不覆盖已有目标。
 先锁定目标，拒绝活动源 run 和本版本仍打开的源 workspace，复制新 inode，SQLite 在线
 备份捕获已提交 WAL，检查 schema/完整记录，拒绝 DB 路径标识越界及 trigger/view/virtual table，修复 session registry，重绑 checkpoint
@@ -328,6 +335,8 @@ macOS 的 path rules 继续明确拒绝，受限 shell 继续不支持。独立 
 
 结论：在获得特权或可用 namespace 之前，workspace-write 元数据隔离无法用现有原语交付。
 本轮边界仍只覆盖内容/目录操作，元数据可用性风险如实标注为未完成，不扩大也不宣称 OS 边界。
+同一小节列出的宿主目录移动竞争已部分收敛：审计身份改为记录工作区根 inode 并在打开时
+校验，同一 canonical 路径换成不同目录会拒绝复用审计存储（见“外部存储与显式迁移”）。
 
 仓库内容按不可信输入验证：新增集成测试
 `repository_instructions_cannot_widen_execution_boundaries`（[tests/run.rs](../tests/run.rs)）。

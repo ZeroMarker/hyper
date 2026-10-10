@@ -14,6 +14,46 @@ use std::{
 struct Identity {
     layout_version: u32,
     workspace_root: PathBuf,
+    // Anchors the identity to the workspace root inode so a different directory
+    // placed at the same canonical path cannot reuse the audit store. Absent on
+    // non-Unix and on identities written by earlier releases (verified only when
+    // present, so existing state keeps working).
+    #[serde(default)]
+    workspace_dev: Option<u64>,
+    #[serde(default)]
+    workspace_ino: Option<u64>,
+}
+
+/// The workspace root's device and inode, when the platform exposes them.
+fn workspace_anchor(root: &Path) -> Result<(Option<u64>, Option<u64>)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(root)?;
+        Ok((Some(metadata.dev()), Some(metadata.ino())))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Ok((None, None))
+    }
+}
+
+#[cfg(unix)]
+fn verify_workspace_anchor(identity: &Identity, root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if let (Some(dev), Some(ino)) = (identity.workspace_dev, identity.workspace_ino) {
+        let metadata = fs::metadata(root)?;
+        if metadata.dev() != dev || metadata.ino() != ino {
+            bail!("protected audit identity does not match the workspace root inode");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_workspace_anchor(_identity: &Identity, _root: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// The checkout never supplies the locator. Configuration comes from the host
@@ -139,11 +179,14 @@ fn reject_link(path: &Path) -> Result<()> {
 }
 
 fn write_identity(dir: &Path, root: &Path) -> Result<()> {
+    let (workspace_dev, workspace_ino) = workspace_anchor(root)?;
     fs::write(
         dir.join("workspace.json"),
         serde_json::to_vec_pretty(&Identity {
             layout_version: 1,
             workspace_root: root.to_owned(),
+            workspace_dev,
+            workspace_ino,
         })?,
     )?;
     Ok(())
@@ -160,6 +203,7 @@ pub(crate) fn open(root: &Path) -> Result<StateGuard> {
         if identity.layout_version != 1 || identity.workspace_root != root {
             bail!("protected audit identity does not match workspace");
         }
+        verify_workspace_anchor(&identity, root)?;
     } else {
         if fs::symlink_metadata(root.join(".harness")).is_ok() {
             bail!(

@@ -686,6 +686,43 @@ fn imported_database_path_identifiers_cannot_escape_the_store() {
     assert!(!state::directory(moved.path()).unwrap().exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_different_directory_at_the_same_path_cannot_reuse_audit_state() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join("project");
+    fs::create_dir(&root).unwrap();
+    let initial = run_task(&task("write:a.txt\nok"), &root).unwrap();
+    assert_eq!(initial.status, "finished");
+    let store = Workspace::open(&root).unwrap().paths.dir;
+    // The path-derived key is unchanged after a move, so only the recorded root
+    // inode can distinguish the real checkout from a different directory that
+    // now occupies the same canonical path.
+    fs::rename(&root, parent.path().join("moved-away")).unwrap();
+    fs::create_dir(&root).unwrap();
+    let error = Workspace::open(&root).unwrap_err_string();
+    assert!(error.contains("workspace root inode"), "{error}");
+    assert_eq!(state::directory(&root).unwrap(), store);
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_identity_without_an_inode_anchor_still_opens() {
+    let root = tempdir().unwrap();
+    run_task(&task("write:a.txt\nok"), root.path()).unwrap();
+    let store = Workspace::open(root.path()).unwrap().paths.dir;
+    let path = store.join("workspace.json");
+    let mut identity: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let object = identity.as_object_mut().unwrap();
+    assert!(object.remove("workspaceDev").is_some());
+    assert!(object.remove("workspaceIno").is_some());
+    fs::write(&path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let reopened = Workspace::open(root.path()).unwrap();
+    assert_eq!(reopened.paths.dir, store);
+    assert_eq!(reopened.list_runs(100).unwrap().len(), 1);
+}
+
 #[test]
 fn import_rejects_sqlite_triggers_before_registry_repairs() {
     let origin = tempdir().unwrap();
