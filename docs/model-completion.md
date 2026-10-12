@@ -1,10 +1,10 @@
 # 模型完成状态与失败诊断
 
-更新：2026-10-04。此规则适用于 agent loop 的 `chat_messages_stream`，包括服务端返回普通 JSON 的兼容路径。独立非流式 `chat_messages` 尚未应用相同策略。
+更新：2026-10-12。此规则适用于 agent loop 的 `chat_messages_stream`，包括服务端返回普通 JSON 的兼容路径。独立非流式 `chat_messages` 仅对 Messages 拒绝截断/过滤停止原因，Chat 与 Responses 尚未应用相同策略。
 
 Chat 累积工具参数，收到 `[DONE]` 后仍检查 `finish_reason`。`length` 或 `content_filter` 拒绝整个回复，即使工具参数已是完整 JSON，也不执行该批工具。缺失或未知结束原因保留为未知，兼容旧网关；SSE 缺少完成标记仍失败。Chat SSE 仅接受 choice 0，遇到其他明确索引拒绝，不合并多个候选。
 
-Responses 仅以 `response.completed` 取得最终权威输出；`response.incomplete`、`response.failed`、`error` 均失败。普通 JSON 或 completed 事件中的显式非 completed 状态、非空 incomplete_details 也拒绝。未提供 status 的旧网关继续兼容。Messages 仍使用 `message_stop` 与参数完整性检查，记录 stop_reason；其停止原因的拒绝策略尚待单独核对和验收。Messages 缺失输入或输出计数时 usage 为 null，不补零；计数相加溢出也标未知。
+Responses 仅以 `response.completed` 取得最终权威输出；`response.incomplete`、`response.failed`、`error` 均失败。普通 JSON 或 completed 事件中的显式非 completed 状态、非空 incomplete_details 也拒绝。未提供 status 的旧网关继续兼容。Messages 在 `message_stop` 与参数完整性检查之外，按停止原因拒绝：`max_tokens` 或 `model_context_window_exceeded` 视为输出截断，`refusal` 视为内容过滤，即使工具参数已是完整 JSON 也不执行该批工具；`end_turn`、`tool_use`、`stop_sequence`、`pause_turn` 及缺失原因继续接受，兼容旧网关。非流式 Messages 对这三种原因同样直接报错。Messages 缺失输入或输出计数时 usage 为 null，不补零；计数相加溢出也标未知。
 
 所有工具调用在返回回复前统一校验：id/name 非空，参数必须为完整 JSON 对象。一条无效调用会使整个批次失败，邻接的有效调用也不会执行。已经发布的文本 delta 留在审计事件中；完成失败不生成 model.iteration/model.finished，也不自动重试该请求。请求开始前的现有限流/HTTP 重试保持原行为，取消和文本事件发布错误不改报模型完成错误。
 

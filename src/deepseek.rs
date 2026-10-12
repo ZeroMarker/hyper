@@ -612,6 +612,7 @@ struct MessagesResponse {
     model: String,
     content: Vec<MessagesBlock>,
     usage: Option<MessagesUsage>,
+    stop_reason: Option<String>,
 }
 
 /// The Messages format reports no total, so this client adds up the two counts.
@@ -962,6 +963,14 @@ fn anthropic_messages(
     let response = post(config, &body)?;
     let parsed: MessagesResponse = serde_json::from_str(&response)
         .with_context(|| format!("invalid {} response: {response}", config.provider))?;
+    if let Some(reason @ ("max_tokens" | "refusal" | "model_context_window_exceeded")) =
+        parsed.stop_reason.as_deref()
+    {
+        bail!(
+            "{} API response stopped before completing: {reason}",
+            config.provider
+        );
+    }
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -1596,6 +1605,27 @@ mod tests {
                     .to_string()
                     .contains("context budget exceeded")
             );
+        }
+    }
+
+    /// The non-streaming Messages path records no audit, so a rejected stop
+    /// reason must fail on its own before a complete tool call is returned.
+    #[test]
+    fn non_streaming_messages_rejects_incomplete_stop_reasons() {
+        for reason in ["max_tokens", "refusal", "model_context_window_exceeded"] {
+            let body: &'static str = Box::leak(
+                format!(
+                    r#"{{"model":"stub","stop_reason":"{reason}","content":[{{"type":"tool_use","id":"t1","name":"read","input":{{"path":"a"}}}}]}}"#
+                )
+                .into_boxed_str(),
+            );
+            let (base_url, server) = serve_one(body);
+            let config =
+                DeepSeekConfig::new(settings(Protocol::Messages, "k", &base_url, "stub")).unwrap();
+            let error =
+                chat_messages(&config, &[json!({"role":"user","content":"hi"})], None).unwrap_err();
+            assert!(error.to_string().contains(reason), "{reason}: {error}");
+            server.join().unwrap();
         }
     }
 

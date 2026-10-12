@@ -80,6 +80,8 @@ pub(crate) fn safe_reason(value: &Value) -> Option<&'static str> {
         "max_output_tokens" => "max_output_tokens",
         "max_tokens" => "max_tokens",
         "cancelled" => "cancelled",
+        "refusal" => "refusal",
+        "model_context_window_exceeded" => "model_context_window_exceeded",
         "end_turn" => "end_turn",
         "tool_use" => "tool_use",
         "stop_sequence" => "stop_sequence",
@@ -163,6 +165,15 @@ impl CompletionDiagnostics {
         match self.finish_reason {
             Some("length") => Err(self.reject("output_truncated")),
             Some("content_filter") => Err(self.reject("content_filtered")),
+            _ => Ok(()), // Omitted legacy reason remains unknown, not fabricated.
+        }
+    }
+    pub fn check_messages_reason(&self) -> Result<()> {
+        match self.finish_reason {
+            Some("max_tokens" | "model_context_window_exceeded") => {
+                Err(self.reject("output_truncated"))
+            }
+            Some("refusal") => Err(self.reject("content_filtered")),
             _ => Ok(()), // Omitted legacy reason remains unknown, not fabricated.
         }
     }

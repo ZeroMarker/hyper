@@ -323,6 +323,9 @@ fn json_fallback(
     if config.protocol == super::Protocol::Chat {
         audit.check_chat_reason()?;
     }
+    if config.protocol == super::Protocol::Messages {
+        audit.check_messages_reason()?;
+    }
     if config.protocol == super::Protocol::Responses {
         if let Some(status) = raw_value["status"].as_str()
             && status != "completed"
@@ -708,6 +711,7 @@ pub(super) fn stream_messages(
     if !stopped {
         return Err(audit.reject("missing_terminal"));
     }
+    audit.check_messages_reason()?;
     let tool_calls: Vec<_> = pending.into_iter().map(|(_, call, _)| call).collect();
     audit.validate_calls(&tool_calls)?;
     Ok(ModelReply {
@@ -1019,5 +1023,71 @@ mod tests {
         assert_eq!(error.diagnostics.tools[0].index, 7);
         assert_eq!(error.diagnostics.tools[0].argument_fragments, 1);
         assert_eq!(error.kind, "invalid_tool_arguments");
+    }
+
+    /// A complete Messages tool_use stream whose optional `message_delta` names
+    /// the stop reason; omitting it mirrors an older gateway.
+    fn messages_tool_stream(stop_reason: Option<&str>) -> String {
+        let start = json!({"index":0,"content_block":{"type":"tool_use","id":"t1","name":"read","input":{}}});
+        let delta = json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\"}"}});
+        let mut body = format!(
+            "event: content_block_start\ndata: {start}\n\nevent: content_block_delta\ndata: {delta}\n\n"
+        );
+        if let Some(reason) = stop_reason {
+            let message_delta = json!({"delta":{"stop_reason":reason},"usage":{"output_tokens":3}});
+            body.push_str(&format!("event: message_delta\ndata: {message_delta}\n\n"));
+        }
+        body.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        body
+    }
+
+    #[test]
+    fn messages_terminal_does_not_accept_truncated_or_filtered_valid_calls() {
+        for (reason, kind) in [
+            ("max_tokens", "output_truncated"),
+            ("refusal", "content_filtered"),
+            ("model_context_window_exceeded", "output_truncated"),
+        ] {
+            let error = fixture(
+                Protocol::Messages,
+                "text/event-stream",
+                messages_tool_stream(Some(reason)),
+            )
+            .unwrap_err();
+            let error = error.downcast_ref::<CompletionError>().unwrap();
+            assert_eq!(error.kind, kind);
+            assert!(error.diagnostics.terminal_received);
+            assert_eq!(error.diagnostics.finish_reason, Some(reason));
+            assert_eq!(error.diagnostics.tool_call_count, 1);
+        }
+    }
+
+    #[test]
+    fn messages_accepts_end_turn_tool_use_and_missing_stop_reason() {
+        for reason in [Some("end_turn"), Some("tool_use"), None] {
+            let reply = fixture(
+                Protocol::Messages,
+                "text/event-stream",
+                messages_tool_stream(reason),
+            )
+            .unwrap();
+            assert_eq!(reply.tool_calls[0].function.name, "read");
+            assert_eq!(reply.tool_calls[0].function.arguments, r#"{"path":"a"}"#);
+        }
+    }
+
+    #[test]
+    fn json_fallback_rejects_truncated_messages() {
+        let body = json!({
+            "model": "test",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a"}}],
+        });
+        let error = fixture(Protocol::Messages, "application/json", body.to_string()).unwrap_err();
+        let error = error.downcast_ref::<CompletionError>().unwrap();
+        assert_eq!(error.kind, "output_truncated");
+        assert_eq!(error.diagnostics.transport, "json");
+        assert!(error.diagnostics.terminal_received);
+        assert_eq!(error.diagnostics.finish_reason, Some("max_tokens"));
     }
 }
