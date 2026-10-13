@@ -7,6 +7,20 @@ releases predate this file; their notes are on the
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Switch provider profiles inside the TUI.** `/profile` lists the configured
+  profiles and marks the active one; `/profile <name>` makes it active, and the
+  next message already uses it.
+
+### Fixed
+
+- The TUI header now shows the model the next run will use (environment,
+  active profile, then legacy configuration) instead of only
+  `DEEPSEEK_MODEL` or the built-in default.
+
 ## [0.3.0] - 2026-10-13
 
 The first release since 0.2.0. It adds named provider profiles, auditable

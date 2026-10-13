@@ -173,6 +173,29 @@ pub(crate) fn use_profile(name: &str) -> Result<()> {
     select(&config_path()?, name)
 }
 
+/// The model the next run will ask for, resolved without loading a credential
+/// so the TUI can show it even before a key is configured.
+pub(crate) fn current_model() -> String {
+    let stored = config_path()
+        .ok()
+        .and_then(|path| read_stored_config(&path).ok().flatten())
+        .unwrap_or_default();
+    model_for(&|key| std::env::var(key).ok(), stored)
+}
+
+fn model_for(env: &impl Fn(&str) -> Option<String>, stored: StoredConfig) -> String {
+    let from_store = match stored.active_profile.as_deref() {
+        Some(name) => stored
+            .profiles
+            .get(name)
+            .map(|profile| profile.model.clone()),
+        None => stored.model,
+    };
+    nonempty(env("DEEPSEEK_MODEL"))
+        .or_else(|| nonempty(from_store))
+        .unwrap_or_else(|| DEFAULT_MODEL.into())
+}
+
 /// Classify only status and structured error codes, never arbitrary provider text.
 pub(super) fn status_category(status: StatusCode, body: &str) -> &'static str {
     if matches!(status.as_u16(), 401 | 403) {
@@ -311,6 +334,23 @@ mod tests {
                     "auth":{"source":"config","api_key":"saved-secret"}}
             }
         })).unwrap()
+    }
+
+    #[test]
+    fn current_model_follows_env_then_active_profile_then_legacy() {
+        let none = |_: &str| None;
+        assert_eq!(model_for(&none, stored()), "stub");
+        let mut saved = stored();
+        saved.active_profile = Some("saved".into());
+        assert_eq!(model_for(&none, saved), "saved-model");
+        let overridden = |key: &str| (key == "DEEPSEEK_MODEL").then(|| "env-model".into());
+        assert_eq!(model_for(&overridden, stored()), "env-model");
+        let legacy = StoredConfig {
+            model: Some("legacy-model".into()),
+            ..Default::default()
+        };
+        assert_eq!(model_for(&none, legacy), "legacy-model");
+        assert_eq!(model_for(&none, StoredConfig::default()), DEFAULT_MODEL);
     }
 
     #[test]

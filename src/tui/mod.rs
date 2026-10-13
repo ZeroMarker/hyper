@@ -2,7 +2,7 @@ mod ui;
 
 use crate::{
     AgentMode, ApprovalGate, ApprovalRequest, CancellationToken, EventSink, ExecutionMode,
-    RunOptions, cancellation, deepseek::DEFAULT_MODEL, i18n, latest_display_output, list_runs,
+    RunOptions, cancellation, deepseek::profiles, i18n, latest_display_output, list_runs,
     prompt_to_task, run_task_with_control, workspace,
 };
 use anyhow::Result;
@@ -62,10 +62,7 @@ enum Message {
 impl App {
     fn new(root: PathBuf, session: Option<String>, execution_mode: ExecutionMode) -> Self {
         let (tx, rx) = mpsc::channel();
-        let model = std::env::var("DEEPSEEK_MODEL")
-            .ok()
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = profiles::current_model();
         Self {
             root,
             input: String::new(),
@@ -178,8 +175,49 @@ impl App {
                     .push(format!("Hyper\n{} {error}", i18n::text("Could not read runs:", "无法读取运行记录："))),
             },
             "/config" => self.output.push(
-                i18n::text("Hyper\nExit and run `hyper config` to update the API key, base URL, or model.", "Hyper\n退出后运行 `hyper config` 可重新配置 API Key / base URL / model。").into(),
+                i18n::text("Hyper\nUse `/profile <name>` to switch provider profiles here, or exit and run `hyper config` to update the API key, base URL, or model.", "Hyper\n使用 `/profile <name>` 可直接切换 provider profile；或退出后运行 `hyper config` 重新配置 API Key / base URL / model。").into(),
             ),
+            "/profile" => match profiles::list() {
+                Ok(listing) => {
+                    let active = listing["activeProfile"].as_str();
+                    let lines = listing["profiles"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|profile| {
+                            let name = profile["name"].as_str().unwrap_or_default();
+                            let marker = if Some(name) == active { "*" } else { " " };
+                            format!("{marker} {name}  {}", profile["model"].as_str().unwrap_or_default())
+                        })
+                        .collect::<Vec<_>>();
+                    if lines.is_empty() {
+                        self.output.push(i18n::text("Hyper\nNo provider profiles configured.", "Hyper\n尚未配置任何 provider profile。").into());
+                    } else {
+                        self.output.push(format!("Hyper\n{}\n{}", i18n::text("Profiles (`/profile <name>` to switch):", "Profile 列表（`/profile <name>` 切换）："), lines.join("\n")));
+                    }
+                }
+                Err(error) => self
+                    .output
+                    .push(format!("Hyper\n{} {error:#}", i18n::text("Could not read profiles:", "无法读取 profile："))),
+            },
+            _ if value.starts_with("/profile ") => {
+                let name = value["/profile ".len()..].trim();
+                match profiles::use_profile(name) {
+                    Ok(()) => {
+                        // Each run resolves the provider afresh, so the next
+                        // message already goes to the selected profile.
+                        self.model = profiles::current_model();
+                        let mut message = format!("Hyper\n{} **{name}** ({}).", i18n::text("Switched to profile", "已切换到 profile"), self.model);
+                        if std::env::var("DEEPSEEK_MODEL").is_ok_and(|m| !m.trim().is_empty()) {
+                            message.push_str(i18n::text("\nNote: `DEEPSEEK_MODEL` is set and overrides the profile model.", "\n注意：已设置 `DEEPSEEK_MODEL`，它会覆盖 profile 的模型。"));
+                        }
+                        self.output.push(message);
+                    }
+                    Err(error) => self
+                        .output
+                        .push(format!("Hyper\n{} {error:#}", i18n::text("Could not switch profile:", "无法切换 profile："))),
+                }
+            }
             "/help" => self
                 .output
                 .push(i18n::text("Hyper\nType `/` for commands. Use ↑↓ to select, Tab to complete, and Enter to run.", "Hyper\n输入 `/` 打开命令提示，使用 ↑↓ 选择、Tab 补全、Enter 执行。").into()),
@@ -280,6 +318,13 @@ impl App {
             (
                 "/runs",
                 i18n::text("Show recent runs", "提示如何查看运行历史"),
+            ),
+            (
+                "/profile",
+                i18n::text(
+                    "List or switch provider profiles",
+                    "列出或切换 provider profile",
+                ),
             ),
             (
                 "/config",
@@ -666,6 +711,9 @@ mod tests {
         assert_eq!(app.command_suggestions().len(), 2);
         assert!(app.complete_command());
         assert_eq!(app.input, "/mode plan");
+        app.input = "/pro".into();
+        assert!(app.complete_command());
+        assert_eq!(app.input, "/profile");
     }
 
     /// `/new` must start a genuinely new conversation. Clearing only the
