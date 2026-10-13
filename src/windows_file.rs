@@ -45,10 +45,48 @@ pub(crate) fn require_single_link(file: &File) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn atomic_replace(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    existed: bool,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(source: *const u16, target: *const u16, flags: u32) -> i32;
+    }
+    let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // WRITE_THROUGH, and REPLACE_EXISTING only for an observed existing target.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 8 | u32::from(existed)) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("atomic file replacement failed");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn windows_atomic_replace_preserves_alias_and_refuses_create_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        fs::write(&target, "before").unwrap();
+        fs::hard_link(&target, root.path().join("alias")).unwrap();
+        let staged = root.path().join("staged");
+        fs::write(&staged, "完整 🦀").unwrap();
+        atomic_replace(&staged, &target, true).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "完整 🦀");
+        assert_eq!(
+            fs::read_to_string(root.path().join("alias")).unwrap(),
+            "before"
+        );
+        fs::write(&staged, "proposed").unwrap();
+        assert!(atomic_replace(&staged, &target, false).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "完整 🦀");
+    }
 
     #[test]
     fn windows_link_check_uses_the_open_handle_after_path_replacement() {

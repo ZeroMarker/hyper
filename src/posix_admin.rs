@@ -287,7 +287,7 @@ fn remove(parent: &File, filename: &CString) -> Result<()> {
     Ok(())
 }
 
-struct Staged {
+pub(crate) struct Staged {
     _directory: tempfile::TempDir,
     parent: File,
     filename: CString,
@@ -295,6 +295,18 @@ struct Staged {
 
 impl Staged {
     fn new(root: &Path, snapshot: &mut File) -> Result<Self> {
+        let permissions = snapshot.metadata()?.permissions();
+        Self::write(root, permissions, |output| {
+            std::io::copy(snapshot, output)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn write(
+        root: &Path,
+        permissions: std::fs::Permissions,
+        write: impl FnOnce(&mut File) -> Result<()>,
+    ) -> Result<Self> {
         // A same-UID restricted shell can mutate names inside the workspace.
         // Keep the rename source outside its Landlock write hierarchy.
         let outside = root
@@ -312,8 +324,8 @@ impl Staged {
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             0o600,
         )?;
-        std::io::copy(snapshot, &mut output)?;
-        output.set_permissions(snapshot.metadata()?.permissions())?;
+        write(&mut output)?;
+        output.set_permissions(permissions)?;
         output.sync_all()?;
         Ok(Self {
             _directory: directory,
@@ -322,7 +334,23 @@ impl Staged {
         })
     }
 
-    fn commit(&self, parent: &File, filename: &CString) -> Result<()> {
+    pub(crate) fn commit_new(&self, parent: &File, filename: &CString) -> Result<()> {
+        if unsafe {
+            libc::linkat(
+                self.parent.as_raw_fd(),
+                self.filename.as_ptr(),
+                parent.as_raw_fd(),
+                filename.as_ptr(),
+                0,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error()).context("atomic create commit failed");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit(&self, parent: &File, filename: &CString) -> Result<()> {
         if unsafe {
             libc::renameat(
                 self.parent.as_raw_fd(),
@@ -356,6 +384,29 @@ mod tests {
             existed,
             created_at: crate::workspace::now(),
         }
+    }
+
+    #[test]
+    fn staged_new_commit_does_not_overwrite_and_cleans_partial_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let (parent, name) =
+            crate::posix_file::parent(root.path(), Path::new("new"), false).unwrap();
+        let staged = Staged::write(root.path(), fs::Permissions::from_mode(0o600), |output| {
+            output.write_all(b"complete")?;
+            Ok(())
+        })
+        .unwrap();
+        let name = component(Path::new(&name)).unwrap();
+        staged.commit_new(&parent, &name).unwrap();
+        assert!(staged.commit_new(&parent, &name).is_err());
+        assert_eq!(fs::read(root.path().join("new")).unwrap(), b"complete");
+        assert!(
+            Staged::write(root.path(), fs::Permissions::from_mode(0o600), |output| {
+                output.write_all(b"partial")?;
+                bail!("injected failure")
+            })
+            .is_err()
+        );
     }
 
     #[test]

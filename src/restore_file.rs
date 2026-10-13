@@ -50,7 +50,7 @@ pub(crate) fn restore(root: &Path, cp: &Checkpoint) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
+pub(crate) mod linux {
     use super::*;
     use crate::tool_file::linux::{open_at, open_at_resolve, parent};
     use std::{
@@ -128,13 +128,25 @@ mod linux {
         Ok(())
     }
 
-    struct Staged {
+    pub(crate) struct Staged {
         _directory: tempfile::TempDir,
         parent: File,
         filename: CString,
     }
     impl Staged {
         fn new(root: &Path, snapshot: &mut File) -> Result<Self> {
+            let permissions = snapshot.metadata()?.permissions();
+            Self::write(root, permissions, |output| {
+                std::io::copy(snapshot, output)?;
+                Ok(())
+            })
+        }
+
+        pub(crate) fn write(
+            root: &Path,
+            permissions: std::fs::Permissions,
+            write: impl FnOnce(&mut File) -> Result<()>,
+        ) -> Result<Self> {
             // A same-UID restricted shell can mutate names inside the workspace.
             // Keep the rename source outside its Landlock write hierarchy.
             let outside = root
@@ -152,8 +164,8 @@ mod linux {
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )?;
-            std::io::copy(snapshot, &mut output)?;
-            output.set_permissions(snapshot.metadata()?.permissions())?;
+            write(&mut output)?;
+            output.set_permissions(permissions)?;
             output.sync_all()?;
             Ok(Self {
                 _directory: directory,
@@ -161,7 +173,23 @@ mod linux {
                 filename,
             })
         }
-        fn commit(&self, parent: &File, filename: &CString) -> Result<()> {
+        pub(crate) fn commit_new(&self, parent: &File, filename: &CString) -> Result<()> {
+            if unsafe {
+                libc::linkat(
+                    self.parent.as_raw_fd(),
+                    self.filename.as_ptr(),
+                    parent.as_raw_fd(),
+                    filename.as_ptr(),
+                    0,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error()).context("atomic create commit failed");
+            }
+            Ok(())
+        }
+
+        pub(crate) fn commit(&self, parent: &File, filename: &CString) -> Result<()> {
             if unsafe {
                 libc::renameat(
                     self.parent.as_raw_fd(),

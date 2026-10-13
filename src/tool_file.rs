@@ -13,6 +13,12 @@ pub(crate) struct ToolFile {
     file: File,
     pub target: PathBuf,
     pub existed: bool,
+    root: PathBuf,
+    baseline: Option<Vec<u8>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    parent: File,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    filename: std::ffi::OsString,
 }
 
 impl ToolFile {
@@ -30,26 +36,36 @@ impl ToolFile {
         create: bool,
     ) -> Result<Self> {
         let relative = target.strip_prefix(root)?;
-        #[cfg(target_os = "linux")]
-        let (file, existed) = linux::open(root, relative, writable, create)?;
-        #[cfg(target_os = "macos")]
-        let (file, existed) = crate::posix_file::open(root, relative, writable, create)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let (parent, filename) = native::parent(root, relative, create)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let (file, existed) =
+            match native::open_at(&parent, Path::new(&filename), libc::O_RDONLY, 0) {
+                Ok(file) => (file, true),
+                Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                    (tempfile::tempfile()?, false)
+                }
+                Err(error) => {
+                    return Err(error).context("workspace file changed or cannot be opened safely");
+                }
+            };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let _ = writable;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let (file, existed) = {
             if create && let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let existing = target.exists();
-            (
-                fs::OpenOptions::new()
-                    .read(true)
-                    .write(writable)
-                    .create(create)
-                    .truncate(false)
-                    .open(&target)?,
-                existing,
-            )
+            match File::open(&target) {
+                Ok(file) => (file, true),
+                Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                    (tempfile::tempfile()?, false)
+                }
+                Err(error) => return Err(error.into()),
+            }
         };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = writable;
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             bail!("file tool requires a regular file: {}", relative.display());
@@ -61,6 +77,12 @@ impl ToolFile {
             file,
             target,
             existed,
+            root: root.to_owned(),
+            baseline: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            parent,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            filename,
         })
     }
 
@@ -93,6 +115,7 @@ impl ToolFile {
         self.file.seek(SeekFrom::Start(0))?;
         let mut bytes = Vec::new();
         self.file.read_to_end(&mut bytes)?;
+        self.baseline = Some(bytes.clone());
         Ok(bytes)
     }
 
@@ -101,9 +124,82 @@ impl ToolFile {
     }
 
     pub fn replace(&mut self, content: &[u8]) -> Result<()> {
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(content)?;
-        self.file.set_len(content.len() as u64)?;
+        self.replace_with(|output| {
+            output.write_all(content)?;
+            Ok(())
+        })
+    }
+
+    fn replace_with(&mut self, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+        let permissions = self.file.metadata()?.permissions();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+            let staged = NativeStaged::write(&self.root, permissions, write)?;
+            if self.existed {
+                let mut current =
+                    native::open_at(&self.parent, Path::new(&self.filename), libc::O_RDONLY, 0)?;
+                let original = self.file.metadata()?;
+                let metadata = current.metadata()?;
+                if !metadata.is_file()
+                    || metadata.dev() != original.dev()
+                    || metadata.ino() != original.ino()
+                {
+                    bail!("file changed since it was opened; read the file again");
+                }
+                let mut bytes = Vec::new();
+                current.read_to_end(&mut bytes)?;
+                if self
+                    .baseline
+                    .as_ref()
+                    .is_some_and(|before| before != &bytes)
+                {
+                    bail!("file changed since it was read (stale hash); read the file again");
+                }
+            }
+            let filename = std::ffi::CString::new(self.filename.as_bytes())?;
+            if self.existed {
+                staged.commit(&self.parent, &filename)?;
+            } else {
+                staged.commit_new(&self.parent, &filename)?;
+            }
+            self.file =
+                native::open_at(&self.parent, Path::new(&self.filename), libc::O_RDONLY, 0)?;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let outside = self
+                .root
+                .parent()
+                .context("workspace has no external staging parent")?;
+            let mut staged = tempfile::NamedTempFile::new_in(outside)?;
+            write(staged.as_file_mut())?;
+            staged.as_file().set_permissions(permissions)?;
+            staged.as_file().sync_all()?;
+            if self.existed {
+                let current = fs::read(&self.target)?;
+                if self
+                    .baseline
+                    .as_ref()
+                    .is_some_and(|before| before != &current)
+                {
+                    bail!("file changed since it was read (stale hash)");
+                }
+                #[cfg(windows)]
+                crate::windows_file::require_single_link(&File::open(&self.target)?)?;
+            }
+            #[cfg(windows)]
+            crate::windows_file::atomic_replace(staged.path(), &self.target, self.existed)?;
+            #[cfg(not(windows))]
+            if self.existed {
+                fs::rename(staged.path(), &self.target)?;
+            } else {
+                staged.persist_noclobber(&self.target)?;
+            }
+            self.file = File::open(&self.target)?;
+        }
+        self.existed = true;
+        self.baseline = None;
         Ok(())
     }
 
@@ -149,6 +245,15 @@ impl ToolFile {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+use crate::posix_admin::Staged as NativeStaged;
+#[cfg(target_os = "macos")]
+use crate::posix_file as native;
+#[cfg(target_os = "linux")]
+use crate::restore_file::linux::Staged as NativeStaged;
+#[cfg(target_os = "linux")]
+use linux as native;
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux {
@@ -275,6 +380,93 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn interrupted_staging_keeps_existing_bytes_and_missing_target_absent() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("existing"), "完整内容").unwrap();
+        for path in ["existing", "missing"] {
+            let mut file = ToolFile::open(root.path(), path, true, true).unwrap();
+            file.read().unwrap();
+            let error = file.replace_with(|output| {
+                output.write_all("半个文件".as_bytes())?;
+                bail!("injected write failure")
+            });
+            assert!(error.is_err());
+        }
+        assert_eq!(
+            fs::read_to_string(root.path().join("existing")).unwrap(),
+            "完整内容"
+        );
+        assert!(!root.path().join("missing").exists());
+    }
+
+    #[test]
+    fn atomic_replacement_preserves_hardlink_alias_and_snapshot() {
+        let root = tempdir().unwrap();
+        crate::Workspace::open(root.path()).unwrap();
+        let snapshots = tempdir().unwrap();
+        fs::write(root.path().join("target"), "世界\n世界\n").unwrap();
+        fs::hard_link(root.path().join("target"), root.path().join("alias")).unwrap();
+        let mut file = ToolFile::open(root.path(), "target", true, false).unwrap();
+        file.read().unwrap();
+        let cp = file
+            .checkpoint(&root.path().canonicalize().unwrap(), snapshots.path())
+            .unwrap();
+        file.replace("世界\n新内容 🦀\n".as_bytes()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("target")).unwrap(),
+            "世界\n新内容 🦀\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("alias")).unwrap(),
+            "世界\n世界\n"
+        );
+        assert_eq!(
+            fs::read_to_string(cp.snapshot_path).unwrap(),
+            "世界\n世界\n"
+        );
+    }
+
+    #[test]
+    fn external_write_during_staging_is_refused_as_stale() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("target");
+        fs::write(&path, "original").unwrap();
+        let mut file = ToolFile::open(root.path(), "target", true, false).unwrap();
+        file.read().unwrap();
+        let error = file
+            .replace_with(|output| {
+                output.write_all(b"proposed")?;
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| fs::write(&path, "external").unwrap())
+                        .join()
+                        .unwrap()
+                });
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("stale hash"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "external");
+    }
+
+    #[test]
+    fn concurrent_creation_is_never_overwritten() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("target");
+        let mut file = ToolFile::open(root.path(), "target", true, true).unwrap();
+        assert!(!path.exists());
+        assert!(
+            file.replace_with(|output| {
+                output.write_all(b"proposed")?;
+                fs::write(&path, "external")?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "external");
+    }
+
+    #[test]
     fn replacement_link_after_resolution_cannot_redirect_io() {
         let root = tempdir().unwrap();
         let outside = tempdir().unwrap();
@@ -329,11 +521,11 @@ mod tests {
         let cp = file
             .checkpoint(&root.path().canonicalize().unwrap(), snapshots.path())
             .unwrap();
-        file.replace(b"after").unwrap();
+        assert!(file.replace(b"after").is_err());
         assert_eq!(fs::read_to_string(cp.snapshot_path).unwrap(), "before");
         assert_eq!(
             fs::read_to_string(root.path().join("original")).unwrap(),
-            "after"
+            "before"
         );
         assert_eq!(
             fs::read_to_string(outside.path().join("secret")).unwrap(),

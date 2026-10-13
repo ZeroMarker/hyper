@@ -14,7 +14,7 @@
 
 - [ ] **真实模型基线（优先）**：最近基线为 `f8a1cc7`/`b8464f9` 时期；其后的压缩（手动/自动/循环内）、`read` 行窗口、`AGENTS.md`、`edit` 唯一匹配与 verify 闭环、Messages 停止语义均未跑真实基线，成本未知。按既有口径跑一轮并保留失败样本。
 - [ ] **P1-2 相关上下文**：剩余按 prompt/路径/语言的相关性摘录选择、Python/JS 覆盖与 repo map/语法索引，以固定任务集比较收益。（行/字节范围读取已交付。）
-- [ ] **P1-3 编辑和验证闭环**：剩余原子写入与 Hashline/patch 选型；重复块、并发变更、快照与 Unicode 需验证。（唯一匹配、陈旧 hash、verify 有限重试与评测指标已交付。）
+- [ ] **P1-3 编辑和验证闭环**：剩余 Hashline/patch 选型；原子写入、重复块、并发变更、快照与 Unicode 已验证。（唯一匹配、陈旧 hash、verify 有限重试与评测指标已交付。）
 - [ ] **P1-4 项目说明**：剩余目录 override 合并语义（当前只按固定顺序拼接）与按需 skills。（根与目录 `AGENTS.md` 加载已交付。）
 - [ ] **P1-5 模型能力与完成语义**：剩余可配置 provider/model 上限、协议路径与能力，可用的 tokenizer/服务端计数及明确回退；统一 Chat/Responses 的独立非流式策略；缺失/未知停止原因的 provider 策略；重复失败调用的可审计阈值（避免误伤分页/测试重跑）。恢复及快照基线的 Python 深文件残缺参数失败保留为回归样本。见 [完成语义](docs/model-completion.md)。
 - [ ] **P1-6 命名 provider profile**：兼容旧配置和 DEEPSEEK 环境变量，list/use/test、认证来源、三协议 endpoint 覆盖；运行固定有效配置，stub 区分认证/路径/协议/模型/限流/超时，不记录密钥。

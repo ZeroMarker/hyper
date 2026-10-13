@@ -358,3 +358,18 @@ P0-3b2a 已交付 Linux 描述符边界，P0-3b2b1 已交付工具范围授权�
 宿主权限。Windows 直接工具已补保守硬链接检查，macOS/Windows 原生受限 shell 继续分平台交付。
 仓库 prompt injection、metadata、挂载/预开描述符及源读取边界分别验收。
 Linux 整套回归与 Windows x64 六项针对性测试已验证；macOS arm64 十五项针对性测试已验证，完整隔离未验证。
+
+## write/edit 原子内容提交（P1-3）
+
+Linux/macOS 直接写工具固定目标 parent 描述符，读取和快照仍绑定原文件 FD；
+新文件不预先创建空目录项。复用 restore 的工作区外私有 staging，完整写入、保留
+permission bits、sync_all 后 renameat 替换；新文件用 linkat 发布，名称冲突拒绝。
+提交前安全重开目标，检查 inode 与已读字节，观察到外部变更即按陈旧 hash 拒绝。
+校验后替换的符号链接不会被跟随，原 inode 的硬链接别名不会被改写。
+普通写入/同步/提交失败保留原目标，staging 自动清理；外部 staging 不可用或跨 mount
+拒绝。Windows 保留真实句柄硬链接拒绝，外部 staging 同步后 MoveFileExW 提交。
+
+这不是对不参与协调的写者的事务锁：最终内容校验与 rename 之间仍有竞争窗口，
+不承诺快照读取的一致时间点、宿主整体目录移动、Windows reparse/目录描述符边界、
+ACL/xattr/owner 重建或目录断电持久性。Linux 本地故障注入与回归通过；macOS/Windows
+原生改动需各平台 CI 验证，完整 P0-3 边界不扩大。
