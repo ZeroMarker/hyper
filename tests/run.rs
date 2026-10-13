@@ -2300,8 +2300,11 @@ fn bounded_session_history_replays_after_forgetting_the_session() {
     }
     drop(workspace);
     // The newest pair costs 44 estimated tokens, including framing.
+    // Auto-compaction is not enabled, so this exercises the bounded-history
+    // path (and pins its default-off).
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
         .env("HYPER_APPROVAL", "allow")
+        .env_remove("HYPER_AUTOCOMPACT")
         .args(["plan", "--session", "bounded", "follow up"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", &config_home)
@@ -2786,4 +2789,627 @@ fn prune_keeps_the_most_recent_conversations_and_runs() {
         workspace.get_run("live").unwrap().unwrap().status,
         "running"
     );
+}
+
+/// Leak a dynamic stub reply so a test can hand [`stub_model`] a `&'static str`.
+fn leaked(text: &str) -> &'static str {
+    Box::leak(text.to_owned().into_boxed_str())
+}
+
+/// Run the harness in `dir` against the stub provider configured at
+/// `config_home`, with the environment cleared so the config file is the only
+/// source of provider settings.
+fn cli_in(
+    dir: &std::path::Path,
+    config_home: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    cli_env(dir, config_home, &[], args)
+}
+
+/// Like [`cli_in`], with extra environment variables set for the child.
+fn cli_env(
+    dir: &std::path::Path,
+    config_home: &std::path::Path,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .env_remove("HYPER_AUTOCOMPACT")
+        .env_remove("HYPER_AUTOCOMPACT_KEEP_TURNS")
+        .env_remove("HYPER_HISTORY_TOKENS")
+        .envs(envs.iter().copied())
+        .output()
+        .unwrap()
+}
+
+/// A manual compaction is an append-only audit record: the transcript keeps
+/// every turn, the next run sees the summary in place of the covered prefix, and
+/// a replay reproduces exactly what that run sent. A second compaction with
+/// nothing new to cover fails closed without calling the model.
+#[test]
+fn session_compaction_replaces_the_covered_prefix_and_keeps_the_transcript() {
+    let summary_reply = r#"{"model":"stub","choices":[{"message":{"content":"GOAL: keep the widget. CONSTRAINT: no network. MODIFIED: src/lib.rs. NEXT: add the test."}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}"#;
+    let replies = vec![
+        r#"{"model":"stub","choices":[{"message":{"content":"answer one"}}]}"#,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer two"}}]}"#,
+        summary_reply,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+
+    for prompt in ["first question", "second question"] {
+        let output = cli_in(
+            dir.path(),
+            &config_home,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let compact = cli_in(
+        dir.path(),
+        &config_home,
+        &["compact", "chat", "--keep-turns", "1"],
+    );
+    assert!(
+        compact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    // The same turns are already summarized, so a second pass has nothing new.
+    let again = cli_in(
+        dir.path(),
+        &config_home,
+        &["compact", "chat", "--keep-turns", "1"],
+    );
+    assert_eq!(again.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("nothing to compact"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    let third = cli_in(
+        dir.path(),
+        &config_home,
+        &["--jsonl", "build", "--session", "chat", "third question"],
+    );
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    server.join().unwrap();
+
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 4, "two turns, one summary, one follow-up");
+    // The summarization request carried the turn being replaced, not the one
+    // kept.
+    assert!(
+        requests[2].contains("first question") && requests[2].contains("answer one"),
+        "{}",
+        requests[2]
+    );
+    assert!(!requests[2].contains("second question"));
+
+    // The next run's history is the summary plus the kept turn, never the
+    // covered turn.
+    let third_request: serde_json::Value = serde_json::from_str(&requests[3]).unwrap();
+    let joined = serde_json::to_string(third_request["messages"].as_array().unwrap()).unwrap();
+    assert!(joined.contains("<session_summary>"), "{joined}");
+    assert!(joined.contains("GOAL: keep the widget"), "{joined}");
+    assert!(
+        joined.contains("second question") && joined.contains("answer two"),
+        "{joined}"
+    );
+    assert!(
+        !joined.contains("first question") && !joined.contains("answer one"),
+        "the covered turn must not be re-sent: {joined}"
+    );
+    drop(requests);
+
+    // The transcript is untouched and carries the finished record.
+    let workspace = Workspace::open(dir.path()).unwrap();
+    assert_eq!(workspace.session_messages("chat").unwrap().len(), 6);
+    let compactions = workspace.compactions("chat").unwrap();
+    assert_eq!(compactions.len(), 1);
+    assert!(compactions[0].is_finished());
+    assert_eq!(compactions[0].covered_messages, 2);
+    assert_eq!(compactions[0].usage.as_ref().unwrap()["prompt_tokens"], 11);
+    assert_eq!(
+        workspace.active_compaction("chat").unwrap().unwrap().id,
+        compactions[0].id
+    );
+
+    // The recorded run replays the exact request the stub received, and the
+    // summary's provenance travels with the run.
+    let stdout = String::from_utf8(third.stdout.clone()).unwrap();
+    let first: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    let run_id = first["runId"].as_str().unwrap();
+    let replay = harness::replay_messages(dir.path(), run_id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&replay[0].messages).unwrap(),
+        third_request["messages"]
+    );
+    assert!(stdout.contains("\"compaction\""));
+}
+
+/// A summarization that cannot produce a summary still leaves a terminal audit
+/// record, and the full history keeps working: the failed record is never
+/// projected.
+#[test]
+fn a_failed_compaction_is_recorded_and_keeps_the_full_history() {
+    let replies = vec![
+        r#"{"model":"stub","choices":[{"message":{"content":"answer one"}}]}"#,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer two"}}]}"#,
+        // No choices: the summarization cannot form a reply.
+        r#"{"model":"stub","choices":[]}"#,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+
+    for prompt in ["first question", "second question"] {
+        let output = cli_in(
+            dir.path(),
+            &config_home,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let compact = cli_in(
+        dir.path(),
+        &config_home,
+        &["compact", "chat", "--keep-turns", "1"],
+    );
+    assert_eq!(compact.status.code(), Some(1));
+
+    let third = cli_in(
+        dir.path(),
+        &config_home,
+        &["--jsonl", "build", "--session", "chat", "third question"],
+    );
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    server.join().unwrap();
+
+    // The history was not projected, so the next run still carries every turn.
+    let requests = bodies.lock().unwrap();
+    let third_request: serde_json::Value = serde_json::from_str(&requests[3]).unwrap();
+    let joined = serde_json::to_string(third_request["messages"].as_array().unwrap()).unwrap();
+    assert!(
+        joined.contains("first question") && joined.contains("answer one"),
+        "{joined}"
+    );
+    assert!(!joined.contains("<session_summary>"), "{joined}");
+    drop(requests);
+
+    let workspace = Workspace::open(dir.path()).unwrap();
+    assert_eq!(workspace.session_messages("chat").unwrap().len(), 6);
+    let compactions = workspace.compactions("chat").unwrap();
+    assert_eq!(compactions.len(), 1);
+    assert!(!compactions[0].is_finished());
+    assert_eq!(compactions[0].status, "failed");
+    assert_eq!(
+        compactions[0].error_type.as_deref(),
+        Some("CompactionError")
+    );
+    assert!(workspace.active_compaction("chat").unwrap().is_none());
+}
+
+/// Compacting twice folds the earlier summary into the new one instead of
+/// stacking: the second request is shown the previous summary, coverage grows,
+/// and the newest summary replaces the old in later runs.
+#[test]
+fn repeated_compaction_folds_in_the_prior_summary() {
+    let first_summary = r#"{"model":"stub","choices":[{"message":{"content":"GOAL: keep the widget. NEXT: add the test."}}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}"#;
+    let second_summary = r#"{"model":"stub","choices":[{"message":{"content":"GOAL: keep the widget. NEXT: ship it."}}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}"#;
+    let replies = vec![
+        r#"{"model":"stub","choices":[{"message":{"content":"answer one"}}]}"#,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer two"}}]}"#,
+        first_summary,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+        second_summary,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer four"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+
+    for prompt in ["first question", "second question", "third question"] {
+        let output = cli_in(
+            dir.path(),
+            &config_home,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if prompt == "second question" {
+            let compact = cli_in(
+                dir.path(),
+                &config_home,
+                &["compact", "chat", "--keep-turns", "1"],
+            );
+            assert!(
+                compact.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compact.stderr)
+            );
+        }
+    }
+    let compact = cli_in(
+        dir.path(),
+        &config_home,
+        &["compact", "chat", "--keep-turns", "1"],
+    );
+    assert!(
+        compact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    let fourth = cli_in(
+        dir.path(),
+        &config_home,
+        &["build", "--session", "chat", "fourth question"],
+    );
+    assert!(
+        fourth.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fourth.stderr)
+    );
+    server.join().unwrap();
+
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    // The second summary is asked to fold in the first summary and the turn
+    // newly covered, so it is shown both.
+    assert!(requests[4].contains("GOAL: keep the widget. NEXT: add the test."));
+    assert!(
+        requests[4].contains("second question") && requests[4].contains("answer two"),
+        "{}",
+        requests[4]
+    );
+
+    // The newest summary stands in for the older one and covers four messages.
+    let fourth_request: serde_json::Value = serde_json::from_str(&requests[5]).unwrap();
+    let joined = serde_json::to_string(fourth_request["messages"].as_array().unwrap()).unwrap();
+    assert!(joined.contains("NEXT: ship it."), "{joined}");
+    assert!(
+        !joined.contains("add the test"),
+        "the old summary is gone: {joined}"
+    );
+    assert!(
+        joined.contains("third question") && joined.contains("answer three"),
+        "{joined}"
+    );
+    assert!(
+        !joined.contains("second question") && !joined.contains("first question"),
+        "{joined}"
+    );
+    drop(requests);
+
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let active = workspace.active_compaction("chat").unwrap().unwrap();
+    assert_eq!(active.covered_messages, 4);
+    assert_eq!(workspace.compactions("chat").unwrap().len(), 2);
+}
+
+/// A conversation whose history exceeds `HYPER_HISTORY_TOKENS` is summarized
+/// automatically before the run, in place of dropping its oldest turns, and the
+/// run records `compaction.started` / `compaction.finished`.
+#[test]
+fn an_over_budget_conversation_is_summarized_automatically() {
+    // The stored user turn is capped at 80 chars, so the history grows through
+    // the model's answers instead.
+    let long = "a".repeat(500);
+    let replies = vec![
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer one {long}"}}}}]}}"#
+        )),
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer two {long}"}}}}]}}"#
+        )),
+        r#"{"model":"stub","choices":[{"message":{"content":"AUTO SUMMARY: goal is the widget."}}],"usage":{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}}"#,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+    let envs = [("HYPER_HISTORY_TOKENS", "800"), ("HYPER_AUTOCOMPACT", "1")];
+
+    for prompt in ["first question", "second question"] {
+        let output = cli_env(
+            dir.path(),
+            &config_home,
+            &envs,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let third = cli_env(
+        dir.path(),
+        &config_home,
+        &envs,
+        &["--jsonl", "build", "--session", "chat", "third question"],
+    );
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    server.join().unwrap();
+
+    let requests = bodies.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "two turns, one automatic summary, one run"
+    );
+    // The automatic summary replaced the first, over-budget turn only.
+    assert!(requests[2].contains("first question"), "{}", requests[2]);
+    assert!(!requests[2].contains("second question"));
+    // The run's request is the summary plus the retained turn.
+    let third_request: serde_json::Value = serde_json::from_str(&requests[3]).unwrap();
+    let joined = serde_json::to_string(third_request["messages"].as_array().unwrap()).unwrap();
+    assert!(joined.contains("AUTO SUMMARY"), "{joined}");
+    assert!(joined.contains("second question"), "{joined}");
+    assert!(!joined.contains("first question"), "{joined}");
+    drop(requests);
+
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let compactions = workspace.compactions("chat").unwrap();
+    assert_eq!(compactions.len(), 1);
+    assert!(compactions[0].is_finished());
+    assert_eq!(compactions[0].trigger, "auto");
+    assert_eq!(compactions[0].covered_messages, 2);
+
+    let stdout = String::from_utf8(third.stdout).unwrap();
+    assert!(stdout.contains("compaction.started"), "{stdout}");
+    assert!(stdout.contains("compaction.finished"), "{stdout}");
+}
+
+/// `HYPER_AUTOCOMPACT=1` enables the automatic summary; with it off (the
+/// default) an over-budget history is bounded by dropping old turns, as before.
+#[test]
+fn auto_compaction_can_be_disabled() {
+    let long = "a".repeat(500);
+    let replies = vec![
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer one {long}"}}}}]}}"#
+        )),
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer two {long}"}}}}]}}"#
+        )),
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+    let envs = [("HYPER_HISTORY_TOKENS", "800"), ("HYPER_AUTOCOMPACT", "0")];
+
+    for prompt in ["first question", "second question"] {
+        let output = cli_env(
+            dir.path(),
+            &config_home,
+            &envs,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let third = cli_env(
+        dir.path(),
+        &config_home,
+        &envs,
+        &["build", "--session", "chat", "third question"],
+    );
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    server.join().unwrap();
+
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 3, "no summary request when disabled");
+    let third_request: serde_json::Value = serde_json::from_str(&requests[2]).unwrap();
+    let joined = serde_json::to_string(third_request["messages"].as_array().unwrap()).unwrap();
+    assert!(!joined.contains("<session_summary>"), "{joined}");
+    assert!(joined.contains("second question"), "{joined}");
+    assert!(!joined.contains("first question"), "{joined}");
+    drop(requests);
+
+    assert!(
+        Workspace::open(dir.path())
+            .unwrap()
+            .compactions("chat")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// An agent loop that outgrows the input budget summarizes its older tool turns
+/// (never splitting a call from its result), finishes, and replays the exact
+/// final request. The stub answers summarization requests apart from the tool
+/// turns so the flow is deterministic regardless of where the cut lands.
+#[test]
+fn an_over_budget_loop_summarizes_older_tool_turns_and_replays() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    fn write_response(stream: &mut std::net::TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let recorded = Arc::clone(&bodies);
+    let server = std::thread::spawn(move || {
+        let mut tool_requests = 0usize;
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            recorded.lock().unwrap().push(request.clone());
+            let system = request["messages"][0]["content"].as_str().unwrap_or("");
+            if system.starts_with("You compress the earlier turns") {
+                write_response(
+                    &mut stream,
+                    &serde_json::json!({"model":"stub","choices":[{"message":{"content":"LOOP SUMMARY: earlier commands were inspected."}}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}).to_string(),
+                );
+                continue;
+            }
+            tool_requests += 1;
+            let response = if tool_requests <= 2 {
+                serde_json::json!({"model":"stub","choices":[{"message":{"content":null,"tool_calls":[
+                    {"id":format!("call_{tool_requests}"),"type":"function","function":{"name":"bash","arguments":"{\"command\":\"seq 1 1200\"}"}}
+                ]}}]})
+                .to_string()
+            } else {
+                serde_json::json!({"model":"stub","choices":[{"message":{"content":"done"}}]})
+                    .to_string()
+            };
+            write_response(&mut stream, &response);
+            if tool_requests > 2 {
+                break;
+            }
+        }
+    });
+
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &format!("http://{address}/v1"));
+    let envs = [
+        ("HYPER_CONTEXT_TOKENS", "11000"),
+        ("HYPER_OUTPUT_TOKENS", "2000"),
+        ("HYPER_LOOP_COMPACT", "1"),
+        ("HYPER_LOOP_COMPACT_KEEP", "1"),
+    ];
+    let output = cli_env(
+        dir.path(),
+        &config_home,
+        &envs,
+        &["--jsonl", "--approval", "allow", "inspect then finish"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    let is_summary = |request: &serde_json::Value| {
+        request["messages"][0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("You compress the earlier turns")
+    };
+    let requests = bodies.lock().unwrap();
+    let summaries = requests
+        .iter()
+        .filter(|request| is_summary(request))
+        .count();
+    assert!(summaries >= 1, "the loop was never compacted");
+    let last = requests
+        .iter()
+        .rev()
+        .find(|request| !is_summary(request))
+        .expect("a model turn");
+    let messages = last["messages"].as_array().unwrap();
+    let joined = serde_json::to_string(messages).unwrap();
+    assert!(joined.contains("<loop_summary>"), "{joined}");
+
+    // Every tool call is answered by the results that immediately follow it, and
+    // no result is orphaned.
+    for (index, message) in messages.iter().enumerate() {
+        if message["role"] == "assistant"
+            && let Some(calls) = message["tool_calls"].as_array()
+        {
+            for call in calls {
+                let id = call["id"].as_str().unwrap();
+                let answered = messages[index + 1..]
+                    .iter()
+                    .take_while(|message| message["role"] == "tool")
+                    .any(|message| message["tool_call_id"] == id);
+                assert!(answered, "call {id} lost its result: {joined}");
+            }
+        }
+        if message["role"] == "tool" && index > 0 {
+            let previous = messages[index - 1]["role"].as_str().unwrap_or("");
+            assert!(
+                previous == "assistant" || previous == "tool",
+                "orphan tool result: {joined}"
+            );
+        }
+    }
+    drop(requests);
+
+    // The recorded events replay the exact final request.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let first: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    let run_id = first["runId"].as_str().unwrap();
+    let replay = harness::replay_messages(dir.path(), run_id).unwrap();
+    let requests = bodies.lock().unwrap();
+    let last = requests
+        .iter()
+        .rev()
+        .find(|request| !is_summary(request))
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&replay[0].messages).unwrap(),
+        last["messages"]
+    );
+    assert!(stdout.contains("model.loop_summary"), "{stdout}");
 }

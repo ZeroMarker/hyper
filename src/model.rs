@@ -246,3 +246,60 @@ pub struct SessionRow {
     /// How many runs the conversation has produced.
     pub runs: usize,
 }
+
+/// An auditable summarization of a conversation prefix.
+///
+/// The transcript itself is never rewritten: a compaction is an append-only
+/// record in `sessions/<id>.compactions.jsonl` that says "the first
+/// `coveredMessages` transcript messages can be represented by `summary`".
+/// Later runs project the history through the newest finished record, and the
+/// projection is what `model.started` records, so a replay of any later run
+/// stays byte-for-byte what was actually sent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Compaction {
+    pub id: String,
+    /// `finished`, `failed` or `cancelled`. Only finished records project; a
+    /// failed or cancelled attempt is still recorded so the audit shows what
+    /// was tried and the usable history is preserved.
+    #[serde(default = "compaction_finished")]
+    pub status: String,
+    /// Leading transcript messages replaced by `summary`, counted from the
+    /// first message of the transcript. Repeated compactions of one
+    /// conversation over the same prefix only grow this number.
+    #[serde(default)]
+    pub covered_messages: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// Why an attempt did not finish; absent on a finished record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub provider: String,
+    pub model: String,
+    /// Usage reported by the summarization call. Kept absent when the provider
+    /// did not report one, rather than filled with zeros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+    /// Estimated tokens of the projection this summary replaces and of the
+    /// summary that replaces it, using the same conservative byte estimate as
+    /// the history budget.
+    #[serde(default)]
+    pub covered_estimated_tokens: usize,
+    #[serde(default)]
+    pub summary_estimated_tokens: usize,
+    pub created_at: String,
+    /// What requested the summary: `manual` today.
+    pub trigger: String,
+}
+
+fn compaction_finished() -> String {
+    "finished".into()
+}
+
+impl Compaction {
+    pub fn is_finished(&self) -> bool {
+        self.status == "finished"
+    }
+}

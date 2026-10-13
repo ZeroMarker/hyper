@@ -31,8 +31,8 @@ pub mod workspace;
 pub use approval::{ApprovalGate, ApprovalRequest};
 pub use cancellation::CancellationToken;
 pub use engine::{
-    ReplayStep, RunOptions, get_run_details, latest_display_output, latest_model_reply, list_runs,
-    prompt_to_task, replay_messages, run_task, run_task_in_session,
+    ReplayStep, RunOptions, compact_session, get_run_details, latest_display_output,
+    latest_model_reply, list_runs, prompt_to_task, replay_messages, run_task, run_task_in_session,
     run_task_in_session_with_approval, run_task_in_session_with_mode,
     run_task_in_session_with_updates, run_task_in_session_with_updates_mode,
     run_task_with_approval, run_task_with_control, run_task_with_event_sink, run_task_with_mode,

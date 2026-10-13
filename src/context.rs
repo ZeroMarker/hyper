@@ -1,6 +1,20 @@
 use anyhow::{Context, Result, bail};
 
-use crate::model::SessionMessage;
+use crate::model::{Compaction, SessionMessage};
+
+/// Marks a synthetic summary message in the projected history. It is a fixed,
+/// labeled block so the recorded request and a replay carry the same bytes and
+/// the model can tell a summary apart from the user's own words.
+pub(crate) const SUMMARY_OPEN: &str = "<session_summary>";
+pub(crate) const SUMMARY_CLOSE: &str = "</session_summary>";
+/// The same, for a summary that replaces older agent-loop turns. Kept distinct
+/// from the session marker so a replay and an audit can tell them apart.
+pub(crate) const LOOP_SUMMARY_OPEN: &str = "<loop_summary>";
+pub(crate) const LOOP_SUMMARY_CLOSE: &str = "</loop_summary>";
+
+pub(crate) fn loop_summary_content(summary: &str) -> String {
+    format!("{LOOP_SUMMARY_OPEN}\n{summary}\n{LOOP_SUMMARY_CLOSE}")
+}
 
 const DEFAULT_HISTORY_TOKENS: usize = 16_000;
 const MESSAGE_OVERHEAD: usize = 8;
@@ -86,6 +100,61 @@ fn parse_budget(value: &str) -> Result<usize> {
         .context("HYPER_HISTORY_TOKENS must be a non-negative integer")
 }
 
+/// Whether a run may summarize an over-budget conversation on its own. Off by
+/// default, so an existing conversation and its evaluation cost are unchanged;
+/// set `HYPER_AUTOCOMPACT` to a true value to enable it.
+pub(crate) fn auto_compaction_enabled() -> Result<bool> {
+    match std::env::var("HYPER_AUTOCOMPACT") {
+        Ok(value) => parse_flag(&value),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(error).context("invalid HYPER_AUTOCOMPACT"),
+    }
+}
+
+fn parse_flag(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Ok(true),
+        "" | "0" | "false" | "off" | "no" => Ok(false),
+        other => bail!("HYPER_AUTOCOMPACT must be a boolean, got {other:?}"),
+    }
+}
+
+/// How many of the most recent conversation turns automatic compaction leaves
+/// unsummarized. When the history is over budget, everything older is folded
+/// into one summary.
+pub(crate) fn auto_compaction_keep_turns() -> Result<usize> {
+    match std::env::var("HYPER_AUTOCOMPACT_KEEP_TURNS") {
+        Ok(value) => value
+            .parse()
+            .context("HYPER_AUTOCOMPACT_KEEP_TURNS must be a non-negative integer"),
+        Err(std::env::VarError::NotPresent) => Ok(1),
+        Err(error) => Err(error).context("invalid HYPER_AUTOCOMPACT_KEEP_TURNS"),
+    }
+}
+
+/// Whether an agent loop may summarize its own older tool turns when the next
+/// request would exceed the input budget. Off by default; `HYPER_LOOP_COMPACT`
+/// enables it.
+pub(crate) fn loop_compaction_enabled() -> Result<bool> {
+    match std::env::var("HYPER_LOOP_COMPACT") {
+        Ok(value) => parse_flag(&value),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(error).context("invalid HYPER_LOOP_COMPACT"),
+    }
+}
+
+/// How many of the loop's most recent turns (an assistant turn with its tool
+/// results) in-loop compaction leaves unsummarized.
+pub(crate) fn loop_compaction_keep_groups() -> Result<usize> {
+    match std::env::var("HYPER_LOOP_COMPACT_KEEP") {
+        Ok(value) => value
+            .parse()
+            .context("HYPER_LOOP_COMPACT_KEEP must be a non-negative integer"),
+        Err(std::env::VarError::NotPresent) => Ok(2),
+        Err(error) => Err(error).context("invalid HYPER_LOOP_COMPACT_KEEP"),
+    }
+}
+
 /// A deliberately conservative estimate, independent of provider tokenizers:
 /// one token per UTF-8 byte plus framing. This is a history budget only; input,
 /// tool definitions and the current agent loop have separate costs.
@@ -114,6 +183,60 @@ pub(crate) fn bounded_history(history: &[SessionMessage], budget: usize) -> &[Se
         end = index;
     }
     &history[start..]
+}
+
+/// The summary message a compaction contributes to the projected history.
+pub(crate) fn summary_message(summary: &str, timestamp: &str) -> SessionMessage {
+    SessionMessage {
+        role: "user".into(),
+        content: format!("{SUMMARY_OPEN}\n{summary}\n{SUMMARY_CLOSE}"),
+        timestamp: timestamp.into(),
+        run_id: None,
+    }
+}
+
+fn compaction_summary_message(compaction: &Compaction) -> SessionMessage {
+    summary_message(&compaction.summary, &compaction.created_at)
+}
+
+/// Project a transcript through a finished compaction: the summary stands in
+/// for the first `coveredMessages` transcript messages, and the rest of the
+/// transcript is kept verbatim. A compaction that was not finished, or whose
+/// summary is empty, is ignored so a failed attempt never loses history.
+pub(crate) fn project_history(
+    history: &[SessionMessage],
+    compaction: Option<&Compaction>,
+) -> Vec<SessionMessage> {
+    let Some(compaction) = compaction
+        .filter(|compaction| compaction.is_finished() && !compaction.summary.trim().is_empty())
+    else {
+        return history.to_vec();
+    };
+    let covered = compaction.covered_messages.min(history.len());
+    let mut projected = Vec::with_capacity(history.len() - covered + 1);
+    projected.push(compaction_summary_message(compaction));
+    projected.extend_from_slice(&history[covered..]);
+    projected
+}
+
+/// The index where the `keep_turns` most recent user-led turns begin, which is
+/// exactly how many leading transcript messages a compaction would cover.
+/// Keeping zero turns asks for the whole transcript; keeping more turns than
+/// exist leaves nothing to summarize (index 0).
+pub(crate) fn keep_suffix_start(history: &[SessionMessage], keep_turns: usize) -> usize {
+    if keep_turns == 0 {
+        return history.len();
+    }
+    let mut seen = 0;
+    for index in (0..history.len()).rev() {
+        if history[index].role == "user" {
+            seen += 1;
+            if seen == keep_turns {
+                return index;
+            }
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -214,5 +337,90 @@ mod tests {
         for value in ["", "-1", "abc", "1.5", "999999999999999999999999999999"] {
             assert!(parse_budget(value).is_err());
         }
+    }
+
+    #[test]
+    fn auto_compaction_flags_are_parsed() {
+        for value in ["1", "true", "ON", " yes "] {
+            assert!(parse_flag(value).unwrap(), "{value:?} should enable");
+        }
+        for value in ["", "0", "false", "off", "no", "False"] {
+            assert!(!parse_flag(value).unwrap(), "{value:?} should disable");
+        }
+        for value in ["maybe", "2", "-1"] {
+            assert!(parse_flag(value).is_err(), "{value:?} should be rejected");
+        }
+    }
+
+    fn compaction(status: &str, covered: usize, summary: &str) -> Compaction {
+        Compaction {
+            id: "c1".into(),
+            status: status.into(),
+            covered_messages: covered,
+            summary: summary.into(),
+            error_type: None,
+            error: None,
+            provider: "stub".into(),
+            model: "stub".into(),
+            usage: None,
+            covered_estimated_tokens: 0,
+            summary_estimated_tokens: 0,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            trigger: "manual".into(),
+        }
+    }
+
+    #[test]
+    fn a_finished_compaction_replaces_the_covered_prefix() {
+        let history = vec![
+            message("user", "one"),
+            message("assistant", "answer 1"),
+            message("user", "two"),
+            message("assistant", "answer 2"),
+        ];
+        let projected = project_history(&history, Some(&compaction("finished", 2, "summary")));
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0].role, "user");
+        assert_eq!(
+            projected[0].content,
+            format!("{SUMMARY_OPEN}\nsummary\n{SUMMARY_CLOSE}")
+        );
+        assert_eq!(projected[1].content, "two");
+        assert_eq!(projected[2].content, "answer 2");
+
+        // A coverage past the end is clamped rather than panicking.
+        let projected = project_history(&history, Some(&compaction("finished", 99, "summary")));
+        assert_eq!(projected.len(), 1);
+    }
+
+    #[test]
+    fn only_finished_compactions_project() {
+        let history = vec![message("user", "one"), message("assistant", "a")];
+        for record in [
+            compaction("failed", 2, "summary"),
+            compaction("cancelled", 2, "summary"),
+            compaction("finished", 2, "   "),
+        ] {
+            assert_eq!(project_history(&history, Some(&record)).len(), 2);
+        }
+        assert_eq!(project_history(&history, None).len(), 2);
+    }
+
+    #[test]
+    fn keep_suffix_start_counts_only_user_turns() {
+        let history = vec![
+            message("user", "one"),
+            message("assistant", "a"),
+            message("user", "two"),
+            message("assistant", "b"),
+            message("user", "three"),
+            message("assistant", "c"),
+        ];
+        assert_eq!(keep_suffix_start(&history, 1), 4);
+        assert_eq!(keep_suffix_start(&history, 2), 2);
+        assert_eq!(keep_suffix_start(&history, 3), 0);
+        assert_eq!(keep_suffix_start(&history, 4), 0);
+        assert_eq!(keep_suffix_start(&history, 0), 6);
+        assert_eq!(keep_suffix_start(&[], 1), 0);
     }
 }

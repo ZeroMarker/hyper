@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::model::{
-    Failure, HarnessEvent, RunRow, RunSummary, SessionMessage, SessionRow, TaskSpec,
+    Compaction, Failure, HarnessEvent, RunRow, RunSummary, SessionMessage, SessionRow, TaskSpec,
 };
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
@@ -482,6 +482,50 @@ impl Workspace {
         self.paths.sessions.join(format!("{session_id}.jsonl"))
     }
 
+    /// Where a conversation's compaction records are appended. One file per
+    /// conversation, its lines ordered by when they were written.
+    pub fn compactions_path(&self, session_id: &str) -> PathBuf {
+        self.paths
+            .sessions
+            .join(format!("{session_id}.compactions.jsonl"))
+    }
+
+    /// Append one compaction record. The transcript is never touched, so this
+    /// is the only write a compaction makes.
+    pub fn append_compaction(&self, session_id: &str, compaction: &Compaction) -> Result<()> {
+        validate_session_id(session_id)?;
+        let path = self.compactions_path(session_id);
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        serde_json::to_writer(&mut file, compaction)?;
+        writeln!(file)?;
+        Ok(())
+    }
+
+    /// Every compaction attempt for a conversation, oldest first. A line that
+    /// does not parse is skipped, like the event log, so one bad append does
+    /// not hide the records around it.
+    pub fn compactions(&self, session_id: &str) -> Result<Vec<Compaction>> {
+        validate_session_id(session_id)?;
+        let path = self.compactions_path(session_id);
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Ok(Vec::new());
+        };
+        Ok(content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<Compaction>(line).ok())
+            .collect())
+    }
+
+    /// The record later runs project through: the newest finished compaction.
+    /// A failed or cancelled attempt is kept in the audit but never projected.
+    pub fn active_compaction(&self, session_id: &str) -> Result<Option<Compaction>> {
+        Ok(self
+            .compactions(session_id)?
+            .into_iter()
+            .rfind(Compaction::is_finished))
+    }
+
     /// Append one turn to a session, creating the session registry row on the
     /// first turn. Returns the session's updated summary.
     pub fn append_session_message(
@@ -579,9 +623,13 @@ impl Workspace {
     pub fn delete_session(&self, session_id: &str) -> Result<bool> {
         validate_session_id(session_id)?;
         let path = self.session_path(session_id);
-        let existed = path.exists() || self.session(session_id)?.is_some();
+        let compactions = self.compactions_path(session_id);
+        let existed = path.exists() || compactions.exists() || self.session(session_id)?.is_some();
         if path.exists() {
             fs::remove_file(&path)?;
+        }
+        if compactions.exists() {
+            fs::remove_file(&compactions)?;
         }
         self.db
             .execute("DELETE FROM sessions WHERE session_id=?1", [session_id])?;

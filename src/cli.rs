@@ -8,6 +8,7 @@ use crate::{
     AgentMode, CancellationToken, Checkpoint, EventSink, ExecutionMode, Permission, RunOptions,
     RunSummary, TaskSpec, ToolPermissions, Workspace,
     cancellation::{self, Cancelled},
+    compact_session,
     deepseek::ensure_api_key,
     get_run_details, latest_model_reply, list_runs, prompt_to_task, replay_messages,
     restore_checkpoint, run_task_with_control, tui,
@@ -104,6 +105,13 @@ enum Commands {
     /// Delete a conversation; the runs it produced are kept
     Forget {
         session_id: String,
+    },
+    /// Summarize the older turns of a conversation into an auditable record
+    Compact {
+        session_id: String,
+        /// Keep this many of the most recent conversation turns unsummarized
+        #[arg(long, default_value_t = 1)]
+        keep_turns: usize,
     },
     Tui,
     /// Open the TUI continuing the given conversation
@@ -328,6 +336,16 @@ pub fn run() -> Result<()> {
                 bail!("session not found: {session_id}")
             }
             println!("forgot session {session_id} (its runs are kept)")
+        }
+        Commands::Compact {
+            session_id,
+            keep_turns,
+        } => {
+            ensure_api_key(false)?;
+            let cancellation = CancellationToken::new();
+            let _signals = cancellation::signals(&cancellation)?;
+            let compaction = compact_session(&root, &session_id, keep_turns, cancellation.clone())?;
+            println!("{}", serde_json::to_string_pretty(&compaction)?);
         }
         Commands::Tui => {
             ensure_api_key(false)?;

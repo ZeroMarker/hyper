@@ -176,6 +176,7 @@ ha sessions                       # list conversations
 ha session review                 # print the transcript
 ha resume review                  # open the TUI inside this conversation
 ha forget review                  # delete the conversation, keep its runs
+ha compact review                 # summarize older turns, keep the transcript
 ```
 
 Runs without `--session` stay standalone, and the TUI is a single conversation:
@@ -188,6 +189,30 @@ The transcript keeps the prompt and the answer — what the model is replayed on
 the next turn — while the tool calls behind them stay in the run's
 `events.jsonl`. A conversation is therefore small and readable, and the full
 trace is still there when you need it.
+
+A conversation that grows past its useful context can be compacted without
+losing anything. `ha compact <session-id> [--keep-turns <N>]` asks the model for
+a summary of the turns older than the most recent `N` (default 1), and appends
+it to `sessions/<session-id>.compactions.jsonl`. The transcript itself is never
+rewritten: later runs project the summary — a `<session_summary>` block — in
+place of the turns it covers, and each run records the exact projection it used,
+so replay stays byte-for-byte. A summary that fails or is cancelled is recorded
+as a terminal attempt and never projected, so the full history keeps working.
+
+With `HYPER_AUTOCOMPACT=1`, a run whose
+projected history exceeds `HYPER_HISTORY_TOKENS` summarizes everything older
+than `HYPER_AUTOCOMPACT_KEEP_TURNS` turns (default 1) before its steps and
+records `compaction.started`/`compaction.finished`, so context is not silently
+dropped. It is off by default so existing conversations and their cost are
+unchanged. An automatic summary that fails keeps the full history, is not
+retried at the same boundary, and never fails the run.
+
+The agent loop does the same for its own turns: with `HYPER_LOOP_COMPACT=1`, a
+request that would exceed the input budget summarizes the loop's older tool
+turns first. The cut is always at a turn boundary, so a tool call is never
+separated from its result; the summary is recorded as `model.loop_summary` and a
+replay reproduces the same projection. A failed summary leaves the messages
+untouched, and the normal budget check still reports the real error.
 
 ## Project instructions
 
@@ -279,6 +304,7 @@ hyper show <run-id>
 hyper sessions [-n <limit>]
 hyper session <session-id>
 hyper forget <session-id>
+hyper compact <session-id> [--keep-turns <N>]
 hyper tui
 hyper resume <session-id>
 hyper diff <run-id>
@@ -656,6 +682,7 @@ The external directory keeps the familiar layout:
     artifacts/
     checkpoints/
   sessions/<session-id>.jsonl
+  sessions/<session-id>.compactions.jsonl
 ```
 
 JSONL remains the audit log; SQLite provides the local run/event index and the
