@@ -15,6 +15,7 @@ model is `deepseek-v4-flash` and the default endpoint is
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md): user-visible changes per release.
 - [Program design](docs/design.md): modules, execution flow, storage, and boundaries.
 - [Plan](plan.md), [todo](todo.md), and [progress](progress.md): direction, pending work, and change history (Chinese).
 - [Task evaluations](evals/README.md): ten offline fixtures, independent graders, and a pinned real-model JSONL/Markdown baseline runner.
@@ -366,6 +367,9 @@ what would go and deletes nothing.
 
 ```text
 hyper config
+hyper profile list | use <name> | test [name]
+hyper state
+hyper migrate-state --from <path>
 hyper init
 hyper validate <task.json>
 hyper run <task.json>

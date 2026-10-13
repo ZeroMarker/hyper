@@ -1,0 +1,100 @@
+# Changelog
+
+All notable, user-visible changes to Hyper are documented here. Earlier
+releases predate this file; their notes are on the
+[GitHub Releases](https://github.com/ZeroMarker/hyper/releases) page.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] - 2026-10-13
+
+The first release since 0.2.0. It adds named provider profiles, auditable
+context compaction, project instructions, line-window reads, atomic edits with
+a verification loop, and a hardened external audit store with per-platform file
+and shell boundaries.
+
+### Added
+
+- **Named provider profiles.** `profiles` and `active_profile` in the user
+  configuration select a protocol, base URL, model, authentication source and
+  optional per-protocol endpoint overrides. `ha profile list | use | test`
+  inspects and switches them without printing keys, and a run freezes its
+  effective settings (recorded without secrets). The legacy single
+  configuration and `DEEPSEEK_*` environment overrides keep working.
+- **Auditable context compaction.** `ha compact <session> --keep-turns <N>`
+  summarizes a conversation's older turns into
+  `sessions/<id>.compactions.jsonl`; the transcript is never rewritten and
+  `ha replay` stays exact. `HYPER_AUTOCOMPACT=1` summarizes by budget before a
+  run, and `HYPER_LOOP_COMPACT=1` summarizes older tool turns inside the agent
+  loop without splitting a call from its result.
+- **Project instructions.** Every non-ignored `AGENTS.md` in the workspace is
+  loaded root-first, sharing a 16 KB budget, delivered as labeled blocks, and
+  recorded with its provenance so replay reproduces the request byte for byte.
+- **Line-window reads.** `read` accepts a 1-based `line` plus an optional
+  `lines` count and reports `startLine`/`endLine`/`totalLines`; the whole-file
+  `sha256` is still returned.
+- **Edit safeguards and verification.** `edit` requires a unique match or an
+  explicit 1-based `occurrence`, verifies an expected or previously read
+  `sha256`, and refuses a file whose bytes changed. A build step can declare
+  `verify` commands that run through the normal policy, sandbox, timeout and
+  resource limits, with a failure fed back for a bounded number of retries.
+- **External audit storage.** Authoritative run, session and checkpoint data
+  now live outside the checkout; `ha state` prints the paths and
+  `ha migrate-state --from <path>` imports a legacy `.harness` directory or a
+  backup explicitly.
+- **Shared tool permissions.** CLI and TUI share `allow` / `ask` / `deny`
+  decisions, `--permissions FILE` adds literal path and command scopes, and the
+  effective policy and source are recorded per run.
+- **Live automation and cancellation.** `--jsonl` streams persisted events as
+  they are written, and one cancellation source stops model waits, retries,
+  approvals and shell process groups across the CLI and TUI (Unix `SIGINT`,
+  `SIGTERM`, `SIGHUP`; TUI `Esc`/`Ctrl-C`).
+- **Shell limits.** Linux `bash` runs under a Landlock workspace-write boundary
+  (or `read-only`) plus seccomp socket filtering and `RLIMIT_AS`,
+  `RLIMIT_FSIZE` and `RLIMIT_CPU`.
+- **Evaluation harness.** A fixed offline task suite, independent graders, and
+  a pinned real-model JSONL/Markdown baseline runner live under `evals/`.
+- **Localization.** Interface text is English by default; `HYPER_LANG=zh`
+  selects Chinese.
+
+### Changed
+
+- Session history and the total request budget are bounded by
+  `HYPER_HISTORY_TOKENS`, `HYPER_CONTEXT_TOKENS` and `HYPER_OUTPUT_TOKENS`,
+  with each estimate and decision recorded in `model.context_budget`.
+- `write` and `edit` stage their content and commit atomically, leaving the
+  previous bytes in place on failure and preserving snapshots and hardlink
+  aliases.
+- Interrupted or incomplete model replies are rejected before any tool in the
+  reply runs, for all three protocols.
+
+### Fixed
+
+- `bash` drains stdout and stderr while the command runs, so large output no
+  longer deadlocks, and a timeout is reported distinctly as `TimeoutError`
+  with `"timedOut": true`.
+- Benign redirects to `/dev/null` are allowed while other `/dev` targets stay
+  protected.
+- A crash no longer leaves a run stuck in `running`; the next workspace open
+  repairs it to `interrupted`, and a missing SQLite index is rebuilt from the
+  JSONL log.
+- The Windows atomic replace closes its target handle before replacing.
+
+### Security
+
+- Linux file tools open through anchored `openat2` descriptors; restore and
+  undo commit through pinned directory descriptors and external staging.
+- A `read-only` Linux shell rejects explicit metadata mutations via seccomp, and
+  both restricted modes deny explicit socket syscalls.
+- macOS file tools walk pinned directory descriptors, and administrative
+  checkpoint/restore use the same boundary.
+- Windows file tools reject hardlink aliases.
+- The audit store sits outside the workspace and is anchored to the
+  workspace-root inode, so a different directory at the same path cannot reuse
+  it.
+- Repository and project-instruction content is treated as untrusted input: it
+  can guide the model but cannot widen tool permissions, the sandbox, the
+  workspace boundary or audit protection.
+
+[0.3.0]: https://github.com/ZeroMarker/hyper/compare/v0.2.0...v0.3.0

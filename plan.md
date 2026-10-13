@@ -1,14 +1,14 @@
 # Hyper 竞品对标与执行计划
 
-更新：2026-10-10；最近 Linux 模型评测基线：`b8464f9`（其后改动另由原生 CI 与本地测试验证）；评测用量修正：`1d2c273`。竞品证据沿用 2026-10-03 对七个产品官方文档或维护者仓库的复核。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
+更新：2026-10-13；最近 Linux 模型评测基线：`b8464f9`（其后改动另由原生 CI 与本地测试验证）；评测用量修正：`1d2c273`。竞品证据沿用 2026-10-03 对七个产品官方文档或维护者仓库的复核。能力描述是文档证据；优先级是结合 Hyper 代码作出的产品判断。已建立 Hyper/指定模型的真实任务基线，未安装竞品跑同一任务，未比较市场份额或竞品成功率/实际成本。
 
-最近的第十八至二十九轮补齐：仓库内容按不可信输入验证、macOS 行政快照/恢复与直接工具描述符入口（`posix_admin`/`posix_file`）、审计身份按工作区根 inode 锚定；`edit` 要求唯一匹配或显式 `occurrence` 并校验陈旧 hash，build 步骤新增可配置的显式 lint/test 闭环（`verify`，有限重试）；项目说明扩展为工作区内所有非忽略 `AGENTS.md`（固定顺序、共享 16000 字节预算）；`read` 新增 1-based 行窗口；测试不再读写宿主状态目录。这些改动由本地测试与原生 CI 验证，未重跑模型基线。完整 P0-3 与 P1-1/P1-5/P1-6 仍未关闭，见 [具体边界](docs/audit-boundary.md)。
+最近的第十八至三十四轮补齐：仓库内容按不可信输入验证、macOS 行政快照/恢复与直接工具描述符入口（`posix_admin`/`posix_file`）、审计身份按工作区根 inode 锚定；`edit` 要求唯一匹配或显式 `occurrence` 并校验陈旧 hash，build 步骤新增可配置的显式 lint/test 闭环（`verify`，有限重试），write/edit 改为完整 staging 后原子提交；项目说明扩展为工作区内所有非忽略 `AGENTS.md`（固定顺序、共享 16000 字节预算）；`read` 新增 1-based 行窗口；测试不再读写宿主状态目录；可审计压缩（手动 `ha compact`、`HYPER_AUTOCOMPACT`、循环内 `HYPER_LOOP_COMPACT`）与命名 provider profile（`ha profile list/use/test`、有效配置固定到事件）先后交付。这些改动由本地测试与原生 CI 验证，未重跑模型基线。完整 P0-3 与 P1-5 的剩余项仍未关闭，见 [具体边界](docs/audit-boundary.md)。
 
 ## 定位与已完成基线
 
 Hyper 继续定位为可审计、可恢复、默认限制执行范围的本地终端编码 Agent。下一阶段目标是可靠完成真实仓库任务，并在取消、编辑和长会话失败时提供清楚的恢复路径。
 
-最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架、共享取消、共用权限与外部审计内容存储及 Linux 直接工具描述符边界、工具路径/命令授权与 Linux restore/undo、read-only 显式元数据修改限制与 Linux 独立库快照/共用提交、`edit` 唯一匹配与陈旧校验、显式验证命令闭环、工作区内 `AGENTS.md` 项目说明与 `read` 行窗口；这些功能从待办基线中移除。262 个本地 Linux Rust 测试及 26 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
+最近已完成历史滑窗、总请求预算、CLI 实时 JSONL、固定任务评测脚手架、共享取消、共用权限与外部审计内容存储及 Linux 直接工具描述符边界、工具路径/命令授权与 Linux restore/undo、read-only 显式元数据修改限制与 Linux 独立库快照/共用提交、`edit` 唯一匹配与陈旧校验、显式验证命令闭环、工作区内 `AGENTS.md` 项目说明、`read` 行窗口、可审计会话与循环压缩、命名 provider profile 与连接诊断；这些功能从待办基线中移除。294 个本地 Linux Rust 测试及 26 个离线评测测试通过；自动化测试数量不代表真实编码任务的成功率。
 
 [前一轮基线](evals/baselines/2026-10-03/report.md)（`369a415`）：10 个 Rust/Python/JS 任务各跑 3 次，固定 OpenCode Go / deepseek-v4-flash / Chat、预算与并发参数，28/30 通过。3/3 错误编辑恢复通过；两次失败分别为长会话注释位置约束遗漏，以及代码正确但反复遇到策略拒绝、耗尽 12 轮。所有原始事件仅留本地，提交的逐次汇总与元数据可审阅。宿主编译环境仍被继承，后续比较须保持或隔离该环境。
 
@@ -59,13 +59,13 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 
 | 维度 | 当前实现 | 剩余差距 |
 | --- | --- | --- |
-| 质量 | 262 个本地 Linux Rust 测试、26 个评测测试、10 个固定任务及多轮各 30 次真实基线、范围授权与其他协议单次模型冒烟；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
+| 质量 | 294 个本地 Linux Rust 测试、26 个评测测试、10 个固定任务及多轮各 30 次真实基线、范围授权与其他协议单次模型冒烟；记录首字/工具延迟、usage 与磁盘体积 | 小任务集尚不代表通用编码收益；无竞品对跑；成本未知，宿主编译环境待固定 |
 | 运行控制 | 12 轮上限、共享取消、shell 超时/组清理、审批释放、独立取消结算和崩溃恢复；Linux 门控与 PTY 验证 | Windows stdout/终端渲染背压、OS 阻塞 I/O 及脱离组的 daemon 尚无完整有界取消验证 |
-| 上下文 | 历史滑窗、请求估算、输出预留、用量事件 | 字节估算并非 tokenizer；无摘要压缩、相关性选择或模型能力探测 |
-| 工具 | read/search/bash/write/edit，artifact、diff、快照；read 行/字节范围、edit 唯一匹配/occurrence/陈旧 hash 校验、显式验证命令闭环 | 缺按 prompt/语言的相关性摘录与 repo map；原子写入未交付 |
+| 上下文 | 历史滑窗、请求估算、输出预留、用量事件、可审计压缩（手动 `ha compact`、`HYPER_AUTOCOMPACT`、循环内 `HYPER_LOOP_COMPACT`） | 字节估算并非 tokenizer；无相关性选择或模型能力探测 |
+| 工具 | read/search/bash/write/edit，artifact、diff、快照；read 行/字节范围、edit 唯一匹配/occurrence/陈旧 hash 校验与原子提交、显式验证命令闭环 | 缺按 prompt/语言的相关性摘录与 repo map；Hashline/patch 选型未定 |
 | 执行策略 | 模式、路径校验、命令规则、共用工具级 allow/ask/deny、直接工具保护、外部审计内容边界与 Linux 描述符读取/修改与工具范围授权 | Linux chmod 仍能影响审计可用性（现有原语无法交付元数据隔离）；OS 范围隔离、Windows 路径授权/描述符边界与恢复/快照保护、完整跨平台隔离待完成；macOS 直接工具与行政快照/恢复描述符入口已交付；宿主目录移动竞争已补工作区根 inode 锚定（同路径换目录拒绝复用审计存储） |
 | 自动化 | 实时 JSONL、失败退出码、会话与 replay | 无显式事件版本/兼容性契约、结果 schema、双向控制或会话分支 |
-| 配置与扩展 | 单组 provider 参数、协议覆盖、任务工具白名单、根 `AGENTS.md` 项目说明 | 无命名 provider profile、连接诊断、目录作用域项目说明或 skills/MCP 生命周期 |
+| 配置与扩展 | provider 参数与命名 profile、协议与 endpoint 覆盖、连接诊断、任务工具白名单、工作区内 `AGENTS.md` 项目说明 | skills/MCP 生命周期与目录 override 合并语义待定 |
 
 ## 执行队列与验收
 
@@ -81,7 +81,7 @@ Chat/Responses 明确未完成拒绝与有界诊断已交付：即使参数完�
 
 验收：门控测试在每个等待阶段取消，约定时限内停止新请求与新工具；子进程组终止，审批等待解除，取消终结事件/summary/session 状态一致且只出现一次；流式输出已持久化，能 replay 最后一次实际请求。取消时保留已完成文件修改并明确快照范围。已有门控测试检查网络/审批/shell/Unix JSONL 等待取消在 2 秒内结算，真实 Linux PTY 验证审批 Ctrl-C 取消、同会话续聊与退出。Windows stdout、终端渲染背压和 OS 阻塞文件 I/O 列为后续，不将协作取消视为 daemon 隔离。
 
-**P0-3 审计区保护与执行策略（部分交付，未完成）。** 工具级 allow/ask/deny、来源记录、逐次审批、CLI 非交互 ask 拒绝与直接工具/搜索/上下文的审计路径保护已交付。默认写工具均 ask，自动化需明确 `--approval allow`。前轮已复现的 shell 内容篡改由外部存储阻断，旧目录不再权威；262 个 Rust 测试包含迁移与原生 Linux 攻击回归。workspace-write 的 chmod 元数据修改仍已复现，不能将内容边界宣称为完整防伪/防拒绝服务；细节见 [审计边界说明](docs/audit-boundary.md)。P0-3b1 外部内容存储、显式迁移、WAL/session/checkpoint/replay、tmp/artifact 分离已交付；P0-3b2a Linux read/write/edit、search/context 的 openat2 入口和同 inode 快照/修改已交付，非 Linux 及宿主目录移动竞争未覆盖，Linux restore/undo 已补目录描述符与外部 staging 原子提交。P0-3b2b1 工具 literal 路径/完整命令授权、审批固定目标和 read 范围投影已交付，未缩小 shell OS 读取范围。read-only 显式元数据接口 seccomp 拒绝已补，含 ABI 校验、继承与原生测试；Linux 独立库快照源和共用输出提交已补 FD 边界与 NOREPLACE 清单发布，六个确定性/四个 API 测试覆盖；workspace-write 路径级 metadata 仍未保护，读取 atime/锁/外部服务另列边界。下一阶段继续 P0-3b2b2 元数据与 OS 范围隔离。已评估：workspace-write 的元数据/读取隔离无法用现有原语交付（Landlock 权限只并集授权、不中介 chmod/chown/utime；seccomp 不能解引用路径；同 UID 属主可改自身权限且本环境无用户 mount namespace），唯一更重的 `SECCOMP_RET_USER_NOTIF` 监督方案保留候选；仓库内容已按不可信输入验证。见 [审计边界](docs/audit-boundary.md)。
+**P0-3 审计区保护与执行策略（部分交付，未完成）。** 工具级 allow/ask/deny、来源记录、逐次审批、CLI 非交互 ask 拒绝与直接工具/搜索/上下文的审计路径保护已交付。默认写工具均 ask，自动化需明确 `--approval allow`。前轮已复现的 shell 内容篡改由外部存储阻断，旧目录不再权威；294 个 Rust 测试包含迁移与原生 Linux 攻击回归。workspace-write 的 chmod 元数据修改仍已复现，不能将内容边界宣称为完整防伪/防拒绝服务；细节见 [审计边界说明](docs/audit-boundary.md)。P0-3b1 外部内容存储、显式迁移、WAL/session/checkpoint/replay、tmp/artifact 分离已交付；P0-3b2a Linux read/write/edit、search/context 的 openat2 入口和同 inode 快照/修改已交付，非 Linux 及宿主目录移动竞争未覆盖，Linux restore/undo 已补目录描述符与外部 staging 原子提交。P0-3b2b1 工具 literal 路径/完整命令授权、审批固定目标和 read 范围投影已交付，未缩小 shell OS 读取范围。read-only 显式元数据接口 seccomp 拒绝已补，含 ABI 校验、继承与原生测试；Linux 独立库快照源和共用输出提交已补 FD 边界与 NOREPLACE 清单发布，六个确定性/四个 API 测试覆盖；workspace-write 路径级 metadata 仍未保护，读取 atime/锁/外部服务另列边界。下一阶段继续 P0-3b2b2 元数据与 OS 范围隔离。已评估：workspace-write 的元数据/读取隔离无法用现有原语交付（Landlock 权限只并集授权、不中介 chmod/chown/utime；seccomp 不能解引用路径；同 UID 属主可改自身权限且本环境无用户 mount namespace），唯一更重的 `SECCOMP_RET_USER_NOTIF` 监督方案保留候选；仓库内容已按不可信输入验证。见 [审计边界](docs/audit-boundary.md)。
 
 进一步解决 metadata 与剩余路径竞争，补 OS 范围隔离。外部状态通过 `ha state` 定位，旧工作区和移动/备份在目标第一次使用前用 `ha migrate-state --from` 导入；源写者须停止。导入不读取仓库定位文件、不覆盖已有目标，验证原始源保持、活动源拒绝、原子回滚和内容边界。
 
