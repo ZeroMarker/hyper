@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rand::{Rng, distr::Alphanumeric};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -222,7 +222,13 @@ impl Workspace {
         drop(stmt);
         let mut repaired = Vec::new();
         for (run_id, task_id, task_name, started_at) in stale {
-            if !self.run_is_stale(&run_id)? {
+            // Hold the probe lock while repairing: the run may have finished
+            // and released its lock after the `running` query above, so its
+            // status is checked again once nobody else can own it.
+            let Some(_guard) = self.stale_run_guard(&run_id)? else {
+                continue;
+            };
+            if self.run_status(&run_id)?.as_deref() != Some("running") {
                 continue;
             }
             self.mark_run_interrupted(&run_id, &task_id, &task_name, &started_at)?;
@@ -235,9 +241,15 @@ impl Workspace {
     /// Errors are treated as "still alive" so a live run is never repaired by
     /// accident.
     fn run_is_stale(&self, run_id: &str) -> Result<bool> {
+        Ok(self.stale_run_guard(run_id)?.is_some())
+    }
+
+    /// `None` while the run is alive; otherwise the probe lock, held until the
+    /// guard is dropped (absent when the run never created a lock file).
+    fn stale_run_guard(&self, run_id: &str) -> Result<Option<Option<RunLock>>> {
         let dir = self.paths.runs.join(run_id);
         if !dir.is_dir() {
-            return Ok(true);
+            return Ok(Some(None));
         }
         // The probe must not create the lock file: `prune --dry-run` asks the
         // same question, and a dry run touches nothing.
@@ -249,16 +261,22 @@ impl Workspace {
         {
             Ok(file) => file,
             // No lock file means no run ever took one, so nobody owns it.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(None)),
             Err(error) => return Err(error).context("failed to read the run lock"),
         };
         match file.try_lock() {
-            Ok(()) => {
-                let _ = file.unlock();
-                Ok(true)
-            }
-            Err(_) => Ok(false),
+            Ok(()) => Ok(Some(Some(RunLock { _file: file }))),
+            Err(_) => Ok(None),
         }
+    }
+
+    fn run_status(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT status FROM runs WHERE run_id=?1", [run_id], |row| {
+                row.get(0)
+            })
+            .optional()?)
     }
 
     fn mark_run_interrupted(

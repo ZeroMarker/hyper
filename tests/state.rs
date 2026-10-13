@@ -179,7 +179,11 @@ fn concurrent_initialization_and_runs_share_one_authoritative_store() {
     let workspace = Workspace::open(root.path()).unwrap();
     let runs = workspace.list_runs(100).unwrap();
     assert_eq!(runs.len(), 8);
-    assert!(runs.iter().all(|r| r.status == "finished"));
+    assert!(
+        runs.iter().all(|r| r.status == "finished"),
+        "{:?}",
+        runs.iter().map(|r| &r.status).collect::<Vec<_>>()
+    );
     for run in runs {
         let (_, events) = get_run_details(root.path(), &run.run_id).unwrap();
         assert_eq!(

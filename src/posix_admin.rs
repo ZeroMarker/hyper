@@ -374,7 +374,13 @@ mod tests {
     use crate::workspace::Checkpoint;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
-    use tempfile::tempdir;
+    use tempfile::TempDir;
+
+    // macOS temp directories live under the `/var` -> `/private/var` link,
+    // which the O_NOFOLLOW walkers refuse; production canonicalizes the root.
+    fn tempdir() -> std::io::Result<TempDir> {
+        tempfile::Builder::new().tempdir_in(std::env::temp_dir().canonicalize()?)
+    }
 
     fn checkpoint(snapshot: PathBuf, existed: bool) -> Checkpoint {
         Checkpoint {

@@ -3503,7 +3503,8 @@ mod tests {
                 "read",
                 r#"{"path":"demo.txt","line":2,"lines":2}"#,
             );
-            let payload: Value = serde_json::from_str(&observation).unwrap();
+            let payload: Value = serde_json::from_str(&observation)
+                .unwrap_or_else(|error| panic!("{error}: {observation}"));
             assert_eq!(payload["content"], "two\nthree");
             assert_eq!(payload["startLine"], 2);
             assert_eq!(payload["endLine"], 3);
@@ -3520,7 +3521,8 @@ mod tests {
                 "read",
                 r#"{"path":"demo.txt","line":3}"#,
             );
-            let payload: Value = serde_json::from_str(&observation).unwrap();
+            let payload: Value = serde_json::from_str(&observation)
+                .unwrap_or_else(|error| panic!("{error}: {observation}"));
             assert_eq!(payload["content"], "three\nfour");
             assert_eq!(payload["endLine"], 4);
             assert_eq!(payload["truncated"], false);
@@ -3534,7 +3536,8 @@ mod tests {
                 "read",
                 r#"{"path":"demo.txt","line":9,"lines":2}"#,
             );
-            let payload: Value = serde_json::from_str(&observation).unwrap();
+            let payload: Value = serde_json::from_str(&observation)
+                .unwrap_or_else(|error| panic!("{error}: {observation}"));
             assert_eq!(payload["content"], "");
             assert_eq!(payload["startLine"], 9);
             assert_eq!(payload["endLine"], 8);
