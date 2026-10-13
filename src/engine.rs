@@ -3223,7 +3223,10 @@ mod tests {
             provider_recorded: Cell::new(false),
             cancellation: CancellationToken::new(),
         };
-        test(&mut events, &run, dir.path());
+        // Steps receive the canonical root in production; a raw temp path
+        // (Windows 8.3 names, the macOS /var link) would not prefix resolved paths.
+        let root = workspace.paths.root.clone();
+        test(&mut events, &run, &root);
     }
 
     #[test]
