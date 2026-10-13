@@ -188,8 +188,13 @@ impl ToolFile {
                 #[cfg(windows)]
                 crate::windows_file::require_single_link(&File::open(&self.target)?)?;
             }
+            // The target handle was opened without FILE_SHARE_DELETE, so it must
+            // be closed before MoveFileExW can replace the file it names.
             #[cfg(windows)]
-            crate::windows_file::atomic_replace(staged.path(), &self.target, self.existed)?;
+            {
+                self.file = tempfile::tempfile()?;
+                crate::windows_file::atomic_replace(staged.path(), &self.target, self.existed)?;
+            }
             #[cfg(not(windows))]
             if self.existed {
                 fs::rename(staged.path(), &self.target)?;
