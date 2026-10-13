@@ -51,6 +51,11 @@ struct Cli {
 enum Commands {
     /// Configure the provider API key, base URL and model
     Config,
+    /// List, select or explicitly test a named provider profile
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
     Init,
     /// Print authoritative audit storage paths as JSON
     State,
@@ -153,6 +158,19 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfileCommands {
+    List,
+    Use {
+        name: String,
+    },
+    Test {
+        name: Option<String>,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let supports_jsonl = match cli.command.as_ref() {
@@ -211,6 +229,23 @@ pub fn run() -> Result<()> {
     }
     match cli.command.expect("command checked above") {
         Commands::Config => ensure_api_key(true)?,
+        Commands::Profile { command } => match command {
+            ProfileCommands::List => println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::deepseek::profiles::list()?)?
+            ),
+            ProfileCommands::Use { name } => {
+                crate::deepseek::profiles::use_profile(&name)?;
+                println!("active profile: {name}");
+            }
+            ProfileCommands::Test { name, timeout_ms } => println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::deepseek::profiles::test_profile(
+                    name.as_deref(),
+                    timeout_ms
+                )?)?
+            ),
+        },
         Commands::Init => {
             let ws = Workspace::open(&root)?;
             println!("initialized {}", ws.paths.dir.display())

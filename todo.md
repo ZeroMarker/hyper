@@ -17,7 +17,6 @@
 - [ ] **P1-3 编辑和验证闭环**：剩余 Hashline/patch 选型；原子写入、重复块、并发变更、快照与 Unicode 已验证。（唯一匹配、陈旧 hash、verify 有限重试与评测指标已交付。）
 - [ ] **P1-4 项目说明**：剩余目录 override 合并语义（当前只按固定顺序拼接）与按需 skills。（根与目录 `AGENTS.md` 加载已交付。）
 - [ ] **P1-5 模型能力与完成语义**：剩余可配置 provider/model 上限、协议路径与能力，可用的 tokenizer/服务端计数及明确回退；统一 Chat/Responses 的独立非流式策略；缺失/未知停止原因的 provider 策略；重复失败调用的可审计阈值（避免误伤分页/测试重跑）。恢复及快照基线的 Python 深文件残缺参数失败保留为回归样本。见 [完成语义](docs/model-completion.md)。
-- [ ] **P1-6 命名 provider profile**：兼容旧配置和 DEEPSEEK 环境变量，list/use/test、认证来源、三协议 endpoint 覆盖；运行固定有效配置，stub 区分认证/路径/协议/模型/限流/超时，不记录密钥。
 
 ### P2：按实测需求扩展
 
@@ -34,7 +33,7 @@
 细节见 [progress.md](progress.md)。
 
 - 核心：tool-calling agent loop（read/search/bash/write/edit）、三协议适配与 SSE 流式、会话与多轮上下文、事件级 replay、artifacts 落盘、`ha prune`、事件/DB 兜底重建、崩溃恢复、SQLite WAL。
-- Provider：DeepSeek 默认、`hyper config` 持久化、OpenCode Go 接入。
+- Provider：DeepSeek 默认、`hyper config` 持久化、OpenCode Go 接入、命名 profile 与 list/use/test、三协议 endpoint 覆盖和有效配置审计。
 - 运行控制：危险命令策略、路径/符号链接隔离、TUI 审批、进程组终止、超时区分、管道防死锁、资源限制、CLI 实时 JSONL、实时 event stream。
 - 上下文：会话历史预算、总请求预算、P1-1 可审计压缩（手动 `ha compact`、`HYPER_AUTOCOMPACT`、循环内 `HYPER_LOOP_COMPACT`）。
 - P0-1 固定任务集和评测脚手架；评测环境与失败样本扩展。

@@ -50,7 +50,7 @@ flowchart LR
 
 ## 模型配置与协议
 
-配置优先级为 `DEEPSEEK_*` 环境变量、用户配置目录中的 `hyper/config.json`、内置默认值。`ha config` 维护 API key、base URL 和模型；Unix 下配置文件仅允许所有者访问。默认服务是 DeepSeek，模型为 `deepseek-v4-flash`。API key 不写入 `model.*` 事件。
+配置优先级为非空 `DEEPSEEK_*` 环境变量、用户配置目录中的 `hyper/config.json`、内置默认值。文件支持 `profiles` 与 `active_profile`，各 profile 固定 protocol/base_url/model、认证来源（指定环境变量或保存的 key）及三协议 endpoint 覆盖；无 active_profile 时兼容旧单配置。`ha profile list/use/test` 分别列出、选择和显式单请求诊断，`ha config` 维护旧字段且保留 profiles；Unix 下保存文件仅允许所有者访问。默认服务是 DeepSeek，模型为 `deepseek-v4-flash`。每 run 启动时解析并固定配置，`provider.resolved` 与 `model.started.effectiveConfig` 记录有效值及认证来源、不含密钥；provider 错误正文不进入诊断，完整凭据 token 在事件中脱敏。
 
 内部消息采用中立的聊天消息结构；适配层支持 Chat Completions、Responses、Messages 三类 HTTP 协议。`DEEPSEEK_PROTOCOL` 可显式指定；OpenCode 端点会按模型名前缀选择协议，其他端点默认使用 Chat Completions。请求按步骤共享会话标识。模型循环使用 SSE 逐块读取响应，文本分片写入 `model.delta` 并送到 TUI；普通 JSON 响应也能读取。工具参数接收完整且协议结束后才执行。连接建立前的网络错误及部分 HTTP 状态最多尝试 3 次；流已开始后发生断流则报错，不重发已输出的内容。
 
@@ -91,7 +91,7 @@ shell tmp 移入 `.hyper-tmp`，artifact 仍由 harness 收集至外部审计目
 
 - `plan` 模式拒绝 `bash` 和写入；`build` 模式允许经过策略检查的工具。步骤的 `tools` 白名单也约束直接指令和模型工具调用。
 - CLI/TUI 共用工具级 allow/ask/deny，默认 read/search allow、bash/write/edit ask；CLI 无审批处理器时 ask 明确拒绝，TUI 每次调用确认一次。显式权限文件与参数不从项目说明推导授权。旧库 API 保留先前行为，新 `RunOptions.permissions` 默认 ask。判定和来源固定到事件。
-- `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；直接文件工具拒绝 `.harness` 及符号链接/Unix 硬链接别名。search 和自动上下文也过滤这些路径；审批后重复检查目标。Linux read/write/edit、search/context 使用 openat2 描述符入口，拒绝校验后的符号链接、magic link 与挂载跨越，快照/写入使用同一个 inode。search 改用原生 ignore-aware 枚举与安全读取。Windows 硬链接、非 Linux 描述符边界、非 Linux 恢复与宿主目录移动仍待完善。`read-only` 执行模式拒绝写入。
+- `read`/`write`/`edit` 的目标路径经工作区边界检查，已有路径的符号链接会被解析；直接文件工具拒绝 `.harness` 及符号链接/Unix 硬链接别名。search 和自动上下文也过滤这些路径；审批后重复检查目标。Linux read/write/edit、search/context 使用 openat2 描述符入口，拒绝校验后的符号链接、magic link 与挂载跨越，读取/快照绑定原 inode，写入在外部 staging 完整同步后经固定 parent 描述符原子替换，硬链接别名不改写。search 改用原生 ignore-aware 枚举与安全读取。Windows 硬链接、非 Linux 描述符边界、非 Linux 恢复与宿主目录移动仍待完善。`read-only` 执行模式拒绝写入。
 - Shell 默认使用 `workspace-write` 模式：先经命令策略检查，再在 Linux 子进程应用 Landlock，允许工作区内写入，拒绝 TCP 连接与监听。`read-only` 不授权文件写入，并在支持的 Linux 原生 ABI 上安装 seccomp，整体拒绝显式权限/属主/时间戳/xattr 修改和 ioctl/io_uring/ptrace/process_vm_writev；不支持或安装失败拒绝启动。过滤在 parent 准备，pre_exec 只执行 syscall，不分配内存或加锁。旧低层 Sandbox::apply_in_child 仅含 Landlock，应调用 apply_prepared_in_child 应用完整准备策略；`unrestricted` 显式跳过 Landlock 和该命令策略检查。无可用 Landlock 时，受限模式的 Shell 启动失败。
 - Linux Shell 子进程默认使用约 8 GiB 地址空间、1 GiB 单文件大小、以及与步骤超时相关的 CPU 秒数限制；步骤可以覆盖这些值。墙钟超时默认 120 秒，超时后终止进程组。限制按进程生效，不是整个进程树的总额。
 - Landlock 保留读取能力，网络规则覆盖 TCP bind/connect；它不完整限制 UDP、Unix socket 或所有文件元数据操作。权威审计目录已移出工作区，受限 shell 的写入/删除/跨层级移动/硬链接被阻断；预先准备的审计 inode 硬链接会在 shell 启动前拒绝。旧 `.harness` 仅是非权威遗留数据。Linux workspace-write 实测 chmod 仍可改变外部审计文件权限，可能导致后续访问失败，元数据隔离仍需交付。`unrestricted` 模式具有宿主进程的常规权限。

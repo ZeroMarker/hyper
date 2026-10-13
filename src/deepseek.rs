@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::{AgentMode, context::RequestBudget, i18n, workspace};
 
 mod completion;
+pub(crate) mod profiles;
 pub(crate) use completion::CompletionError;
 mod stream;
 use stream::{stream_chat, stream_messages, stream_responses};
@@ -104,7 +105,7 @@ pub fn system_prompt(mode: AgentMode) -> &'static str {
 /// The user configuration written by `hyper config`. Everything is optional so a
 /// file an older version wrote (which only held the key) still loads, and the
 /// environment keeps overriding whatever is stored here.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct StoredConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     deepseek_api_key: String,
@@ -119,22 +120,32 @@ struct StoredConfig {
     /// OpenCode Go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    profiles: std::collections::BTreeMap<String, profiles::Profile>,
 }
 
 /// The effective provider settings: the API key, the base URL its requests go to
 /// and the model they ask for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Settings {
     api_key: String,
     base_url: String,
     model: String,
     protocol: Protocol,
+    profile: Option<String>,
+    auth_source: String,
+    endpoints: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeepSeekConfig {
     pub(crate) budget: RequestBudget,
     pub api_key: String,
+    pub profile: Option<String>,
+    pub auth_source: String,
+    endpoints: std::collections::BTreeMap<String, String>,
     pub base_url: String,
     pub model: String,
     /// How the request and the reply are shaped on the wire.
@@ -148,6 +159,23 @@ pub struct DeepSeekConfig {
     client: Client,
     async_client: reqwest::Client,
     pub(crate) cancellation: crate::CancellationToken,
+}
+
+impl std::fmt::Debug for DeepSeekConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.effective_config().fmt(f)
+    }
+}
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("protocol", &self.protocol)
+            .field("profile", &self.profile)
+            .field("auth_source", &self.auth_source)
+            .finish()
+    }
 }
 
 impl DeepSeekConfig {
@@ -164,6 +192,20 @@ impl DeepSeekConfig {
             Protocol::Messages => messages_body(self, messages, tools, true),
         };
         Ok(serde_json::to_vec(&body)?.len())
+    }
+
+    pub fn request_endpoint(&self) -> String {
+        self.endpoints
+            .get(self.protocol.as_str())
+            .cloned()
+            .unwrap_or_else(|| endpoint(&self.base_url, self.protocol))
+    }
+
+    pub fn effective_config(&self) -> serde_json::Value {
+        json!({"profile":self.profile,"provider":self.provider,"protocol":self.protocol.as_str(),
+            "baseUrl":self.base_url,"model":self.model,"authSource":self.auth_source,
+            "endpoint":self.request_endpoint(),"endpoints":self.endpoints,
+            "timeoutMs":self.timeout.as_millis(),"budget":{"contextTokens":self.budget.context_tokens,"outputTokens":self.budget.output_tokens}})
     }
 
     pub fn from_env() -> Result<Self> {
@@ -209,8 +251,16 @@ impl DeepSeekConfig {
         }
         Ok(Self {
             budget: RequestBudget::default(),
-            provider: provider_name(&settings.base_url),
+            provider: provider_name(
+                settings
+                    .endpoints
+                    .get(settings.protocol.as_str())
+                    .unwrap_or(&settings.base_url),
+            ),
             api_key: settings.api_key,
+            profile: settings.profile,
+            auth_source: settings.auth_source,
+            endpoints: settings.endpoints,
             base_url: settings.base_url,
             model: settings.model,
             protocol: settings.protocol,
@@ -238,6 +288,9 @@ fn resolve_settings(
     stored: Option<StoredConfig>,
 ) -> Result<Settings> {
     let stored = stored.unwrap_or_default();
+    if stored.active_profile.is_some() {
+        return profiles::resolve(&env, &stored);
+    }
     let value = |value: Option<String>| {
         value
             .map(|value| value.trim().to_owned())
@@ -257,7 +310,16 @@ fn resolve_settings(
         &base_url,
         &model,
     )?;
+    profiles::validate_url(&base_url)?;
     Ok(Settings {
+        profile: None,
+        auth_source: if value(env("DEEPSEEK_API_KEY")).is_some() {
+            "env:DEEPSEEK_API_KEY"
+        } else {
+            "config:deepseek_api_key"
+        }
+        .into(),
+        endpoints: Default::default(),
         api_key,
         base_url,
         model,
@@ -347,7 +409,8 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
         let has_key = env::var("DEEPSEEK_API_KEY")
             .ok()
             .is_some_and(|key| !key.trim().is_empty())
-            || !stored.deepseek_api_key.trim().is_empty();
+            || !stored.deepseek_api_key.trim().is_empty()
+            || stored.active_profile.is_some();
         if has_key {
             // Surface malformed settings instead of treating every error as a
             // missing key and opening the first-run wizard.
@@ -421,7 +484,9 @@ pub fn ensure_api_key(force: bool) -> Result<()> {
             base_url: Some(base_url),
             model: Some(model),
             // An explicit choice survives a reconfiguration.
-            protocol: stored.protocol,
+            protocol: stored.protocol.clone(),
+            active_profile: stored.active_profile.clone(),
+            profiles: stored.profiles.clone(),
         },
     )?;
     println!(
@@ -488,6 +553,7 @@ fn save_config(path: &Path, config: &StoredConfig) -> Result<()> {
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    pending.as_file().sync_all()?;
     pending.persist(path)?;
     Ok(())
 }
@@ -712,7 +778,7 @@ fn openai_chat(
     }
     let response = post(config, &body)?;
     let parsed: ChatResponse = serde_json::from_str(&response)
-        .with_context(|| format!("invalid {} response: {response}", config.provider))?;
+        .with_context(|| format!("invalid {} response JSON", config.provider))?;
     let message = parsed
         .choices
         .into_iter()
@@ -815,7 +881,7 @@ fn openai_responses(
     }
     let response = post(config, &body)?;
     let parsed: ResponsesResponse = serde_json::from_str(&response)
-        .with_context(|| format!("invalid {} response: {response}", config.provider))?;
+        .with_context(|| format!("invalid {} response JSON", config.provider))?;
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -962,7 +1028,7 @@ fn anthropic_messages(
     }
     let response = post(config, &body)?;
     let parsed: MessagesResponse = serde_json::from_str(&response)
-        .with_context(|| format!("invalid {} response: {response}", config.provider))?;
+        .with_context(|| format!("invalid {} response JSON", config.provider))?;
     if let Some(reason @ ("max_tokens" | "refusal" | "model_context_window_exceeded")) =
         parsed.stop_reason.as_deref()
     {
@@ -1010,7 +1076,7 @@ fn anthropic_messages(
 fn post(config: &DeepSeekConfig, body: &serde_json::Value) -> Result<String> {
     // The path depends on the protocol the model speaks, so it is built from the
     // config the caller is holding rather than cached on the client.
-    let url = endpoint(&config.base_url, config.protocol);
+    let url = config.request_endpoint();
     let mut successful_body = None;
     for attempt in 0..MAX_API_ATTEMPTS {
         let response = match config.client.post(&url).json(body).send() {
@@ -1040,7 +1106,11 @@ fn post(config: &DeepSeekConfig, body: &serde_json::Value) -> Result<String> {
             std::thread::sleep(retry_delay(attempt, retry_after));
             continue;
         }
-        bail!("{} API returned {status}: {response_body}", config.provider)
+        bail!(
+            "{} API returned {status} ({})",
+            config.provider,
+            profiles::status_category(status, &response_body)
+        )
     }
     successful_body
         .with_context(|| format!("{} API request exhausted all attempts", config.provider))
@@ -1139,6 +1209,14 @@ mod tests {
             base_url: base_url.into(),
             model: model.into(),
             protocol,
+            profile: None,
+            auth_source: if api_key == "env-key" {
+                "env:DEEPSEEK_API_KEY"
+            } else {
+                "config:deepseek_api_key"
+            }
+            .into(),
+            endpoints: Default::default(),
         }
     }
 
@@ -1257,6 +1335,7 @@ mod tests {
             // Detection alone would answer `messages` for this one.
             model: Some("minimax-m2.5".into()),
             protocol: Some("CHAT".into()),
+            ..Default::default()
         };
         let from_env = |key: &str| match key {
             "DEEPSEEK_API_KEY" => Some("env-key".into()),
@@ -1283,6 +1362,7 @@ mod tests {
             base_url: Some("https://opencode.ai/zen/go/v1".into()),
             model: Some("minimax-m2.5".into()),
             protocol: None,
+            ..Default::default()
         };
         assert_eq!(
             resolve_settings(key_only, Some(detected)).unwrap().protocol,
@@ -1299,6 +1379,7 @@ mod tests {
             base_url: Some("https://opencode.ai/zen/go/v1".into()),
             model: Some("minimax-m2.5".into()),
             protocol: None,
+            ..Default::default()
         };
         let typo = |key: &str| match key {
             "DEEPSEEK_API_KEY" => Some("env-key".into()),
@@ -1403,6 +1484,7 @@ mod tests {
             base_url: Some("https://stored.example/v1".into()),
             model: Some("stored-model".into()),
             protocol: None,
+            ..Default::default()
         };
         let from_env = |key: &str| match key {
             "DEEPSEEK_API_KEY" => Some("env-key".into()),
@@ -1456,6 +1538,7 @@ mod tests {
             base_url: Some("https://opencode.ai/zen/go/v1".into()),
             model: Some("deepseek-v4-pro".into()),
             protocol: Some("messages".into()),
+            ..Default::default()
         };
         save_config(&path, &config).unwrap();
         let read = read_stored_config(&path).unwrap().unwrap();

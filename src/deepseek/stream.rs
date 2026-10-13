@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::{
     DeepSeekConfig, MAX_API_ATTEMPTS, ModelReply, RETRY_AFTER, ToolCall, ToolFunction, Usage,
-    endpoint, retry_delay, retryable_status,
+    retry_delay, retryable_status,
 };
 
 use super::completion::{
@@ -59,7 +59,7 @@ impl Read for Response {
 /// Status failures can be retried before any SSE payload is consumed. A broken
 /// stream cannot be retried: doing so would duplicate deltas already audited.
 fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
-    let url = endpoint(&config.base_url, config.protocol);
+    let url = config.request_endpoint();
     for attempt in 0..MAX_API_ATTEMPTS {
         let response = match config
             .cancellation
@@ -97,7 +97,11 @@ fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
                 .wait(retry_delay(attempt, retry_after))?;
             continue;
         }
-        bail!("{} API returned {status}: {response_body}", config.provider);
+        bail!(
+            "{} API returned {status} ({})",
+            config.provider,
+            super::profiles::status_category(status, &response_body)
+        );
     }
     bail!("{} API request exhausted all attempts", config.provider)
 }
@@ -757,6 +761,9 @@ mod tests {
             request
         });
         let config = DeepSeekConfig::new(Settings {
+            profile: None,
+            auth_source: "config:deepseek_api_key".into(),
+            endpoints: Default::default(),
             api_key: "key".into(),
             base_url: url,
             model: "test-model".into(),
@@ -841,6 +848,9 @@ mod tests {
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
         });
         let config = DeepSeekConfig::new(Settings {
+            profile: None,
+            auth_source: "config:deepseek_api_key".into(),
+            endpoints: Default::default(),
             api_key: "k".into(),
             base_url: url,
             model: "m".into(),
@@ -868,6 +878,9 @@ mod tests {
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         });
         let config = DeepSeekConfig::new(Settings {
+            profile: None,
+            auth_source: "config:deepseek_api_key".into(),
+            endpoints: Default::default(),
             api_key: "test".into(),
             base_url: url,
             model: "test".into(),

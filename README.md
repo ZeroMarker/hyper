@@ -101,6 +101,78 @@ export DEEPSEEK_BASE_URL="https://api.deepseek.com"   # default
 export DEEPSEEK_MODEL="deepseek-v4-pro"               # default: deepseek-v4-flash
 ```
 
+### Named provider profiles
+
+Add `profiles` and `active_profile` to `~/.config/hyper/config.json` (the user
+configuration directory on other platforms):
+
+```json
+{
+  "active_profile": "work",
+  "profiles": {
+    "work": {
+      "protocol": "chat",
+      "base_url": "https://provider.example/v1",
+      "model": "coding-model",
+      "auth": { "source": "env", "variable": "WORK_API_KEY" },
+      "endpoints": {
+        "chat": "chat/completions",
+        "responses": "/v1/responses",
+        "messages": "https://provider.example/v1/messages"
+      }
+    },
+    "backup": {
+      "protocol": "messages",
+      "base_url": "https://backup.example/v1",
+      "model": "backup-model",
+      "auth": { "source": "config", "api_key": "your-key" }
+    }
+  }
+}
+```
+
+`auth.source` selects an environment variable or a saved key. Keep saved keys in
+an owner-only file; `ha profile use` writes the configuration with mode 0600 on
+Unix. Profiles require a protocol, base URL, model and authentication source.
+Names contain 1–64 ASCII letters, digits, underscores or hyphens.
+
+```bash
+ha profile list
+ha profile use work
+ha profile test              # active profile, or legacy settings
+ha profile test backup       # test without changing the active profile
+ha profile test work --timeout-ms 2000
+```
+
+`list` shows configuration and authentication sources without loading or printing
+keys. `use` only saves the selection. `test` sends one small request with no tools
+or retries, with a default 10-second timeout. It reports authentication, path,
+protocol/response shape, model, rate-limit, timeout or connection errors. Model
+errors use structured provider error codes or a differing reported model; an
+unqualified HTTP 404 is classified as a path error. Provider error text is not
+printed.
+
+Nonempty `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` and
+`DEEPSEEK_PROTOCOL` override the corresponding selected-profile settings. An
+unset profile credential never falls back to another profile or the legacy key.
+Without `active_profile`, the old single configuration and default settings
+continue to work; `ha config` preserves profiles while updating the legacy fields.
+Remove `active_profile` to return to the legacy configuration.
+
+Endpoint overrides are optional for each of `chat`, `responses` and `messages`.
+A relative path appends to the effective base URL; a leading slash resolves from
+the host root; a full HTTP(S) URL is used as supplied. Omitted overrides use the
+protocol's standard path. URLs must omit userinfo, query strings and fragments
+so credentials cannot enter configuration events. Absolute endpoint overrides
+remain fixed when `DEEPSEEK_BASE_URL` changes.
+
+Each run freezes its effective configuration at startup and reuses it across
+model steps and automatic compaction. `provider.resolved` and
+`model.started.effectiveConfig` record the profile, protocol, base URL, model,
+authentication source, endpoint overrides, timeout and budget without the key.
+Keys are redacted from event payloads, and HTTP errors only retain status and a
+fixed diagnostic category.
+
 ## Providers
 
 For a chat-completions service that accepts Bearer authentication and Hyper's

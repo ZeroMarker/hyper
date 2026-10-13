@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, OnceCell, RefCell},
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -62,9 +62,25 @@ struct EventWriter<'a> {
     /// resolved target path. `edit` refuses to touch bytes that changed since the
     /// run read them, so a stale edit applies to nothing instead of guessing.
     observed_hashes: RefCell<HashMap<String, String>>,
+    provider_config: OnceCell<std::result::Result<DeepSeekConfig, String>>,
+    provider_recorded: Cell<bool>,
     cancellation: CancellationToken,
 }
 impl EventWriter<'_> {
+    fn model_config(&self) -> Result<DeepSeekConfig> {
+        let resolved = self
+            .provider_config
+            .get_or_init(|| DeepSeekConfig::from_env().map_err(|error| format!("{error:#}")));
+        let config = resolved
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?;
+        if !self.provider_recorded.get() {
+            self.write("provider.resolved", config.effective_config(), None, None)?;
+            self.provider_recorded.set(true);
+        }
+        Ok(config.clone())
+    }
+
     fn write(
         &self,
         kind: &str,
@@ -72,6 +88,10 @@ impl EventWriter<'_> {
         step: Option<&str>,
         index: Option<usize>,
     ) -> Result<HarnessEvent> {
+        let mut payload = payload;
+        if let Some(Ok(config)) = self.provider_config.get() {
+            redact_event_value(&mut payload, &config.api_key);
+        }
         let event = HarnessEvent {
             event_id: workspace::id(),
             run_id: self.run_id.clone(),
@@ -96,6 +116,41 @@ impl EventWriter<'_> {
             return Err(error);
         }
         Ok(event)
+    }
+}
+
+fn redact_event_value(value: &mut Value, secret: &str) {
+    if secret.is_empty() {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            // Match credential tokens, not incidental substrings: test/local
+            // credentials may be a single letter occurring in normal prose.
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            let mut redacted = String::with_capacity(text.len());
+            let mut copied = 0;
+            for (start, _) in text.match_indices(secret) {
+                let end = start + secret.len();
+                if text[..start].chars().next_back().is_some_and(word)
+                    || text[end..].chars().next().is_some_and(word)
+                {
+                    continue;
+                }
+                redacted.push_str(&text[copied..start]);
+                redacted.push_str("[REDACTED]");
+                copied = end;
+            }
+            redacted.push_str(&text[copied..]);
+            *text = redacted;
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| redact_event_value(item, secret)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|item| redact_event_value(item, secret)),
+        _ => {}
     }
 }
 
@@ -395,7 +450,7 @@ fn agent(
     /// Identical tool call plus identical failure, repeated this many times in a
     /// row, is a loop with no new information; stop rather than burn every turn.
     const MAX_IDENTICAL_FAILURES: usize = 3;
-    let mut config = DeepSeekConfig::from_env()?;
+    let mut config = events.model_config()?;
     config.cancellation = events.cancellation.clone();
     let history_budget = history_budget()?;
     let mut history = bounded_history(&events.history, history_budget);
@@ -452,6 +507,7 @@ fn agent(
             "projectInstructions":instructions.iter().map(|i| json!({"source":i.source,"bytes":i.bytes,"truncated":i.truncated})).collect::<Vec<_>>(),
             "systemPrompt":system,"history":history_messages,
             "historyBudget":{"maxEstimatedTokens":history_budget,"estimatedTokens":history.iter().map(estimated_tokens).sum::<usize>(),"keptMessages":history.len(),"droppedMessages":events.history.len()-history.len()}});
+    started["effectiveConfig"] = config.effective_config();
     // The provenance of a summarized prefix travels with the run that used it,
     // so an audit can tell a projected history from the raw transcript.
     if let Some(compaction) = &events.compaction {
@@ -2061,8 +2117,13 @@ fn run_task_inner(
         compaction,
         artifacts: RefCell::new(HashMap::new()),
         observed_hashes: RefCell::new(HashMap::new()),
+        provider_config: OnceCell::new(),
+        provider_recorded: Cell::new(false),
         cancellation,
     };
+    events
+        .provider_config
+        .get_or_init(|| DeepSeekConfig::from_env().map_err(|error| format!("{error:#}")));
     events.write(
         "run.started",
         json!({"taskName":task.name,"sessionId":session_id,"executionMode":execution_mode,"permissions":events.permissions,"permissionSource":events.permissions.source,"storageDir":workspace.paths.dir}),
@@ -2388,7 +2449,7 @@ fn auto_compact(
     {
         return Ok(());
     }
-    let mut config = match DeepSeekConfig::from_env() {
+    let mut config = match events.model_config() {
         Ok(config) => config,
         Err(error) => {
             events.write(
@@ -3158,9 +3219,23 @@ mod tests {
             compaction: None,
             artifacts: RefCell::new(HashMap::new()),
             observed_hashes: RefCell::new(HashMap::new()),
+            provider_config: OnceCell::new(),
+            provider_recorded: Cell::new(false),
             cancellation: CancellationToken::new(),
         };
         test(&mut events, &run, dir.path());
+    }
+
+    #[test]
+    fn credential_redaction_preserves_prose_and_redacts_nested_tokens() {
+        let mut payload = json!({"input":"work k key", "items":["Bearer k", {"error":"key=k"}]});
+        redact_event_value(&mut payload, "k");
+        assert_eq!(payload["input"], "work [REDACTED] key");
+        assert_eq!(payload["items"][0], "Bearer [REDACTED]");
+        assert_eq!(payload["items"][1]["error"], "key=[REDACTED]");
+        let mut payload = json!("echo sk-long-secret");
+        redact_event_value(&mut payload, "sk-long-secret");
+        assert_eq!(payload, "echo [REDACTED]");
     }
 
     #[test]
@@ -3622,6 +3697,8 @@ mod tests {
             compaction: None,
             artifacts: RefCell::new(HashMap::new()),
             observed_hashes: RefCell::new(HashMap::new()),
+            provider_config: OnceCell::new(),
+            provider_recorded: Cell::new(false),
             cancellation: CancellationToken::new(),
         };
         // `bash` is not in the allowlist and must be rejected even though the
