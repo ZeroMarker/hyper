@@ -175,10 +175,14 @@ pub(crate) fn loop_compaction_keep_groups() -> Result<usize> {
 }
 
 /// A deliberately conservative estimate, independent of provider tokenizers:
-/// one token per UTF-8 byte plus framing. This is a history budget only; input,
+/// one token per character plus framing. This is a history budget only; input,
 /// tool definitions and the current agent loop have separate costs.
 pub(crate) fn estimated_tokens(message: &SessionMessage) -> usize {
-    message.content.len().saturating_add(MESSAGE_OVERHEAD)
+    message
+        .content
+        .chars()
+        .count()
+        .saturating_add(MESSAGE_OVERHEAD)
 }
 
 /// Keep a contiguous suffix of whole user-led turns. Never split a large turn
@@ -333,7 +337,8 @@ mod tests {
         assert!(bounded_history(&history, cost - 1).is_empty());
         assert!(bounded_history(&history, 0).is_empty());
         assert_eq!(bounded_history(&history, usize::MAX).len(), 4);
-        assert_eq!(estimated_tokens(&history[2]), 9 + MESSAGE_OVERHEAD);
+        // Three CJK characters count as three tokens, not their nine bytes.
+        assert_eq!(estimated_tokens(&history[2]), 3 + MESSAGE_OVERHEAD);
     }
 
     #[test]

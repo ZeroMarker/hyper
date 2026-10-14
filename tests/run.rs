@@ -1732,7 +1732,7 @@ fn read_line_window_is_reported_to_the_model() {
     fs::write(root.path().join("notes.txt"), "one\ntwo\nthree\nfour\n").unwrap();
     let config_home = stub_config(root.path(), &url);
     let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
-        .args(["--jsonl", "--approval", "allow", "inspect"])
+        .args(["--jsonl", "--approval", "allow", "inspect", "notes"])
         .current_dir(root.path())
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("DEEPSEEK_API_KEY")

@@ -329,7 +329,7 @@ missing data.
 
 Session history uses a sliding window of whole user-led turns, retaining the
 most recent turns within `HYPER_HISTORY_TOKENS` (default: `16000`; `0` sends no
-history). The estimate conservatively counts one token per UTF-8 byte plus
+history). The estimate conservatively counts one token per character plus
 eight per message; it is not a provider tokenizer. An oversized latest turn
 leaves no history rather than being split or replaced with older turns. The
 original transcript stays intact. `model.started` records the selected history
@@ -349,7 +349,7 @@ errors and retryable statuses are retried with backoff. Both values are
 recorded on `model.started` and `provider.resolved`.
 
 Before each request, Hyper conservatively estimates the entire translated
-JSON body at one token per UTF-8 byte, including system/input messages,
+JSON body at one token per character, including system/input messages,
 workspace context, tool schemas, arguments and observations. Initial requests
 drop additional old session turns if needed. If the current input or a later
 tool round still exceeds the remaining input budget, the step fails with

@@ -1578,6 +1578,9 @@ fn read(
     let target_key = resolved
         .as_ref()
         .map(|target| target.to_string_lossy().into_owned());
+    // Where the returned bytes actually start: a byte offset that lands inside
+    // a multi-byte character is moved to the next character boundary.
+    let mut read_from = offset;
     let (content, total, digest, lines, truncated) = if let Some(resolved) = resolved {
         let mut file = ToolFile::open_resolved(root, resolved, false, false)?;
         file.check_scope_links(&events.permissions, "read")?;
@@ -1592,9 +1595,10 @@ fn read(
             None => {
                 let start = offset.min(total) as usize;
                 let end = (start + 64_000).min(bytes.len());
-                let content = bytes[start..end].to_vec();
-                let truncated = total.saturating_sub(offset) > content.len() as u64;
-                (content, total, Some(digest), None, truncated)
+                let (skipped, content) = utf8_window(&bytes[start..end]);
+                read_from = (start + skipped) as u64;
+                let truncated = read_from + (content.len() as u64) < total;
+                (content.to_vec(), total, Some(digest), None, truncated)
             }
         }
     } else {
@@ -1607,11 +1611,16 @@ fn read(
         file.seek(SeekFrom::Start(offset.min(total)))?;
         let mut bytes = Vec::new();
         file.take(64_000).read_to_end(&mut bytes)?;
-        let truncated = total.saturating_sub(offset) > bytes.len() as u64;
-        (bytes, total, None, None, truncated)
+        let (skipped, content) = utf8_window(&bytes);
+        read_from = offset.min(total) + skipped as u64;
+        let truncated = read_from + (content.len() as u64) < total;
+        (content.to_vec(), total, None, None, truncated)
     };
     let mut payload = json!({"path":path,"content":String::from_utf8_lossy(&content),
         "truncated":truncated,"bytes":total});
+    if lines.is_none() {
+        payload["offset"] = json!(read_from);
+    }
     if let Some(info) = &lines {
         payload["startLine"] = json!(info.start);
         payload["endLine"] = json!(info.end);
@@ -1630,10 +1639,27 @@ fn read(
     }
     let mut event_payload = payload.clone();
     event_payload["tool"] = json!("read");
-    event_payload["offset"] = json!(offset);
+    event_payload["requestedOffset"] = json!(offset);
     event_payload["artifact"] = json!(artifact);
     events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
     Ok((true, payload))
+}
+
+/// Trim a byte window to whole UTF-8 characters: skip continuation bytes cut off
+/// at the start and an incomplete character at the end, so a byte offset never
+/// shows the model replacement characters. Returns how many leading bytes were
+/// skipped. Bytes that are not UTF-8 at all are left as they are.
+fn utf8_window(bytes: &[u8]) -> (usize, &[u8]) {
+    let skipped = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| (**byte & 0xC0) == 0x80)
+        .count();
+    let rest = &bytes[skipped..];
+    match std::str::from_utf8(rest) {
+        Err(error) if error.error_len().is_none() => (skipped, &rest[..error.valid_up_to()]),
+        _ => (skipped, rest),
+    }
 }
 
 fn search(
@@ -3755,6 +3781,18 @@ mod tests {
         assert!(message.contains("exit code 1"), "{message}");
         assert!(message.contains("boom"), "{message}");
         assert_eq!(classify_error(&message), "Error");
+    }
+
+    #[test]
+    fn byte_windows_never_split_a_character() {
+        let text = "ab中文cd".as_bytes();
+        // Starting inside `中` skips its continuation bytes.
+        assert_eq!(utf8_window(&text[3..]), (2, "文cd".as_bytes()));
+        // Ending inside `文` drops the incomplete character.
+        assert_eq!(utf8_window(&text[..7]), (0, "ab中".as_bytes()));
+        assert_eq!(utf8_window(text), (0, text));
+        // Non-UTF-8 content is passed through untouched.
+        assert_eq!(utf8_window(&[0xff, 0x00]), (0, &[0xff, 0x00][..]));
     }
 
     #[test]

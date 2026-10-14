@@ -196,7 +196,7 @@ impl std::fmt::Debug for Settings {
 
 impl DeepSeekConfig {
     /// Count the entire translated JSON body conservatively at one token per
-    /// UTF-8 byte, including schemas, arguments and protocol framing.
+    /// character, including schemas, arguments and protocol framing.
     pub(crate) fn estimated_request_tokens(
         &self,
         messages: &[serde_json::Value],
@@ -207,7 +207,9 @@ impl DeepSeekConfig {
             Protocol::Responses => responses_body(self, messages, tools, true),
             Protocol::Messages => messages_body(self, messages, tools, true),
         };
-        Ok(serde_json::to_vec(&body)?.len())
+        // One token per character stays an upper bound for common tokenizers
+        // without charging CJK text three tokens for its three UTF-8 bytes.
+        Ok(serde_json::to_string(&body)?.chars().count())
     }
 
     pub fn request_endpoint(&self) -> String {
@@ -1692,7 +1694,7 @@ mod tests {
                         config
                             .estimated_request_tokens(&messages, Some(&specs))
                             .unwrap(),
-                        serde_json::to_vec(&body).unwrap().len()
+                        serde_json::to_string(&body).unwrap().chars().count()
                     );
                 }
             }

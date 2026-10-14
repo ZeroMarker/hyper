@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::Value;
 
 use crate::{
@@ -171,6 +171,55 @@ enum ProfileCommands {
     },
 }
 
+/// A lone lowercase word is far more likely a mistyped subcommand than a task,
+/// and treating it as a prompt silently starts a paid model run. Such a prompt
+/// must be given through `build` or `plan` explicitly.
+fn reject_mistyped_command(prompt: &[String]) -> Result<()> {
+    let [word] = prompt else { return Ok(()) };
+    let looks_like_command = !word.is_empty()
+        && word.len() <= 24
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !looks_like_command {
+        return Ok(());
+    }
+    let commands: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|command| command.get_name().to_owned())
+        .collect();
+    let similar: Vec<&str> = commands
+        .iter()
+        .filter(|name| edit_distance(name, word) <= 2 || name.starts_with(word.as_str()))
+        .map(String::as_str)
+        .collect();
+    let hint = if similar.is_empty() {
+        String::new()
+    } else {
+        format!("did you mean `{}`? ", similar.join("`, `"))
+    };
+    bail!(
+        "`{word}` is not a command; {hint}run `hyper --help` for commands, or `hyper build {word}` to send it to the model as a task"
+    )
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let current = row[j + 1];
+            row[j + 1] = (previous + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(current + 1);
+            previous = current;
+        }
+    }
+    row[b.len()]
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let supports_jsonl = match cli.command.as_ref() {
@@ -204,6 +253,7 @@ pub fn run() -> Result<()> {
         permissions.source.push_str(" + --approval");
     }
     if cli.command.is_none() {
+        reject_mistyped_command(&cli.prompt)?;
         if !cli.jsonl {
             ensure_api_key(false)?;
         }
@@ -736,5 +786,22 @@ mod tests {
         let summary = run_task(&task("good", "bash:echo ok"), dir.path()).unwrap();
         assert_eq!(summary.status, "finished");
         assert!(ensure_success(&summary).is_ok());
+    }
+
+    #[test]
+    fn a_lone_command_like_word_is_not_sent_to_the_model() {
+        let error = reject_mistyped_command(&["paths".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("hyper build paths"), "{error}");
+        let error = reject_mistyped_command(&["stat".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`state`"), "{error}");
+        // Multi-word or non-command-like prompts still run directly.
+        assert!(reject_mistyped_command(&["fix".into(), "tests".into()]).is_ok());
+        assert!(reject_mistyped_command(&["修复测试".into()]).is_ok());
+        assert!(reject_mistyped_command(&["Explain".into()]).is_ok());
+        assert!(reject_mistyped_command(&[]).is_ok());
     }
 }

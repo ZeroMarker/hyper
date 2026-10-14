@@ -21,6 +21,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A lone command-like word such as `hyper paths` is no longer sent to the model
+  as a build task; it is rejected with the closest subcommand. Send one-word
+  tasks with `hyper build <word>`.
+- Request and history budgets count one token per character instead of per
+  UTF-8 byte, so CJK text is no longer charged three tokens per character and
+  no longer exhausts the context budget early.
+- `read` with a byte `offset` no longer starts or ends inside a multi-byte
+  character; the observation reports the offset actually used.
+
 - The TUI header now shows the model the next run will use (environment,
   active profile, then legacy configuration) instead of only
   `DEEPSEEK_MODEL` or the built-in default.
