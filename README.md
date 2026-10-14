@@ -666,8 +666,14 @@ the exact content it edited.
 `read` also accepts a 1-based `line` window: `line` alone reads to the end of the
 file, and an optional `lines` bounds the count. The result carries
 `startLine`/`endLine`/`totalLines`, and `truncated` marks a window cut by the end
-of the file or the 64000-byte per-read cap. A byte `offset` and a line window are
+of the file or the per-read cap. A byte `offset` and a line window are
 mutually exclusive; the whole-file `sha256` is returned either way.
+
+Each `read` returns about 3 KB (3200 JSON-escaped bytes) so the whole result
+fits in one model observation instead of being cut in the middle. A line window
+is cut at whole lines and reports `nextLine`; a byte read is cut at a character
+boundary and reports `nextOffset`. The model continues from there rather than
+re-reading.
 
 A step whose instruction has no tool prefix runs the **tool-calling agent**:
 the model inspects the workspace context, calls tools (`read`, `search`,
@@ -812,7 +818,7 @@ an event that reached the files cannot stay unrecorded.
   omitted from the event. Output beyond 4 MiB is not retained. Each invocation
   has a unique filename. The model can pass an artifact path returned by `bash`
   to `read`, with an optional nonnegative byte `offset` to read later chunks
-  (up to 64 KB per read). This access requires the ordinary `read` permission
+  (about 3 KB per read, continuing from `nextOffset`). This access requires the ordinary `read` permission
   and is limited to artifacts issued by the current run. `read` results
   are not copied — the whole file is still in the workspace — and the
   observations handed to a model are derived from payloads already in the log.

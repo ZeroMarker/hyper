@@ -29,6 +29,12 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer exhausts the context budget early.
 - `read` with a byte `offset` no longer starts or ends inside a multi-byte
   character; the observation reports the offset actually used.
+- `read` returned up to 64 KB, but the model only saw the first and last ~2 KB
+  of it, so it re-read files it had never fully seen. A read now returns about
+  3 KB that fits one observation whole, cut at whole lines for line windows,
+  and reports `nextLine` or `nextOffset`. The tool definition now also
+  advertises the `line`/`lines` window, which the model could not discover
+  before.
 
 - The TUI header now shows the model the next run will use (environment,
   active profile, then legacy configuration) instead of only

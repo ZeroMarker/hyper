@@ -735,8 +735,8 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "read",
-            description: "Read a workspace text file or an output artifact path returned by bash (up to 64 KB). A workspace file reports its sha256; pass that as expectedHash to edit. Use offset to read later bytes.",
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["path"]}),
+            description: "Read a workspace text file or an output artifact path returned by bash, about 3 KB per call. Prefer a 1-based line window (line, optional lines) for workspace files; when truncated, continue from nextLine (or nextOffset for byte reads) instead of re-reading. A workspace file reports its sha256; pass that as expectedHash to edit.",
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"lines":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0}},"required":["path"]}),
         },
         ToolSpec {
             name: "search",
@@ -1502,10 +1502,10 @@ fn line_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Select the requested 1-based line window, capped by the same per-read byte
-/// budget the byte-offset path uses.
+/// Select the requested 1-based line window, capped at whole lines by the same
+/// per-read budget the byte-offset path uses. A single line longer than the
+/// budget is cut at a character boundary.
 fn slice_lines(bytes: &[u8], window: LineWindow) -> (Vec<u8>, LineInfo) {
-    const MAX: usize = 64_000;
     let ranges = line_ranges(bytes);
     let total = ranges.len();
     if window.start > total {
@@ -1520,19 +1520,27 @@ fn slice_lines(bytes: &[u8], window: LineWindow) -> (Vec<u8>, LineInfo) {
         );
     }
     let first = window.start;
-    let last = match window.count {
+    let mut last = match window.count {
         Some(count) => (first + count - 1).min(total),
         None => total,
     };
     let mut content = bytes[ranges[first - 1].0..ranges[last - 1].1].to_vec();
+    let fits = escaped_prefix(&content, READ_CONTENT_BUDGET);
+    let budget_cut = fits < content.len();
+    if budget_cut {
+        let kept = content[..fits]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .unwrap_or(fits);
+        content.truncate(kept);
+        // Whole lines end at the last kept newline; with none, only part of
+        // the first line fit and the window reports just that line.
+        last = first + content.iter().filter(|byte| **byte == b'\n').count();
+    }
     // Clipped means the request could not be fully satisfied: it asked for more
     // lines than exist, or the byte budget cut the window. An open-ended window
     // always reaches the last line, so it is not clipped.
-    let mut truncated = window.count.is_some_and(|count| first + count - 1 > total);
-    if content.len() > MAX {
-        content.truncate(MAX);
-        truncated = true;
-    }
+    let truncated = budget_cut || window.count.is_some_and(|count| first + count - 1 > total);
     (
         content,
         LineInfo {
@@ -1596,6 +1604,7 @@ fn read(
                 let start = offset.min(total) as usize;
                 let end = (start + 64_000).min(bytes.len());
                 let (skipped, content) = utf8_window(&bytes[start..end]);
+                let content = &content[..escaped_prefix(content, READ_CONTENT_BUDGET)];
                 read_from = (start + skipped) as u64;
                 let truncated = read_from + (content.len() as u64) < total;
                 (content.to_vec(), total, Some(digest), None, truncated)
@@ -1612,14 +1621,24 @@ fn read(
         let mut bytes = Vec::new();
         file.take(64_000).read_to_end(&mut bytes)?;
         let (skipped, content) = utf8_window(&bytes);
+        let content = &content[..escaped_prefix(content, READ_CONTENT_BUDGET)];
         read_from = offset.min(total) + skipped as u64;
         let truncated = read_from + (content.len() as u64) < total;
         (content.to_vec(), total, None, None, truncated)
     };
     let mut payload = json!({"path":path,"content":String::from_utf8_lossy(&content),
         "truncated":truncated,"bytes":total});
-    if lines.is_none() {
-        payload["offset"] = json!(read_from);
+    match &lines {
+        None => {
+            payload["offset"] = json!(read_from);
+            if truncated {
+                payload["nextOffset"] = json!(read_from + content.len() as u64);
+            }
+        }
+        Some(info) if info.end < info.total && info.end >= info.start => {
+            payload["nextLine"] = json!(info.end + 1);
+        }
+        Some(_) => {}
     }
     if let Some(info) = &lines {
         payload["startLine"] = json!(info.start);
@@ -1643,6 +1662,31 @@ fn read(
     event_payload["artifact"] = json!(artifact);
     events.write("tool.finished", event_payload, Some(&step.id), Some(index))?;
     Ok((true, payload))
+}
+
+/// The most content one `read` returns, measured as JSON-escaped bytes so the
+/// whole result fits in one observation (`MAX_OBSERVATION`) instead of being cut
+/// in the middle, which leaves the model re-reading what it never saw.
+const READ_CONTENT_BUDGET: usize = 3_200;
+
+/// The longest prefix of `bytes`, on a character boundary, whose JSON-escaped
+/// form fits `budget`. Bytes that are not UTF-8 are bounded conservatively.
+fn escaped_prefix(bytes: &[u8], budget: usize) -> usize {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.len().min(budget / 6);
+    };
+    let mut used = 0;
+    for (index, ch) in text.char_indices() {
+        used += match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
+        };
+        if used > budget {
+            return index;
+        }
+    }
+    bytes.len()
 }
 
 /// Trim a byte window to whole UTF-8 characters: skip continuation bytes cut off
@@ -3518,6 +3562,58 @@ mod tests {
         });
     }
 
+    /// A large read must arrive whole in one observation, ending on a line
+    /// boundary and naming where to continue, so the model pages forward
+    /// instead of re-reading content the observation cut out.
+    #[test]
+    fn large_reads_fit_one_observation_and_say_where_to_continue() {
+        with_events(|events, run, root| {
+            let text: String = (1..=300)
+                .map(|n| format!("line {n}: \"quoted\" 深圳 text\n"))
+                .collect();
+            fs::write(root.join("big.txt"), &text).unwrap();
+            let step = gated_step(vec!["read"]);
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"big.txt","line":1}"#,
+            );
+            let payload: Value = serde_json::from_str(&observation)
+                .unwrap_or_else(|error| panic!("{error}: {observation}"));
+            let end = payload["endLine"].as_u64().unwrap();
+            assert!(end > 10 && end < 300, "{end}");
+            assert_eq!(payload["truncated"], true);
+            assert_eq!(payload["nextLine"], end + 1);
+            assert!(
+                payload["content"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&format!("line {end}: \"quoted\" 深圳 text"))
+            );
+
+            let observation = run_agent_tool(
+                events,
+                run,
+                root,
+                &step,
+                0,
+                "read",
+                r#"{"path":"big.txt","offset":5}"#,
+            );
+            let payload: Value = serde_json::from_str(&observation)
+                .unwrap_or_else(|error| panic!("{error}: {observation}"));
+            let content = payload["content"].as_str().unwrap();
+            assert_eq!(
+                payload["nextOffset"].as_u64().unwrap(),
+                5 + content.len() as u64
+            );
+        });
+    }
+
     #[test]
     fn read_line_windows_select_a_range_and_report_it() {
         with_events(|events, run, root| {
@@ -3595,7 +3691,11 @@ mod tests {
                     .unwrap();
             let step = gated_step(vec!["read"]);
             let (_, first) = read(events, root, &step, 0, &reference, 0, None).unwrap();
-            assert_eq!(first["content"].as_str().unwrap().len(), 64_000);
+            assert_eq!(
+                first["content"].as_str().unwrap().len(),
+                READ_CONTENT_BUDGET
+            );
+            assert_eq!(first["nextOffset"], READ_CONTENT_BUDGET);
             assert_eq!(first["truncated"], true);
             let (_, tail) = read(events, root, &step, 0, &reference, 70_000, None).unwrap();
             assert_eq!(tail["content"], "TAIL");
