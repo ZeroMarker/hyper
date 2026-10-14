@@ -14,6 +14,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Switch provider profiles inside the TUI.** `/profile` lists the configured
   profiles and marks the active one; `/profile <name>` makes it active, and the
   next message already uses it.
+- **Configurable turn limit and request timeout.** `HYPER_MAX_TURNS`
+  (default 12, up to 200) sets how many tool-calling turns an agent step may
+  take, and `HYPER_REQUEST_TIMEOUT_SECS` (default 120, up to 3600) sets the
+  per-request model timeout.
 
 ### Fixed
 

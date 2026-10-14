@@ -26,7 +26,23 @@ type TextCallback<'a> = dyn FnMut(&str) -> Result<()> + 'a;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// Per-request timeout; slow models or long outputs may need more than the default.
+fn request_timeout() -> Result<Duration> {
+    match env::var("HYPER_REQUEST_TIMEOUT_SECS") {
+        Ok(value) => parse_request_timeout(&value),
+        Err(env::VarError::NotPresent) => Ok(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+        Err(error) => Err(error).context("invalid HYPER_REQUEST_TIMEOUT_SECS"),
+    }
+}
+
+fn parse_request_timeout(value: &str) -> Result<Duration> {
+    match value.trim().parse::<u64>() {
+        Ok(secs) if (1..=3600).contains(&secs) => Ok(Duration::from_secs(secs)),
+        _ => bail!("HYPER_REQUEST_TIMEOUT_SECS must be an integer from 1 to 3600"),
+    }
+}
 const MAX_API_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -217,7 +233,7 @@ impl DeepSeekConfig {
     }
 
     fn new(settings: Settings) -> Result<Self> {
-        Self::with_timeout(settings, REQUEST_TIMEOUT)
+        Self::with_timeout(settings, request_timeout()?)
     }
 
     fn with_timeout(settings: Settings, timeout: Duration) -> Result<Self> {
@@ -1141,6 +1157,17 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn request_timeout_accepts_bounded_seconds() {
+        assert_eq!(
+            parse_request_timeout("300").unwrap(),
+            Duration::from_secs(300)
+        );
+        for invalid in ["0", "3601", "1.5", "slow"] {
+            assert!(parse_request_timeout(invalid).is_err(), "{invalid:?}");
+        }
+    }
     use tempfile::tempdir;
 
     /// Answers one request with `body`, handing back the raw request it read, so

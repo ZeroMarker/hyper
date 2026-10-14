@@ -446,10 +446,10 @@ fn agent(
     index: usize,
     prompt: &str,
 ) -> Result<(bool, Value)> {
-    const MAX_TURNS: usize = 12;
     /// Identical tool call plus identical failure, repeated this many times in a
     /// row, is a loop with no new information; stop rather than burn every turn.
     const MAX_IDENTICAL_FAILURES: usize = 3;
+    let max_turns = crate::context::max_turns()?;
     let mut config = events.model_config()?;
     config.cancellation = events.cancellation.clone();
     let history_budget = history_budget()?;
@@ -503,7 +503,7 @@ fn agent(
         .iter()
         .map(|message| json!({"role":message.role,"content":message.content}))
         .collect();
-    let mut started = json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":MAX_TURNS,"input":input,
+    let mut started = json!({"provider":config.provider,"baseUrl":config.base_url,"model":config.model,"protocol":config.protocol.as_str(),"agent":true,"maxTurns":max_turns,"input":input,
             "projectInstructions":instructions.iter().map(|i| json!({"source":i.source,"bytes":i.bytes,"truncated":i.truncated})).collect::<Vec<_>>(),
             "systemPrompt":system,"history":history_messages,
             "historyBudget":{"maxEstimatedTokens":history_budget,"estimatedTokens":history.iter().map(estimated_tokens).sum::<usize>(),"keptMessages":history.len(),"droppedMessages":events.history.len()-history.len()}});
@@ -521,7 +521,7 @@ fn agent(
     // loop appends comes after it, and in-loop compaction only ever rewrites
     // that suffix.
     let input_index = 1 + history.len();
-    for turn in 0..MAX_TURNS {
+    for turn in 0..max_turns {
         events.cancellation.check()?;
         let mut estimated = config.estimated_request_tokens(&messages, Some(&specs))?;
         // Before a request that would not fit, summarize the loop's older tool
@@ -686,7 +686,7 @@ fn agent(
                     )?;
                     bail!(
                         "agent repeated the identical {} call {identical_failures} times with the same result; \
-                         stopping instead of exhausting {MAX_TURNS} turns. Last error: {}",
+                         stopping instead of exhausting {max_turns} turns. Last error: {}",
                         call.function.name,
                         observation.lines().next().unwrap_or("")
                     );
@@ -714,7 +714,7 @@ fn agent(
             events.cancellation.check()?;
         }
     }
-    bail!("agent exceeded {MAX_TURNS} tool-calling turns")
+    bail!("agent exceeded {max_turns} tool-calling turns; set HYPER_MAX_TURNS to allow more")
 }
 
 /// The assistant turn as the conversation carries it: `content` is `null` when

@@ -86,6 +86,25 @@ impl RequestBudget {
     }
 }
 
+/// How many tool-calling turns one agent step may take before it gives up.
+pub(crate) const DEFAULT_MAX_TURNS: usize = 12;
+const MAX_TURNS_CEILING: usize = 200;
+
+pub(crate) fn max_turns() -> Result<usize> {
+    match std::env::var("HYPER_MAX_TURNS") {
+        Ok(value) => parse_max_turns(&value),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MAX_TURNS),
+        Err(error) => Err(error).context("invalid HYPER_MAX_TURNS"),
+    }
+}
+
+fn parse_max_turns(value: &str) -> Result<usize> {
+    match value.trim().parse::<usize>() {
+        Ok(turns) if (1..=MAX_TURNS_CEILING).contains(&turns) => Ok(turns),
+        _ => bail!("HYPER_MAX_TURNS must be an integer from 1 to {MAX_TURNS_CEILING}"),
+    }
+}
+
 pub(crate) fn history_budget() -> Result<usize> {
     match std::env::var("HYPER_HISTORY_TOKENS") {
         Ok(value) => parse_budget(&value),
@@ -242,6 +261,15 @@ pub(crate) fn keep_suffix_start(history: &[SessionMessage], keep_turns: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_turns_accepts_a_bounded_positive_integer() {
+        assert_eq!(parse_max_turns("30").unwrap(), 30);
+        assert_eq!(parse_max_turns(" 1 ").unwrap(), 1);
+        for invalid in ["0", "201", "-1", "many", ""] {
+            assert!(parse_max_turns(invalid).is_err(), "{invalid:?}");
+        }
+    }
 
     #[test]
     fn request_budget_reserves_output_and_validates_configuration() {

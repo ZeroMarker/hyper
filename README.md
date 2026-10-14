@@ -342,6 +342,12 @@ your model; these defaults are local budgets, not detected model capabilities.
 The output cap is sent as `max_tokens` for Chat/Messages and
 `max_output_tokens` for Responses.
 
+An agent step stops after `HYPER_MAX_TURNS` tool-calling turns (default: `12`,
+up to `200`); raise it for long multi-file tasks. Each model request times out
+after `HYPER_REQUEST_TIMEOUT_SECS` (default: `120`, up to `3600`); network
+errors and retryable statuses are retried with backoff. Both values are
+recorded on `model.started` and `provider.resolved`.
+
 Before each request, Hyper conservatively estimates the entire translated
 JSON body at one token per UTF-8 byte, including system/input messages,
 workspace context, tool schemas, arguments and observations. Initial requests
