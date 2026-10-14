@@ -428,8 +428,15 @@ printed on stdout. Subcommand prompts may be passed unquoted as several words:
 `ha plan fix the login bug` is the same as `ha -p "fix the login bug"`.
 
 The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode (or
-complete a slash command), `Enter` to submit, arrow keys to scroll or choose a
-slash-command suggestion. While running, `Esc` or `Ctrl-C` cancels the current
+complete a slash command) and `Enter` to submit. The message box edits like a
+shell line: `←`/`→` (with `Ctrl`/`Alt` by word), `Home`/`End` or
+`Ctrl-A`/`Ctrl-E`, `Ctrl-W` (word), `Ctrl-U`/`Ctrl-K` (to line start/end),
+`Delete`. `Shift-Enter` or `Alt-Enter` (where the terminal reports them),
+`Ctrl-J`, or a trailing `\` adds a line; pasted text keeps its newlines and is
+never sent by them. `↑`/`↓` move between lines of a multi-line message, then
+recall earlier messages (kept per workspace in its state directory, owner-only,
+up to 500); `PageUp`/`PageDown` and the mouse wheel scroll the chat, and with an
+empty box `Home`/`End` jump to its top or latest. While running, `Esc` or `Ctrl-C` cancels the current
 run. While idle, `Esc` clears the input and never exits; `Ctrl-C` clears the
 input first, and on an empty input exits only when pressed twice within two
 seconds (or use `/quit`). In an approval modal, `Esc` denies that action and

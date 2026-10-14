@@ -35,7 +35,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unified diff, and commands are shown whole and wrapped instead of cut to one
   line.
 
+- **A real message box.** Cursor movement and shell-style line editing
+  (`Ctrl-A/E/W/U/K`, word jumps, `Delete`); multi-line messages via
+  `Shift/Alt-Enter`, `Ctrl-J` or a trailing `\`, growing up to eight rows;
+  bracketed paste so pasted newlines never send the message; and `↑`/`↓`
+  history of earlier messages, saved per workspace.
+
 ### Changed
+
+- `↑`/`↓` recall input history instead of scrolling the chat; scroll with
+  `PageUp`/`PageDown` or the mouse wheel.
 
 - In the TUI, `Esc` no longer exits while idle; it clears the input. `Ctrl-C`
   clears the input first and exits only on a second press within two seconds.

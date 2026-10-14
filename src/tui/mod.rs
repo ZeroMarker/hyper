@@ -1,3 +1,4 @@
+mod input;
 mod overlay;
 mod ui;
 
@@ -11,8 +12,8 @@ use crate::{
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
 };
@@ -26,7 +27,8 @@ use std::{
 
 pub struct App {
     pub root: PathBuf,
-    pub input: String,
+    pub input: input::Input,
+    pub history: input::History,
     pub mode: AgentMode,
     pub execution_mode: ExecutionMode,
     pub permissions: crate::ToolPermissions,
@@ -76,9 +78,16 @@ impl App {
     fn new(root: PathBuf, session: Option<String>, execution_mode: ExecutionMode) -> Self {
         let (tx, rx) = mpsc::channel();
         let model = profiles::current_model();
+        // Per workspace, beside its runs and sessions, never in the checkout.
+        let history = input::History::load(
+            crate::state::directory(&root)
+                .ok()
+                .map(|dir| dir.join("input_history.jsonl")),
+        );
         Self {
             root,
-            input: String::new(),
+            input: input::Input::default(),
+            history,
             mode: AgentMode::Build,
             execution_mode,
             permissions: crate::ToolPermissions::default(),
@@ -118,7 +127,7 @@ impl App {
         }
     }
     fn submit(&mut self) {
-        let value = self.input.trim().to_owned();
+        let value = self.input.text.trim().to_owned();
         if value == "/cancel" {
             self.input.clear();
             self.cancel_active();
@@ -132,6 +141,7 @@ impl App {
         if value.is_empty() || self.busy {
             return;
         }
+        self.history.push(&value);
         self.input.clear();
         match value.as_str() {
             "/quit" | "/exit" => self.request_quit(),
@@ -460,7 +470,7 @@ impl App {
     /// Ctrl-C while idle: clear a draft first, and quit only on a second press
     /// within two seconds, so one stray keystroke never ends the session.
     fn interrupt_idle(&mut self) {
-        if !self.input.is_empty() {
+        if !self.input.text.is_empty() {
             self.input.clear();
             self.command_index = 0;
             self.quit_armed = None;
@@ -487,7 +497,7 @@ impl App {
     }
 
     pub fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        if !self.input.starts_with('/') || self.input.contains(' ') {
+        if !self.input.text.starts_with('/') || self.input.text.contains(char::is_whitespace) {
             return Vec::new();
         }
         let commands = [
@@ -529,7 +539,7 @@ impl App {
         ];
         commands
             .into_iter()
-            .filter(|(command, _)| command.starts_with(&self.input))
+            .filter(|(command, _)| command.starts_with(self.input.text.as_str()))
             .collect()
     }
 
@@ -554,7 +564,7 @@ impl App {
         else {
             return false;
         };
-        self.input = (*command).into();
+        self.input.set(*command);
         self.command_index = 0;
         true
     }
@@ -651,6 +661,8 @@ impl App {
                     }
                 }
                 Message::Task(r) => {
+                    // A first run creates the workspace storage history waits on.
+                    self.history.flush();
                     self.busy = false;
                     self.cancellation = None;
                     self.gate = None;
@@ -673,6 +685,111 @@ impl App {
                         ))
                     ));
                 }
+            }
+        }
+    }
+
+    /// Keys for the message box and chat while no modal or overlay is open.
+    fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        let alt = modifiers.contains(KeyModifiers::ALT);
+        let editing = !self.input.text.is_empty();
+        if !matches!(code, KeyCode::Up | KeyCode::Down) && !matches!(code, KeyCode::Char(_) if ctrl)
+        {
+            self.command_index = 0;
+        }
+        match code {
+            // Esc never quits: it cancels a run or clears the draft.
+            KeyCode::Esc if self.busy => self.cancel_active(),
+            KeyCode::Esc => self.input.clear(),
+            KeyCode::Tab => {
+                if !self.complete_command() {
+                    self.mode = if self.mode == AgentMode::Build {
+                        AgentMode::Plan
+                    } else {
+                        AgentMode::Build
+                    }
+                }
+            }
+            // Shift/Alt-Enter (where the terminal reports them) and Ctrl-J add
+            // a line; a trailing `\` works in every terminal.
+            KeyCode::Enter if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+                self.input.insert("\n")
+            }
+            KeyCode::Char('j') if ctrl => self.input.insert("\n"),
+            KeyCode::Enter if self.input.ends_with_continuation() => self.input.continue_line(),
+            KeyCode::Enter => {
+                self.complete_command();
+                self.submit();
+            } // While recalling history, a recalled `/command` must not hand ↑/↓
+            // to the command palette.
+            KeyCode::Up if !self.history.browsing() && !self.command_suggestions().is_empty() => {
+                self.move_command_up()
+            }
+            KeyCode::Down if !self.history.browsing() && !self.command_suggestions().is_empty() => {
+                self.move_command_down()
+            }
+            KeyCode::Up => {
+                if !self.input.up() {
+                    match self.history.previous(&self.input.text) {
+                        Some(entry) => {
+                            let entry = entry.to_owned();
+                            self.input.set(entry);
+                        }
+                        None => self.scroll_up(1),
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if !self.input.down() {
+                    match self.history.next() {
+                        Some(entry) => {
+                            let entry = entry.to_owned();
+                            self.input.set(entry);
+                        }
+                        None => self.scroll_down(1),
+                    }
+                }
+            }
+            KeyCode::Left if ctrl || alt => self.input.word_left(),
+            KeyCode::Right if ctrl || alt => self.input.word_right(),
+            KeyCode::Left => self.input.left(),
+            KeyCode::Right => self.input.right(),
+            // With an empty box Home/End jump the chat, as before.
+            KeyCode::Home if editing => self.input.home(),
+            KeyCode::End if editing => self.input.end(),
+            KeyCode::Home => {
+                self.follow_tail = false;
+                self.scroll = u16::MAX;
+            }
+            KeyCode::End => {
+                self.follow_tail = true;
+                self.scroll = 0;
+            }
+            KeyCode::PageUp => self.scroll_up(8),
+            KeyCode::PageDown => self.scroll_down(8),
+            KeyCode::Backspace if ctrl || alt => self.input.delete_word(),
+            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete => self.input.delete(),
+            KeyCode::Char('a') if ctrl => self.input.home(),
+            KeyCode::Char('e') if ctrl => self.input.end(),
+            KeyCode::Char('w') if ctrl => self.input.delete_word(),
+            KeyCode::Char('u') if ctrl => self.input.kill_to_start(),
+            KeyCode::Char('k') if ctrl => self.input.kill_to_end(),
+            KeyCode::Char('b') if alt => self.input.word_left(),
+            KeyCode::Char('f') if alt => self.input.word_right(),
+            // Other control chords are not text.
+            KeyCode::Char(_) if ctrl || alt => {}
+            KeyCode::Char(c) => self.input.insert(c.encode_utf8(&mut [0; 4])),
+            _ => {}
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        if self.approvals.is_empty() {
+            match &mut self.overlay {
+                Some(overlay) => overlay.paste(text),
+                None => self.input.insert(text),
             }
         }
     }
@@ -730,7 +847,9 @@ pub fn run_with_permissions(
     permissions: crate::ToolPermissions,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    execute!(std::io::stdout(), EnableMouseCapture)?;
+    // Bracketed paste delivers a paste as one event, so its newlines land in
+    // the message instead of each one sending it.
+    execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = (|| {
         let mut app = App::new(root, session, execution_mode);
         app.permissions = permissions;
@@ -749,6 +868,10 @@ pub fn run_with_permissions(
                     MouseEventKind::ScrollDown => app.scroll_down(3),
                     _ => {}
                 }
+                continue;
+            }
+            if let Event::Paste(text) = input_event {
+                app.paste(&text);
                 continue;
             }
             let Event::Key(k) = input_event else { continue };
@@ -782,69 +905,17 @@ pub fn run_with_permissions(
                 app.overlay_key(k.code);
                 continue;
             }
-            match (k.code, k.modifiers) {
-                // Esc never quits: it cancels a run or clears the draft.
-                (KeyCode::Esc, _) => {
-                    if app.busy {
-                        app.cancel_active();
-                    } else {
-                        app.input.clear();
-                        app.command_index = 0;
-                    }
-                }
-                (KeyCode::Tab, _) => {
-                    if !app.complete_command() {
-                        app.mode = if app.mode == AgentMode::Build {
-                            AgentMode::Plan
-                        } else {
-                            AgentMode::Build
-                        }
-                    }
-                }
-                (KeyCode::Up, _) => {
-                    if app.command_suggestions().is_empty() {
-                        app.scroll_up(1)
-                    } else {
-                        app.move_command_up()
-                    }
-                }
-                (KeyCode::Down, _) => {
-                    if app.command_suggestions().is_empty() {
-                        app.scroll_down(1)
-                    } else {
-                        app.move_command_down()
-                    }
-                }
-                (KeyCode::PageUp, _) => app.scroll_up(8),
-                (KeyCode::PageDown, _) => app.scroll_down(8),
-                (KeyCode::Home, _) => {
-                    app.follow_tail = false;
-                    app.scroll = u16::MAX;
-                }
-                (KeyCode::End, _) => {
-                    app.follow_tail = true;
-                    app.scroll = 0;
-                }
-                (KeyCode::Enter, _) => {
-                    app.complete_command();
-                    app.submit();
-                }
-                (KeyCode::Backspace, _) => {
-                    app.input.pop();
-                    app.command_index = 0;
-                }
-                (KeyCode::Char(c), _) => {
-                    app.input.push(c);
-                    app.command_index = 0;
-                }
-                _ => {}
-            }
+            app.key(k.code, k.modifiers);
         }
         // Unblock any tool waiting on an approval when we are quitting.
         app.deny_all();
         Ok(())
     })();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     result
 }
@@ -857,7 +928,7 @@ mod tests {
     fn cancel_command_unblocks_modal_and_conversation_can_continue() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
-        app.input = "write:out.txt\nwrong".into();
+        app.input.set("write:out.txt\nwrong");
         app.submit();
         let started = std::time::Instant::now();
         while app.approvals.is_empty() {
@@ -865,7 +936,7 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(3));
             std::thread::sleep(Duration::from_millis(10));
         }
-        app.input = "/cancel".into();
+        app.input.set("/cancel");
         app.submit();
         while app.busy {
             app.poll();
@@ -881,7 +952,7 @@ mod tests {
                 || app.output.last().unwrap().contains("取消")
         );
         let session = app.session.clone().unwrap();
-        app.input = "write:out.txt\nok".into();
+        app.input.set("write:out.txt\nok");
         app.submit();
         while app.busy {
             app.poll();
@@ -908,7 +979,7 @@ mod tests {
     fn quit_waits_for_active_run_to_settle() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
-        app.input = "write:out.txt\nwrong".into();
+        app.input.set("write:out.txt\nwrong");
         app.submit();
         app.request_quit();
         assert!(!app.quit);
@@ -935,7 +1006,7 @@ mod tests {
     fn process_cancellation_stops_worker_without_ui_poll() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
-        app.input = "write:out.txt\nwrong".into();
+        app.input.set("write:out.txt\nwrong");
         app.submit();
         let started = std::time::Instant::now();
         let mut pending = Vec::new();
@@ -966,16 +1037,16 @@ mod tests {
     #[test]
     fn slash_input_filters_and_completes_commands() {
         let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
-        app.input = "/mo".into();
+        app.input.set("/mo");
         assert_eq!(app.command_suggestions().len(), 3);
         assert!(app.complete_command());
-        assert_eq!(app.input, "/mode plan");
-        app.input = "/model".into();
+        assert_eq!(app.input.text, "/mode plan");
+        app.input.set("/model");
         assert!(app.complete_command());
-        assert_eq!(app.input, "/model");
-        app.input = "/pro".into();
+        assert_eq!(app.input.text, "/model");
+        app.input.set("/pro");
         assert!(app.complete_command());
-        assert_eq!(app.input, "/profile");
+        assert_eq!(app.input.text, "/profile");
     }
 
     fn request(tool: &str, detail: &str) -> (ApprovalRequest, std::sync::mpsc::Receiver<bool>) {
@@ -1062,13 +1133,65 @@ mod tests {
         );
     }
 
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn message_box_edits_mid_line_and_adds_lines_without_sending() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        type_text(&mut app, "fix tst");
+        app.key(KeyCode::Left, KeyModifiers::NONE);
+        app.key(KeyCode::Left, KeyModifiers::NONE);
+        type_text(&mut app, "e");
+        assert_eq!(app.input.text, "fix test");
+        app.key(KeyCode::End, KeyModifiers::NONE);
+        app.key(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.input.text, "fix ",
+            "Ctrl-W deletes a word, never types 'w'"
+        );
+        type_text(&mut app, "it");
+        app.key(KeyCode::Enter, KeyModifiers::SHIFT);
+        app.key(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        type_text(&mut app, "more \\");
+        app.key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.input.text, "fix it\n\nmore \n");
+        assert!(app.output.len() == 1, "nothing was sent");
+        // A multi-line paste stays in the box.
+        app.input.clear();
+        app.paste("line one\r\nline two");
+        assert_eq!(app.input.text, "line one\nline two");
+        assert_eq!(app.output.len(), 1);
+    }
+
+    #[test]
+    fn up_and_down_recall_earlier_messages() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        app.history = input::History::load(None);
+        for command in ["/session", "/help"] {
+            type_text(&mut app, command);
+            app.key(KeyCode::Enter, KeyModifiers::NONE);
+        }
+        type_text(&mut app, "draft");
+        app.key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input.text, "/help");
+        app.key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input.text, "/session");
+        app.key(KeyCode::Down, KeyModifiers::NONE);
+        app.key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.input.text, "draft", "the draft comes back");
+    }
+
     #[test]
     fn esc_and_a_single_ctrl_c_never_quit_an_idle_session() {
         let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
-        app.input = "draft".into();
+        app.input.set("draft");
         app.interrupt_idle();
         assert!(
-            app.input.is_empty() && !app.quit,
+            app.input.text.is_empty() && !app.quit,
             "the first Ctrl-C clears the draft"
         );
         app.interrupt_idle();
@@ -1088,7 +1211,7 @@ mod tests {
     #[test]
     fn connect_walks_from_presets_to_the_form_and_esc_closes() {
         let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
-        app.input = "/connect".into();
+        app.input.set("/connect");
         app.submit();
         assert!(matches!(&app.overlay, Some(Overlay::Picker(p)) if p.kind == PickerKind::Preset));
         app.overlay_key(KeyCode::Down);
@@ -1100,7 +1223,7 @@ mod tests {
         app.overlay_key(KeyCode::Esc);
         assert!(app.overlay.is_none());
         assert!(
-            app.input.is_empty(),
+            app.input.text.is_empty(),
             "overlay keys never reach the message box"
         );
     }
@@ -1117,7 +1240,7 @@ mod tests {
         );
         app.session = Some("previous-chat".into());
         app.output.push("You\nsomething private".into());
-        app.input = "/new".into();
+        app.input.set("/new");
         app.submit();
 
         assert_eq!(
@@ -1138,7 +1261,7 @@ mod tests {
             app.output
         );
 
-        app.input = "/session".into();
+        app.input.set("/session");
         app.submit();
         let reported = app.output.last().unwrap();
         assert!(
@@ -1158,7 +1281,7 @@ mod tests {
             ExecutionMode::default(),
         );
         assert_eq!(app.session.as_deref(), Some("chat-1"));
-        app.input = "/session".into();
+        app.input.set("/session");
         app.submit();
         assert!(
             app.output.last().unwrap().contains("chat-1"),

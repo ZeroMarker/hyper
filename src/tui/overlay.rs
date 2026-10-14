@@ -192,6 +192,19 @@ pub enum Action {
 }
 
 impl Overlay {
+    /// A paste goes into the filter or the focused field on one line; a key
+    /// copied with a trailing newline must not carry it.
+    pub fn paste(&mut self, text: &str) {
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        match self {
+            Overlay::Picker(picker) => {
+                picker.filter.push_str(&text);
+                picker.selected = 0;
+            }
+            Overlay::Form(form) => form.fields[form.focus].value.push_str(&text),
+        }
+    }
+
     pub fn key(&mut self, code: KeyCode) -> Option<Action> {
         match self {
             Overlay::Picker(picker) => picker.key(code),

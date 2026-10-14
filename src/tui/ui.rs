@@ -32,12 +32,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.rendered.push(Line::from(""));
     }
     app.rendered_count = app.output.len();
+    let (input_rows, cursor_row, cursor_column) =
+        wrap_input(&app.input, frame.area().width.saturating_sub(2).max(1));
+    // The box grows with the message, up to eight rows, then scrolls.
+    let input_height = input_rows.len().clamp(1, 8) as u16;
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(3),
+            Constraint::Length(input_height + 2),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -161,23 +165,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         areas[1],
     );
 
-    let input_width = UnicodeWidthStr::width(app.input.as_str()) as u16;
-    let visible_width = areas[2].width.saturating_sub(2).max(1);
-    let horizontal_scroll = input_width.saturating_sub(visible_width.saturating_sub(1));
+    // Keep the cursor's row in view.
+    let scroll = cursor_row.saturating_sub(input_height.saturating_sub(1));
+    let multiline = input_rows.len() > 1;
     frame.render_widget(
-        Paragraph::new(app.input.as_str())
-            .scroll((0, horizontal_scroll))
+        Paragraph::new(input_rows.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .scroll((scroll, 0))
             .block(
                 Block::default()
-                    .title(" Message ")
+                    .title(if multiline {
+                        i18n::text(
+                            " Message — Enter send · Shift/Alt-Enter or Ctrl-J newline ",
+                            " 消息 — Enter 发送 · Shift/Alt-Enter 或 Ctrl-J 换行 ",
+                        )
+                    } else {
+                        " Message "
+                    })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(mode_color)),
             ),
         areas[2],
     );
     frame.set_cursor_position((
-        areas[2].x + 1 + input_width.saturating_sub(horizontal_scroll),
-        areas[2].y + 1,
+        areas[2].x + 1 + cursor_column,
+        areas[2].y + 1 + cursor_row - scroll,
     ));
 
     render_approval(frame, app, areas[2]);
@@ -201,8 +212,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             i18n::text(" Press Ctrl-C again to exit", " 再按一次 Ctrl-C 退出")
         }
         None => i18n::text(
-            " ↑↓ Scroll  End Latest  Tab Mode  Enter Send  /model Model  Esc Clear/Cancel  Ctrl-C×2 Exit",
-            " ↑↓ 滚动  End 最新  Tab 模式  Enter 发送  /model 模型  Esc 清空/取消  Ctrl-C×2 退出",
+            " ↑↓ History  PgUp/PgDn Scroll  Tab Mode  Enter Send  Ctrl-J Newline  /model Model  Esc Clear/Cancel  Ctrl-C×2 Exit",
+            " ↑↓ 历史  PgUp/PgDn 滚动  Tab 模式  Enter 发送  Ctrl-J 换行  /model 模型  Esc 清空/取消  Ctrl-C×2 退出",
         ),
     };
     frame.render_widget(
@@ -311,6 +322,44 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
         ),
         area,
     );
+}
+
+/// Split the message into display rows of at most `width` columns, wrapping at
+/// any character so the cursor maps to an exact cell. Returns the rows and the
+/// cursor's row and column.
+fn wrap_input(input: &super::input::Input, width: u16) -> (Vec<String>, u16, u16) {
+    use unicode_width::UnicodeWidthChar;
+    let width = width as usize;
+    let cursor = input.cursor.min(input.text.len());
+    let mut rows = vec![String::new()];
+    let mut column = 0usize;
+    let mut position = (0, 0);
+    for (index, ch) in input.text.char_indices() {
+        if index == cursor {
+            position = (rows.len() - 1, column);
+        }
+        if ch == '\n' {
+            rows.push(String::new());
+            column = 0;
+            continue;
+        }
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if column + ch_width > width {
+            rows.push(String::new());
+            column = 0;
+        }
+        rows.last_mut().expect("rows start non-empty").push(ch);
+        column += ch_width;
+    }
+    if cursor >= input.text.len() {
+        // A cursor at the end of a full row starts the next one.
+        if column >= width {
+            rows.push(String::new());
+            column = 0;
+        }
+        position = (rows.len() - 1, column);
+    }
+    (rows, position.0 as u16, position.1 as u16)
 }
 
 /// A box centered in the frame, `percent` of its width and up to `height` rows.
@@ -536,4 +585,27 @@ fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
             Line::from(spans).style(style)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::input::Input;
+
+    #[test]
+    fn input_wraps_by_cell_and_places_the_cursor() {
+        let mut input = Input::default();
+        input.set("abcdef\n深圳x");
+        let (rows, row, column) = wrap_input(&input, 4);
+        assert_eq!(rows, ["abcd", "ef", "深圳", "x"]);
+        assert_eq!((row, column), (3, 1));
+        input.cursor = 7; // just after the newline
+        let (_, row, column) = wrap_input(&input, 4);
+        assert_eq!((row, column), (2, 0));
+        input.set("abcd");
+        assert_eq!(
+            wrap_input(&input, 4),
+            (vec!["abcd".into(), String::new()], 1, 0)
+        );
+    }
 }
