@@ -12,7 +12,7 @@
 
 ### P1：提高任务完成率
 
-- [ ] **真实模型基线（优先）**：最近基线为 `f8a1cc7`/`b8464f9` 时期；其后的压缩（手动/自动/循环内）、`read` 行窗口、`AGENTS.md`、`edit` 唯一匹配与 verify 闭环、Messages 停止语义均未跑真实基线，成本未知。按既有口径跑一轮并保留失败样本。
+- [ ] **真实模型基线后续**：`1125252` 已按既有口径跑通 30/30（见 [报告](evals/baselines/2026-10-14-tui-usability/report.md)）。剩余：压缩（`HYPER_AUTOCOMPACT`/`HYPER_LOOP_COMPACT`）与 verify 闭环在默认关闭时未被套件覆盖；long-session 最后一轮请求数与 token 波动需更多重复次数判断；成本仍未知。
 - [ ] **P1-2 相关上下文**：剩余按 prompt/路径/语言的相关性摘录选择、Python/JS 覆盖与 repo map/语法索引，以固定任务集比较收益。（行/字节范围读取已交付。）
 - [ ] **P1-3 编辑和验证闭环**：剩余 Hashline/patch 选型；原子写入、重复块、并发变更、快照与 Unicode 已验证。（唯一匹配、陈旧 hash、verify 有限重试与评测指标已交付。）
 - [ ] **P1-4 项目说明**：剩余目录 override 合并语义（当前只按固定顺序拼接）与按需 skills。（根与目录 `AGENTS.md` 加载已交付。）

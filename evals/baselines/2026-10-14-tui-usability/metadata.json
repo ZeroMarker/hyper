@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "suite_version": 1,
+  "started_at": "2026-10-14T08:04:15.115500+00:00",
+  "revision": "1125252d34ff459df678c82705510ad83d8acc92",
+  "dirty": false,
+  "binary_sha256": "e62e6bd82db766fb39504b1deefcb282418196689a67041d6a29a8950e8ce257",
+  "suite_sha256": "b287f862920e7f4ff6dc416e39529bb0f0582912dc51fccdcd2aabf805ece035",
+  "grader_sha256": "45df6817a20aec7a602a4ccfb606974603ee61ddf5c1c44b06cb744293c0bde9",
+  "fixtures_sha256": "006e153d32a89b1e25a4f7c6b22eef343c4ba30201e30d08e7cd3608d73583f5",
+  "runner_sha256": "577e0b99face20d55f3a3535a2d749d746345a47573baf673b1eb751a2eae30c",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://opencode.ai/zen/go/v1",
+  "protocol": "chat",
+  "context_tokens": 128000,
+  "output_tokens": 8192,
+  "history_tokens": 16000,
+  "max_model_turns": 12,
+  "repetitions": 3,
+  "jobs": 3,
+  "turn_timeout_seconds": 180.0,
+  "platform": "linux",
+  "approval_policy": "explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply",
+  "audit_storage": "layout 1; explicit per-attempt external state; workspace .hyper-tmp excluded from audit storage metrics",
+  "tools": [
+    "read",
+    "search",
+    "bash",
+    "write",
+    "edit"
+  ],
+  "cost": null,
+  "toolchain_environment": {
+    "path": "/home/ubuntu/.local/bin:/home/ubuntu/.codeartsdoer/installers:/home/ubuntu/.opencode/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/ubuntu/.cargo/bin:/home/ubuntu/.grok/bin:/home/ubuntu/.kimi-code/bin:/home/ubuntu/.local/share/pi-node/node-v22.23.2-linux-arm64/bin:/home/ubuntu/.local/share/mise/installs/btop/latest/btop/bin:/home/ubuntu/.local/share/mise/installs/yazi/latest/yazi-aarch64-unknown-linux-musl:/home/ubuntu/.local/share/mise/installs/yq/latest:/usr/local/bin:/usr/bin:/bin:/snap/bin",
+    "cargo_home": "/home/ubuntu/.cargo",
+    "rustup_home": null,
+    "rustc_wrapper": null,
+    "cargo_config_path": null,
+    "cargo_config_sha256": null,
+    "rustflags": null,
+    "cargo_build_target": null
+  },
+  "tool_versions": {
+    "python3": "Python 3.12.3",
+    "node": "v22.23.2",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+  }
+}
