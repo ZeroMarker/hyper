@@ -35,6 +35,9 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and reports `nextLine` or `nextOffset`. The tool definition now also
   advertises the `line`/`lines` window, which the model could not discover
   before.
+- The agent is steered to the `search` tool instead of `grep -r`/`find` in
+  `bash`, which also scan ignored build output such as `target/` (one such
+  scan took 100 s), and to answer requests unrelated to the project directly.
 
 - The TUI header now shows the model the next run will use (environment,
   active profile, then legacy configuration) instead of only

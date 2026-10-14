@@ -740,7 +740,7 @@ fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search",
-            description: "Search for a fixed string across workspace text files.",
+            description: "Search for a fixed, case-sensitive string across workspace text files, skipping ignored paths such as build output. Fast; prefer it over grep/find in bash. Call it once per term.",
             parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
         },
         ToolSpec {
