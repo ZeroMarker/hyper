@@ -18,10 +18,10 @@ use crossterm::{
 };
 use ratatui::text::Line;
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub struct App {
@@ -47,6 +47,11 @@ pub struct App {
     pub tick: usize,
     pub command_index: usize,
     pub approvals: VecDeque<ApprovalRequest>,
+    /// Approvals answered "always" for the rest of this TUI session: a tool
+    /// name for write/edit, or `bash:<exact command>`.
+    pub session_allows: HashSet<String>,
+    /// When an idle Ctrl-C on an empty input asked for a second press to quit.
+    pub quit_armed: Option<Instant>,
     /// The conversation this TUI is continuing. `None` until the first message,
     /// which opens one; `/new` drops it so the next message starts fresh.
     pub session: Option<String>,
@@ -98,6 +103,8 @@ impl App {
             tick: 0,
             command_index: 0,
             approvals: VecDeque::new(),
+            session_allows: HashSet::new(),
+            quit_armed: None,
             session_id: session.clone(),
             session,
             gate: None,
@@ -432,6 +439,41 @@ impl App {
         }
     }
 
+    /// Approve the front request and stop asking for the same action again.
+    fn approve_always(&mut self) {
+        if let Some(request) = self.approvals.pop_front() {
+            let key = allow_key(&request);
+            let _ = request.response.send(true);
+            // Queued requests for the same action no longer need a person.
+            self.approvals.retain(|queued| {
+                if allow_key(queued) == key {
+                    let _ = queued.response.send(true);
+                    false
+                } else {
+                    true
+                }
+            });
+            self.session_allows.insert(key);
+        }
+    }
+
+    /// Ctrl-C while idle: clear a draft first, and quit only on a second press
+    /// within two seconds, so one stray keystroke never ends the session.
+    fn interrupt_idle(&mut self) {
+        if !self.input.is_empty() {
+            self.input.clear();
+            self.command_index = 0;
+            self.quit_armed = None;
+        } else if self
+            .quit_armed
+            .is_some_and(|armed| armed.elapsed() < Duration::from_secs(2))
+        {
+            self.request_quit();
+        } else {
+            self.quit_armed = Some(Instant::now());
+        }
+    }
+
     fn deny_first(&mut self) {
         if let Some(request) = self.approvals.pop_front() {
             let _ = request.response.send(false);
@@ -538,7 +580,17 @@ impl App {
         // Surface new approval requests from the running task thread.
         if let Some(gate) = &self.gate {
             for request in gate.drain() {
-                self.approvals.push_back(request);
+                if self.session_allows.contains(&allow_key(&request)) {
+                    self.event_tail.push_back(format!(
+                        "{} {}: {}",
+                        i18n::text("allowed for this session", "本会话已允许"),
+                        request.tool,
+                        request.detail
+                    ));
+                    let _ = request.response.send(true);
+                } else {
+                    self.approvals.push_back(request);
+                }
             }
         }
         if let Some(sink) = &self.sink {
@@ -635,6 +687,16 @@ impl App {
         self.follow_tail = self.scroll == 0;
     }
 }
+/// What "always allow" remembers: the exact command for bash, since one
+/// approved command says nothing about another; the tool for write/edit.
+fn allow_key(request: &ApprovalRequest) -> String {
+    if request.tool == "bash" {
+        format!("bash:{}", request.detail)
+    } else {
+        request.tool.clone()
+    }
+}
+
 impl Drop for App {
     fn drop(&mut self) {
         self.cancel_active();
@@ -697,16 +759,20 @@ pub fn run_with_permissions(
             if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                 if app.busy {
                     app.cancel_active();
+                } else if app.overlay.is_some() {
+                    app.overlay = None;
                 } else {
-                    app.request_quit();
+                    app.interrupt_idle();
                 }
                 continue;
             }
+            app.quit_armed = None;
             // Esc in the modal denies just that action; Ctrl-C cancels the run.
             // While an approval is pending, all other keys answer the modal.
             if !app.approvals.is_empty() {
                 match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.approve_first(),
+                    KeyCode::Char('a') | KeyCode::Char('A') => app.approve_always(),
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.deny_first(),
                     _ => {}
                 }
@@ -717,11 +783,13 @@ pub fn run_with_permissions(
                 continue;
             }
             match (k.code, k.modifiers) {
+                // Esc never quits: it cancels a run or clears the draft.
                 (KeyCode::Esc, _) => {
                     if app.busy {
                         app.cancel_active();
                     } else {
-                        app.request_quit();
+                        app.input.clear();
+                        app.command_index = 0;
                     }
                 }
                 (KeyCode::Tab, _) => {
@@ -908,6 +976,113 @@ mod tests {
         app.input = "/pro".into();
         assert!(app.complete_command());
         assert_eq!(app.input, "/profile");
+    }
+
+    fn request(tool: &str, detail: &str) -> (ApprovalRequest, std::sync::mpsc::Receiver<bool>) {
+        let (response, receiver) = mpsc::channel();
+        let request = ApprovalRequest {
+            id: workspace::id(),
+            tool: tool.into(),
+            detail: detail.into(),
+            preview: None,
+            response,
+        };
+        (request, receiver)
+    }
+
+    #[test]
+    fn always_allow_answers_matching_requests_for_the_session() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        let (first, first_rx) = request("bash", "cargo test");
+        let (same, same_rx) = request("bash", "cargo test");
+        let (other, other_rx) = request("bash", "rm -rf build");
+        app.approvals.extend([first, same, other]);
+        app.approve_always();
+        assert!(first_rx.recv().unwrap());
+        assert!(
+            same_rx.recv().unwrap(),
+            "a queued identical command is approved too"
+        );
+        assert_eq!(app.approvals.len(), 1, "a different command still asks");
+        assert!(other_rx.try_recv().is_err());
+
+        // Later requests for the same command are answered without a modal.
+        let gate = ApprovalGate::new();
+        app.gate = Some(gate.clone());
+        let worker = std::thread::spawn(move || gate.request("bash", "cargo test"));
+        while !worker.is_finished() {
+            app.poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.join().unwrap());
+        assert_eq!(app.approvals.len(), 1);
+    }
+
+    #[test]
+    fn approval_modal_shows_the_whole_command_and_the_diff() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        let long = format!("cargo test --workspace {}", "--features x ".repeat(12));
+        let (bash, _bash_rx) = request("bash", &long);
+        app.approvals.push_back(bash);
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let screen = |terminal: &mut Terminal<TestBackend>, app: &mut App| {
+            terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let text = screen(&mut terminal, &mut app);
+        let joined: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("--features x --features x"), "{text}");
+        assert!(
+            text.matches("--features").count() >= 12,
+            "the command is wrapped, not cut:\n{text}"
+        );
+
+        app.approvals.clear();
+        let (mut edit, _edit_rx) = request("edit", "demo.txt");
+        edit.preview =
+            Some("--- demo.txt\n+++ demo.txt\n@@ -1 +1 @@\n-old line\n+new line\n".into());
+        app.approvals.push_back(edit);
+        let text = screen(&mut terminal, &mut app);
+        assert!(
+            text.contains("-old line") && text.contains("+new line"),
+            "{text}"
+        );
+        assert!(
+            text.contains("a 本会话总是允许此工具") || text.contains("a Always allow this tool"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn esc_and_a_single_ctrl_c_never_quit_an_idle_session() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        app.input = "draft".into();
+        app.interrupt_idle();
+        assert!(
+            app.input.is_empty() && !app.quit,
+            "the first Ctrl-C clears the draft"
+        );
+        app.interrupt_idle();
+        assert!(
+            !app.quit && app.quit_armed.is_some(),
+            "an empty input arms quitting"
+        );
+        app.interrupt_idle();
+        assert!(app.quit, "a second press within two seconds quits");
+
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        app.quit_armed = Some(Instant::now() - Duration::from_secs(3));
+        app.interrupt_idle();
+        assert!(!app.quit, "a stale first press does not count");
     }
 
     #[test]

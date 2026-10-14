@@ -430,9 +430,12 @@ printed on stdout. Subcommand prompts may be passed unquoted as several words:
 The TUI uses Ratatui and Crossterm. Press `Tab` to switch plan/build mode (or
 complete a slash command), `Enter` to submit, arrow keys to scroll or choose a
 slash-command suggestion. While running, `Esc` or `Ctrl-C` cancels the current
-run; while idle, either exits. In an approval modal, `Esc` denies that action
-and `Ctrl-C` cancels the run. Slash commands:
-`/help`, `/runs`, `/session`, `/mode plan|build`, `/new`, `/cancel`, and `/quit`. `/runs`
+run. While idle, `Esc` clears the input and never exits; `Ctrl-C` clears the
+input first, and on an empty input exits only when pressed twice within two
+seconds (or use `/quit`). In an approval modal, `Esc` denies that action and
+`Ctrl-C` cancels the run. Slash commands:
+`/help`, `/runs`, `/session`, `/mode plan|build`, `/model`, `/profile`,
+`/connect`, `/new`, `/cancel`, and `/quit`. `/runs`
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
 
@@ -489,7 +492,11 @@ do not install process signal handlers. The existing run APIs remain available.
 
 CLI and TUI share `allow` / `ask` / `deny` decisions. By default `read` and
 `search` are allowed; `bash`, `write` and `edit` ask. The TUI answers each
-invocation with `y` or `n`/`Esc`. CLI runs have no interactive approval handler:
+invocation with `y` or `n`/`Esc`, or `a` to stop asking for the rest of the TUI
+session: for `bash` that covers the exact same command only, for `write`/`edit`
+the tool. The modal shows the full command, and for `write`/`edit` a unified
+diff of what would change (built only after the target passes the path checks;
+display only, never recorded). CLI runs have no interactive approval handler:
 `ask` fails closed with exit 1, including when stdout is a terminal. For an
 authorized unattended task, set `--approval allow` explicitly; `--approval deny`
 disables mutation tools. The flag applies to CLI and TUI and overrides

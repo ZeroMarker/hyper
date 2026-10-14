@@ -17,6 +17,9 @@ pub struct ApprovalRequest {
     pub id: String,
     pub tool: String,
     pub detail: String,
+    /// What the action would do, for the approver to read: a unified diff for
+    /// write/edit. Display only; never recorded or applied.
+    pub preview: Option<String>,
     pub response: Sender<bool>,
 }
 
@@ -36,7 +39,7 @@ impl ApprovalGate {
     /// Block until the UI approves or denies the given action. Without a UI
     /// (timeout) the request is denied.
     pub fn request(&self, tool: &str, detail: &str) -> bool {
-        self.request_cancellable(tool, detail, &CancellationToken::new())
+        self.request_cancellable(tool, detail, None, &CancellationToken::new())
             .unwrap_or(false)
     }
 
@@ -44,6 +47,7 @@ impl ApprovalGate {
         &self,
         tool: &str,
         detail: &str,
+        preview: Option<String>,
         cancellation: &CancellationToken,
     ) -> anyhow::Result<bool> {
         cancellation.check()?;
@@ -55,6 +59,7 @@ impl ApprovalGate {
                 id: id.clone(),
                 tool: tool.into(),
                 detail: detail.into(),
+                preview,
                 response,
             });
         }

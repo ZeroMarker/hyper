@@ -28,6 +28,18 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   take, and `HYPER_REQUEST_TIMEOUT_SECS` (default 120, up to 3600) sets the
   per-request model timeout.
 
+- **Always allow in the approval modal.** `a` approves and stops asking for the
+  rest of the TUI session: the exact command for `bash`, the tool for
+  `write`/`edit`.
+- **Approval shows what will change.** `write`/`edit` approvals show a colored
+  unified diff, and commands are shown whole and wrapped instead of cut to one
+  line.
+
+### Changed
+
+- In the TUI, `Esc` no longer exits while idle; it clears the input. `Ctrl-C`
+  clears the input first and exits only on a second press within two seconds.
+
 ### Fixed
 
 - A lone command-like word such as `hyper paths` is no longer sent to the model

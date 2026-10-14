@@ -189,6 +189,7 @@ fn authorize(
     action: &str,
     target: Option<&str>,
     command: Option<&str>,
+    preview: Option<&dyn Fn(&Path) -> String>,
 ) -> Result<Option<std::path::PathBuf>> {
     events.cancellation.check()?;
     // Issued artifacts select pinned files and never resolve arbitrary host paths.
@@ -244,7 +245,12 @@ fn authorize(
             } else {
                 detail.to_owned()
             };
-            require_approval(events, step, index, tool, &detail)?;
+            // Built only now: the target already passed the boundary checks,
+            // and only an action that waits on a person needs it.
+            let preview = preview
+                .zip(resolved.as_deref())
+                .map(|(preview, path)| preview(path));
+            require_approval(events, step, index, tool, &detail, preview)?;
             Ok(resolved)
         }
         Permission::Deny => {
@@ -260,12 +266,48 @@ fn authorize(
     }
 }
 
+/// The file as it is now, for an approval preview only. Large or unreadable
+/// files preview as empty rather than delaying the question.
+fn current_text(path: &Path) -> String {
+    const PREVIEW_LIMIT: u64 = 512 * 1024;
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() <= PREVIEW_LIMIT => {
+            fs::read_to_string(path).unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+fn approval_diff(path: &str, before: &str, after: &str) -> String {
+    let patch = diffy::create_patch(before, after).to_string();
+    // diffy names the files "original"/"modified"; the path says more.
+    patch
+        .replacen("--- original", &format!("--- {path}"), 1)
+        .replacen("+++ modified", &format!("+++ {path}"), 1)
+}
+
+/// `text` with its `occurrence`-th (1-based) `search` replaced, if present.
+fn replace_occurrence(
+    text: &str,
+    search: &str,
+    replace: &str,
+    occurrence: usize,
+) -> Option<String> {
+    let (start, _) = text.match_indices(search).nth(occurrence.checked_sub(1)?)?;
+    Some(format!(
+        "{}{replace}{}",
+        &text[..start],
+        &text[start + search.len()..]
+    ))
+}
+
 fn require_approval(
     events: &EventWriter<'_>,
     step: &StepSpec,
     index: usize,
     tool: &str,
     detail: &str,
+    preview: Option<String>,
 ) -> Result<()> {
     events.cancellation.check()?;
     let Some(gate) = &events.gate else {
@@ -287,7 +329,7 @@ fn require_approval(
             "tool permission ask requires an interactive approval handler for {tool}; configure allow or deny explicitly"
         )
     };
-    let approved = match gate.request_cancellable(tool, detail, &events.cancellation) {
+    let approved = match gate.request_cancellable(tool, detail, preview, &events.cancellation) {
         Ok(approved) => approved,
         Err(error) => {
             events.write(
@@ -1060,6 +1102,7 @@ fn bash(
         "bash",
         None,
         Some(command),
+        None,
     )?;
     if events.execution_mode != ExecutionMode::Unrestricted {
         crate::state::validate_shell_boundary(root, &events.workspace.paths.dir)?;
@@ -1569,7 +1612,17 @@ fn read(
         bail!("read: pass either a byte offset or a line window, not both")
     }
     let artifact = events.artifacts.borrow().contains_key(path);
-    let resolved = authorize(events, root, step, index, "read", "read", Some(path), None)?;
+    let resolved = authorize(
+        events,
+        root,
+        step,
+        index,
+        "read",
+        "read",
+        Some(path),
+        None,
+        None,
+    )?;
     if !artifact && resolved.is_none() {
         bail!("missing read target");
     }
@@ -1714,7 +1767,9 @@ fn search(
     query: &str,
     limit: usize,
 ) -> Result<(bool, Value)> {
-    authorize(events, root, step, index, "search", "read", None, None)?;
+    authorize(
+        events, root, step, index, "search", "read", None, None, None,
+    )?;
     events.write(
         "tool.started",
         json!({"tool":"search","input":{"query":query,"limit":limit}}),
@@ -1793,6 +1848,7 @@ fn write_file(
         "write",
         Some(path),
         None,
+        Some(&|target: &Path| approval_diff(path, &current_text(target), content)),
     )?
     .context("missing write target")?;
     events.write(
@@ -1892,8 +1948,30 @@ fn edit_file(
     if search.is_empty() {
         bail!("edit: search text must not be empty")
     }
-    let resolved = authorize(events, root, step, index, "edit", "write", Some(path), None)?
-        .context("missing edit target")?;
+    let edit_preview = |target: &Path| {
+        let before = current_text(target);
+        match replace_occurrence(&before, search, replace, occurrence.unwrap_or(1)) {
+            Some(after) => approval_diff(path, &before, &after),
+            // The edit will fail on its own; still show what was asked.
+            None => format!(
+                "- {}\n+ {}",
+                search.replace('\n', "\n- "),
+                replace.replace('\n', "\n+ ")
+            ),
+        }
+    };
+    let resolved = authorize(
+        events,
+        root,
+        step,
+        index,
+        "edit",
+        "write",
+        Some(path),
+        None,
+        Some(&edit_preview),
+    )?
+    .context("missing edit target")?;
     events.write(
         "tool.started",
         json!({"tool":"edit","path":path}),

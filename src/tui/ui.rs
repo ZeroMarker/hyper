@@ -197,9 +197,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             " Tab/↑↓ Field  Enter Next / Save  Esc Cancel",
             " Tab/↑↓ 切换字段  Enter 下一项 / 保存  Esc 取消",
         ),
+        None if app.quit_armed.is_some() => {
+            i18n::text(" Press Ctrl-C again to exit", " 再按一次 Ctrl-C 退出")
+        }
         None => i18n::text(
-            " ↑↓ Scroll  End Latest  Tab Mode  Enter Send  /model Model  Esc/Ctrl-C Cancel or Exit",
-            " ↑↓ 滚动  End 最新  Tab 模式  Enter 发送  /model 模型  Esc/Ctrl-C 取消或退出",
+            " ↑↓ Scroll  End Latest  Tab Mode  Enter Send  /model Model  Esc Clear/Cancel  Ctrl-C×2 Exit",
+            " ↑↓ 滚动  End 最新  Tab 模式  Enter 发送  /model 模型  Esc 清空/取消  Ctrl-C×2 退出",
         ),
     };
     frame.render_widget(
@@ -214,15 +217,62 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
     let Some(request) = app.approvals.front() else {
         return;
     };
-    let area = Rect::new(
-        input_area.x,
-        input_area.y.saturating_sub(7),
-        input_area.width,
-        7,
-    );
-    let max_width = area.width.saturating_sub(4) as usize;
-    let detail = truncate_width(&request.detail.replace('\n', " "), max_width);
-    let lines = vec![
+    let width = input_area.width.saturating_sub(4).max(1) as usize;
+    let mut body: Vec<Line> = Vec::new();
+    // The full command or target, wrapped rather than cut: approving what you
+    // cannot read is not approval.
+    for line in request.detail.lines() {
+        body.push(Line::styled(
+            line.to_owned(),
+            Style::default().fg(Color::White),
+        ));
+    }
+    if let Some(preview) = &request.preview {
+        body.push(Line::from(""));
+        for line in preview.lines() {
+            let color = if line.starts_with("+++") || line.starts_with("---") {
+                Color::Gray
+            } else if line.starts_with('+') {
+                Color::Green
+            } else if line.starts_with('-') {
+                Color::Red
+            } else if line.starts_with("@@") {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            body.push(Line::styled(line.to_owned(), Style::default().fg(color)));
+        }
+    }
+    // Rows each line takes once wrapped, to size the box.
+    let rows = |line: &Line| (line.width().max(1)).div_ceil(width);
+    let max_body = (frame.area().height * 3 / 5).saturating_sub(6).max(3) as usize;
+    let mut used = 0;
+    let mut shown = Vec::new();
+    for line in &body {
+        if used + rows(line) > max_body {
+            break;
+        }
+        used += rows(line);
+        shown.push(line.clone());
+    }
+    let hidden = body.len() - shown.len();
+    if hidden > 0 {
+        shown.push(Line::styled(
+            format!(
+                "… {hidden} {}",
+                i18n::text("more lines not shown", "行未显示")
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
+        used += 1;
+    }
+    let always = if request.tool == "bash" {
+        i18n::text("a Always allow this command", "a 本会话总是允许此命令")
+    } else {
+        i18n::text("a Always allow this tool", "a 本会话总是允许此工具")
+    };
+    let mut lines = vec![
         Line::from(Span::styled(
             format!(" {} {}", i18n::text("Approve:", "需要确认："), request.tool),
             Style::default()
@@ -230,19 +280,30 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(detail, Style::default().fg(Color::White))),
-        Line::from(""),
-        Line::from(Span::styled(
-            i18n::text(
-                " y Allow    n / Esc Deny    Ctrl-C Cancel run",
-                " y 允许    n / Esc 拒绝    Ctrl-C 取消运行",
-            ),
-            Style::default().fg(Color::Cyan),
-        )),
     ];
+    lines.extend(shown);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {}    {always}    {}",
+            i18n::text("y Allow", "y 允许"),
+            i18n::text(
+                "n / Esc Deny    Ctrl-C Cancel run",
+                "n / Esc 拒绝    Ctrl-C 取消运行"
+            )
+        ),
+        Style::default().fg(Color::Cyan),
+    )));
+    let height = (used as u16 + 6).min(input_area.y.max(7));
+    let area = Rect::new(
+        input_area.x,
+        input_area.y.saturating_sub(height),
+        input_area.width,
+        height,
+    );
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .title(" Approval ")
                 .borders(Borders::ALL)
@@ -415,21 +476,6 @@ fn render_form(frame: &mut Frame, form: &ProviderForm) {
     if let Some(position) = cursor {
         frame.set_cursor_position(position);
     }
-}
-
-fn truncate_width(text: &str, max: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > max {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect) {

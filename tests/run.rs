@@ -898,6 +898,42 @@ fn approval_gate_allows_the_tool() {
     assert_eq!(summary.status, "finished");
 }
 
+/// The approver sees what an edit or write would change, as a diff, while the
+/// file stays untouched until approved.
+#[test]
+fn approval_requests_preview_edits_and_writes_as_diffs() {
+    for (instruction, removed, added) in [
+        (
+            "edit:demo.txt\nold line\nnew line",
+            "-old line",
+            "+new line",
+        ),
+        ("write:demo.txt\nreplaced\n", "-old line", "+replaced"),
+    ] {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("demo.txt"), "keep\nold line\n").unwrap();
+        let root = dir.path().to_path_buf();
+        let gate = ApprovalGate::new();
+        let worker = gate.clone();
+        let handle = std::thread::spawn(move || {
+            run_task_with_approval(&task("gated", AgentMode::Build, instruction), &root, worker)
+                .unwrap()
+        });
+        let request = wait_for_request(&gate);
+        let preview = request.preview.clone().expect("write/edit carry a preview");
+        assert!(preview.contains("--- demo.txt"), "{preview}");
+        assert!(preview.lines().any(|line| line == removed), "{preview}");
+        assert!(preview.lines().any(|line| line == added), "{preview}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("demo.txt")).unwrap(),
+            "keep\nold line\n",
+            "nothing changes before approval"
+        );
+        request.response.send(false).unwrap();
+        assert_eq!(handle.join().unwrap().status, "failed");
+    }
+}
+
 #[test]
 fn approval_gate_denial_fails_the_step() {
     let dir = tempdir().unwrap();
