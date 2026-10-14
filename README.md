@@ -151,8 +151,15 @@ ha profile model glm-5.3     # switch the active profile's model
 `models` reads the provider's OpenAI-style `GET /models` and marks the current
 model. `model` rewrites only the active profile's model; a protocol that was the
 one detected for the old model follows the new one, and a pinned protocol is
-kept. In the TUI, `/model` lists models and `/model <name>` switches, and
-`/profile` / `/profile <name>` list and switch profiles.
+kept.
+
+The TUI does all of this without leaving it. `/model` opens a searchable list
+of the provider's models (type to filter, ↑↓, Enter), `/profile` opens the
+provider list, and `/connect` (or the provider list's last row) adds a provider:
+pick DeepSeek, OpenCode Go or any OpenAI-compatible base URL, fill in the name,
+base URL and API key (masked while typed), and the new provider's models open
+for selection. The key is saved in the owner-only configuration file.
+`/model <name>` and `/profile <name>` remain as typed shortcuts.
 
 `list` shows configuration and authentication sources without loading or printing
 keys. `use` only saves the selection. `test` sends one small request with no tools

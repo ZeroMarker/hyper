@@ -1,4 +1,7 @@
+mod overlay;
 mod ui;
+
+use overlay::{ADD_PROVIDER, Action, Overlay, Picker, PickerItem, PickerKind, ProviderForm};
 
 use crate::{
     AgentMode, ApprovalGate, ApprovalRequest, CancellationToken, EventSink, ExecutionMode,
@@ -28,6 +31,10 @@ pub struct App {
     pub execution_mode: ExecutionMode,
     pub permissions: crate::ToolPermissions,
     pub model: String,
+    /// The active provider profile, shown next to the model.
+    pub profile: Option<String>,
+    /// A picker or form drawn over the chat; it takes all keys while open.
+    pub overlay: Option<Overlay>,
     pub output: Vec<String>,
     pub rendered: Vec<Line<'static>>,
     pub rendered_count: usize,
@@ -71,6 +78,8 @@ impl App {
             execution_mode,
             permissions: crate::ToolPermissions::default(),
             model,
+            profile: profiles::current_profile(),
+            overlay: None,
             output: vec![
                 i18n::text(
                     "Hyper\nHi, how can I help?",
@@ -175,41 +184,15 @@ impl App {
                     .output
                     .push(format!("Hyper\n{} {error}", i18n::text("Could not read runs:", "无法读取运行记录："))),
             },
-            "/config" => self.output.push(
-                i18n::text("Hyper\nUse `/profile <name>` to switch provider profiles here, or exit and run `hyper config` to update the API key, base URL, or model.", "Hyper\n使用 `/profile <name>` 可直接切换 provider profile；或退出后运行 `hyper config` 重新配置 API Key / base URL / model。").into(),
-            ),
-            "/profile" => match profiles::list() {
-                Ok(listing) => {
-                    let active = listing["activeProfile"].as_str();
-                    let lines = listing["profiles"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|profile| {
-                            let name = profile["name"].as_str().unwrap_or_default();
-                            let marker = if Some(name) == active { "*" } else { " " };
-                            format!("{marker} {name}  {}", profile["model"].as_str().unwrap_or_default())
-                        })
-                        .collect::<Vec<_>>();
-                    if lines.is_empty() {
-                        self.output.push(i18n::text("Hyper\nNo provider profiles configured.", "Hyper\n尚未配置任何 provider profile。").into());
-                    } else {
-                        self.output.push(format!("Hyper\n{}\n{}", i18n::text("Profiles (`/profile <name>` to switch):", "Profile 列表（`/profile <name>` 切换）："), lines.join("\n")));
-                    }
-                }
-                Err(error) => self
-                    .output
-                    .push(format!("Hyper\n{} {error:#}", i18n::text("Could not read profiles:", "无法读取 profile："))),
-            },
-            "/model" => {
-                self.output.push(i18n::text("Hyper\nFetching models…", "Hyper\n正在获取模型列表…").into());
-                let tx = self.tx.clone();
-                // A network call; kept off the UI thread so the screen stays live.
-                std::thread::spawn(move || {
-                    let result = profiles::list_models(None).map_err(|error| format!("{error:#}"));
-                    let _ = tx.send(Message::Models(result));
-                });
+            "/config" | "/connect" => {
+                self.overlay = Some(Overlay::Picker(Picker::new(
+                    PickerKind::Preset,
+                    i18n::text(" Add provider ", " 添加服务商 "),
+                    overlay::presets(),
+                )));
             }
+            "/profile" => self.open_profile_picker(),
+            "/model" => self.open_model_picker(),
             _ if value.starts_with("/model ") => {
                 let model = value["/model ".len()..].trim();
                 match profiles::set_model(model) {
@@ -298,6 +281,151 @@ impl App {
         }
     }
 
+    fn refresh_provider(&mut self) {
+        self.model = profiles::current_model();
+        self.profile = profiles::current_profile();
+    }
+
+    fn open_model_picker(&mut self) {
+        self.overlay = Some(Overlay::Picker(Picker::loading(
+            PickerKind::Model,
+            i18n::text(" Select model ", " 选择模型 "),
+        )));
+        let tx = self.tx.clone();
+        // A network call; kept off the UI thread so the screen stays live.
+        std::thread::spawn(move || {
+            let result = profiles::list_models(None).map_err(|error| format!("{error:#}"));
+            let _ = tx.send(Message::Models(result));
+        });
+    }
+
+    fn open_profile_picker(&mut self) {
+        let mut items = Vec::new();
+        let mut error = None;
+        match profiles::list() {
+            Ok(listing) => {
+                let active = listing["activeProfile"].as_str();
+                for profile in listing["profiles"].as_array().into_iter().flatten() {
+                    let name = profile["name"].as_str().unwrap_or_default();
+                    items.push(PickerItem {
+                        label: name.into(),
+                        detail: format!(
+                            "{}  {}",
+                            profile["model"].as_str().unwrap_or_default(),
+                            profile["baseUrl"].as_str().unwrap_or_default()
+                        ),
+                        value: name.into(),
+                        current: Some(name) == active,
+                    });
+                }
+            }
+            Err(e) => error = Some(format!("{e:#}")),
+        }
+        items.push(PickerItem {
+            label: i18n::text("+ Add provider…", "＋ 添加服务商…").into(),
+            detail: String::new(),
+            value: ADD_PROVIDER.into(),
+            current: false,
+        });
+        let mut picker = Picker::new(
+            PickerKind::Profile,
+            i18n::text(" Select provider ", " 选择服务商 "),
+            items,
+        );
+        picker.error = error;
+        self.overlay = Some(Overlay::Picker(picker));
+    }
+
+    fn overlay_key(&mut self, code: KeyCode) {
+        let Some(overlay) = &mut self.overlay else {
+            return;
+        };
+        match overlay.key(code) {
+            None => {}
+            Some(Action::Close) => self.overlay = None,
+            Some(Action::Choose(PickerKind::Model, model)) => {
+                self.overlay = None;
+                match profiles::set_model(&model) {
+                    Ok(profile) => {
+                        self.refresh_provider();
+                        self.output.push(format!(
+                            "Hyper\n{} **{profile}** → {model}",
+                            i18n::text("Model switched:", "已切换模型：")
+                        ));
+                        self.warn_env_model_override();
+                    }
+                    Err(error) => self.output.push(format!(
+                        "Hyper\n{} {error:#}",
+                        i18n::text("Could not switch model:", "无法切换模型：")
+                    )),
+                }
+            }
+            Some(Action::Choose(PickerKind::Profile, name)) if name == ADD_PROVIDER => {
+                self.overlay = Some(Overlay::Picker(Picker::new(
+                    PickerKind::Preset,
+                    i18n::text(" Add provider ", " 添加服务商 "),
+                    overlay::presets(),
+                )));
+            }
+            Some(Action::Choose(PickerKind::Profile, name)) => {
+                self.overlay = None;
+                match profiles::use_profile(&name) {
+                    Ok(()) => {
+                        self.refresh_provider();
+                        self.output.push(format!(
+                            "Hyper\n{} **{name}** ({})",
+                            i18n::text("Provider switched:", "已切换服务商："),
+                            self.model
+                        ));
+                        self.warn_env_model_override();
+                    }
+                    Err(error) => self.output.push(format!(
+                        "Hyper\n{} {error:#}",
+                        i18n::text("Could not switch provider:", "无法切换服务商：")
+                    )),
+                }
+            }
+            Some(Action::Choose(PickerKind::Preset, preset)) => {
+                self.overlay = Some(Overlay::Form(ProviderForm::for_preset(&preset)));
+            }
+            Some(Action::Submit) => {
+                let Some(Overlay::Form(form)) = &mut self.overlay else {
+                    return;
+                };
+                match profiles::add_profile(
+                    form.value(0),
+                    form.value(1),
+                    form.value(2),
+                    form.value(3),
+                ) {
+                    Ok(()) => {
+                        let name = form.value(0).to_owned();
+                        self.refresh_provider();
+                        self.output.push(format!(
+                            "Hyper\n{} **{name}**",
+                            i18n::text("Provider saved and selected:", "已保存并切换到服务商：")
+                        ));
+                        // Pick the model from what the new provider offers.
+                        self.open_model_picker();
+                    }
+                    Err(error) => form.error = Some(format!("{error:#}")),
+                }
+            }
+        }
+    }
+
+    fn warn_env_model_override(&mut self) {
+        if std::env::var("DEEPSEEK_MODEL").is_ok_and(|m| !m.trim().is_empty()) {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nNote: `DEEPSEEK_MODEL` is set and overrides the profile model.",
+                    "Hyper\n注意：已设置 `DEEPSEEK_MODEL`，它会覆盖 profile 的模型。",
+                )
+                .into(),
+            );
+        }
+    }
+
     fn approve_first(&mut self) {
         if let Some(request) = self.approvals.pop_front() {
             let _ = request.response.send(true);
@@ -345,20 +473,14 @@ impl App {
                 "/runs",
                 i18n::text("Show recent runs", "提示如何查看运行历史"),
             ),
+            ("/model", i18n::text("Select a model", "选择模型")),
+            ("/profile", i18n::text("Select a provider", "选择服务商")),
             (
-                "/model",
-                i18n::text("List or switch models", "列出或切换模型"),
-            ),
-            (
-                "/profile",
+                "/connect",
                 i18n::text(
-                    "List or switch provider profiles",
-                    "列出或切换 provider profile",
+                    "Add a provider (API key, base URL)",
+                    "添加服务商（API Key、Base URL）",
                 ),
-            ),
-            (
-                "/config",
-                i18n::text("Show API key setup", "提示如何重新配置 API Key"),
             ),
             ("/cancel", i18n::text("Cancel current run", "取消当前运行")),
             ("/quit", i18n::text("Exit Hyper", "退出 Hyper")),
@@ -441,31 +563,41 @@ impl App {
         }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Message::Models(result) => self.output.push(match result {
-                    Ok(models) if models.is_empty() => i18n::text(
-                        "Hyper\nThe provider listed no models.",
-                        "Hyper\n服务商没有返回任何模型。",
-                    )
-                    .into(),
-                    Ok(models) => {
-                        let lines = models
-                            .iter()
-                            .map(|id| format!("{} {id}", if *id == self.model { "*" } else { " " }))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            "Hyper\n{}\n{lines}",
-                            i18n::text(
-                                "Models (`/model <name>` to switch):",
-                                "可用模型（`/model <name>` 切换）："
-                            )
-                        )
+                Message::Models(result) => {
+                    // Ignored if the picker was closed before the list arrived.
+                    if let Some(Overlay::Picker(picker)) = &mut self.overlay
+                        && picker.kind == PickerKind::Model
+                        && picker.loading
+                    {
+                        match result {
+                            Ok(models) if models.is_empty() => {
+                                picker.loading = false;
+                                picker.error = Some(
+                                    i18n::text(
+                                        "The provider listed no models.",
+                                        "服务商没有返回任何模型。",
+                                    )
+                                    .into(),
+                                );
+                            }
+                            Ok(models) => picker.set_items(
+                                models
+                                    .into_iter()
+                                    .map(|id| PickerItem {
+                                        current: id == self.model,
+                                        label: id.clone(),
+                                        detail: String::new(),
+                                        value: id,
+                                    })
+                                    .collect(),
+                            ),
+                            Err(error) => {
+                                picker.loading = false;
+                                picker.error = Some(error);
+                            }
+                        }
                     }
-                    Err(error) => format!(
-                        "Hyper\n{} {error}",
-                        i18n::text("Could not list models:", "无法获取模型列表：")
-                    ),
-                }),
+                }
                 Message::Task(r) => {
                     self.busy = false;
                     self.cancellation = None;
@@ -578,6 +710,10 @@ pub fn run_with_permissions(
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.deny_first(),
                     _ => {}
                 }
+                continue;
+            }
+            if app.overlay.is_some() {
+                app.overlay_key(k.code);
                 continue;
             }
             match (k.code, k.modifiers) {
@@ -772,6 +908,26 @@ mod tests {
         app.input = "/pro".into();
         assert!(app.complete_command());
         assert_eq!(app.input, "/profile");
+    }
+
+    #[test]
+    fn connect_walks_from_presets_to_the_form_and_esc_closes() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        app.input = "/connect".into();
+        app.submit();
+        assert!(matches!(&app.overlay, Some(Overlay::Picker(p)) if p.kind == PickerKind::Preset));
+        app.overlay_key(KeyCode::Down);
+        app.overlay_key(KeyCode::Enter);
+        match &app.overlay {
+            Some(Overlay::Form(form)) => assert_eq!(form.value(1), "https://opencode.ai/zen/go/v1"),
+            _ => panic!("expected the provider form"),
+        }
+        app.overlay_key(KeyCode::Esc);
+        assert!(app.overlay.is_none());
+        assert!(
+            app.input.is_empty(),
+            "overlay keys never reach the message box"
+        );
     }
 
     /// `/new` must start a genuinely new conversation. Clearing only the

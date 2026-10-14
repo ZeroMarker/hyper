@@ -207,6 +207,55 @@ pub(crate) fn list_models(name: Option<&str>) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Save a profile whose key lives in the owner-only configuration file and make
+/// it active. An existing profile with the same name is replaced, which is how a
+/// key is rotated from the TUI. The protocol is the one detected for the model.
+pub(crate) fn add_profile(name: &str, base_url: &str, api_key: &str, model: &str) -> Result<()> {
+    add_profile_in(&config_path()?, name, base_url, api_key, model)
+}
+
+fn add_profile_in(
+    path: &Path,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<()> {
+    let (name, base_url, api_key, model) =
+        (name.trim(), base_url.trim(), api_key.trim(), model.trim());
+    validate_name(name)?;
+    validate_url(base_url)?;
+    if api_key.is_empty() || api_key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("API key must be non-empty without spaces");
+    }
+    if model.is_empty() || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("model name must be non-empty without spaces");
+    }
+    let mut stored = read_stored_config(path)?.unwrap_or_default();
+    stored.profiles.insert(
+        name.into(),
+        Profile {
+            protocol: detect_protocol(base_url, model).as_str().into(),
+            base_url: base_url.into(),
+            model: model.into(),
+            auth: Auth::Config {
+                api_key: api_key.into(),
+            },
+            endpoints: BTreeMap::new(),
+        },
+    );
+    stored.active_profile = Some(name.into());
+    save_config(path, &stored)
+}
+
+/// The active profile's name, if profiles are in use.
+pub(crate) fn current_profile() -> Option<String> {
+    config_path()
+        .ok()
+        .and_then(|path| read_stored_config(&path).ok().flatten())
+        .and_then(|stored| stored.active_profile)
+}
+
 /// Point the active profile at another model. A protocol that matched what
 /// detection picks for the old model was effectively automatic, so it follows
 /// the new model; a deliberately pinned protocol is kept.
@@ -405,6 +454,44 @@ mod tests {
                     "auth":{"source":"config","api_key":"saved-secret"}}
             }
         })).unwrap()
+    }
+
+    #[test]
+    fn add_profile_saves_an_active_config_keyed_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        save_config(&path, &stored()).unwrap();
+        add_profile_in(
+            &path,
+            "go",
+            "https://opencode.ai/zen/go/v1",
+            "secret",
+            "minimax-m3",
+        )
+        .unwrap();
+        let saved = read_stored_config(&path).unwrap().unwrap();
+        assert_eq!(saved.active_profile.as_deref(), Some("go"));
+        assert_eq!(saved.profiles["go"].protocol, "messages");
+        assert!(
+            matches!(&saved.profiles["go"].auth, Auth::Config { api_key } if api_key == "secret")
+        );
+        assert!(
+            saved.profiles.contains_key("local"),
+            "existing profiles are kept"
+        );
+        let settings = resolve(&|_: &str| None, &saved).unwrap();
+        assert_eq!(settings.model, "minimax-m3");
+        // Invalid input never reaches the file.
+        assert!(add_profile_in(&path, "bad name", "https://x.example", "k", "m").is_err());
+        assert!(add_profile_in(&path, "x", "ftp://x.example", "k", "m").is_err());
+        assert!(add_profile_in(&path, "x", "https://x.example", "", "m").is_err());
+        assert!(
+            !read_stored_config(&path)
+                .unwrap()
+                .unwrap()
+                .profiles
+                .contains_key("x")
+        );
     }
 
     #[test]
