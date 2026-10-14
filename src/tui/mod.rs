@@ -57,6 +57,7 @@ pub struct App {
 }
 enum Message {
     Task(Result<String, String>),
+    Models(Result<Vec<String>, String>),
 }
 
 impl App {
@@ -200,6 +201,31 @@ impl App {
                     .output
                     .push(format!("Hyper\n{} {error:#}", i18n::text("Could not read profiles:", "无法读取 profile："))),
             },
+            "/model" => {
+                self.output.push(i18n::text("Hyper\nFetching models…", "Hyper\n正在获取模型列表…").into());
+                let tx = self.tx.clone();
+                // A network call; kept off the UI thread so the screen stays live.
+                std::thread::spawn(move || {
+                    let result = profiles::list_models(None).map_err(|error| format!("{error:#}"));
+                    let _ = tx.send(Message::Models(result));
+                });
+            }
+            _ if value.starts_with("/model ") => {
+                let model = value["/model ".len()..].trim();
+                match profiles::set_model(model) {
+                    Ok(profile) => {
+                        self.model = profiles::current_model();
+                        let mut message = format!("Hyper\n{} **{profile}** → {}.", i18n::text("Switched model for profile", "已切换 profile 的模型："), model);
+                        if std::env::var("DEEPSEEK_MODEL").is_ok_and(|m| !m.trim().is_empty()) {
+                            message.push_str(i18n::text("\nNote: `DEEPSEEK_MODEL` is set and overrides the profile model.", "\n注意：已设置 `DEEPSEEK_MODEL`，它会覆盖 profile 的模型。"));
+                        }
+                        self.output.push(message);
+                    }
+                    Err(error) => self
+                        .output
+                        .push(format!("Hyper\n{} {error:#}", i18n::text("Could not switch model:", "无法切换模型："))),
+                }
+            }
             _ if value.starts_with("/profile ") => {
                 let name = value["/profile ".len()..].trim();
                 match profiles::use_profile(name) {
@@ -320,6 +346,10 @@ impl App {
                 i18n::text("Show recent runs", "提示如何查看运行历史"),
             ),
             (
+                "/model",
+                i18n::text("List or switch models", "列出或切换模型"),
+            ),
+            (
                 "/profile",
                 i18n::text(
                     "List or switch provider profiles",
@@ -411,6 +441,31 @@ impl App {
         }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Message::Models(result) => self.output.push(match result {
+                    Ok(models) if models.is_empty() => i18n::text(
+                        "Hyper\nThe provider listed no models.",
+                        "Hyper\n服务商没有返回任何模型。",
+                    )
+                    .into(),
+                    Ok(models) => {
+                        let lines = models
+                            .iter()
+                            .map(|id| format!("{} {id}", if *id == self.model { "*" } else { " " }))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "Hyper\n{}\n{lines}",
+                            i18n::text(
+                                "Models (`/model <name>` to switch):",
+                                "可用模型（`/model <name>` 切换）："
+                            )
+                        )
+                    }
+                    Err(error) => format!(
+                        "Hyper\n{} {error}",
+                        i18n::text("Could not list models:", "无法获取模型列表：")
+                    ),
+                }),
                 Message::Task(r) => {
                     self.busy = false;
                     self.cancellation = None;
@@ -708,9 +763,12 @@ mod tests {
     fn slash_input_filters_and_completes_commands() {
         let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
         app.input = "/mo".into();
-        assert_eq!(app.command_suggestions().len(), 2);
+        assert_eq!(app.command_suggestions().len(), 3);
         assert!(app.complete_command());
         assert_eq!(app.input, "/mode plan");
+        app.input = "/model".into();
+        assert!(app.complete_command());
+        assert_eq!(app.input, "/model");
         app.input = "/pro".into();
         assert!(app.complete_command());
         assert_eq!(app.input, "/profile");

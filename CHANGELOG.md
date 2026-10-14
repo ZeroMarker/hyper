@@ -14,6 +14,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Switch provider profiles inside the TUI.** `/profile` lists the configured
   profiles and marks the active one; `/profile <name>` makes it active, and the
   next message already uses it.
+- **List and switch models.** `hyper profile models [name]` lists the models a
+  provider offers through its `GET /models` endpoint, and
+  `hyper profile model <name>` switches the active profile's model, updating a
+  detected protocol along with it. The TUI has the same as `/model` and
+  `/model <name>`.
 - **Configurable turn limit and request timeout.** `HYPER_MAX_TURNS`
   (default 12, up to 200) sets how many tool-calling turns an agent step may
   take, and `HYPER_REQUEST_TIMEOUT_SECS` (default 120, up to 3600) sets the

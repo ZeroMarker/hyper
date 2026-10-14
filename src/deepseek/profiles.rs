@@ -173,6 +173,77 @@ pub(crate) fn use_profile(name: &str) -> Result<()> {
     select(&config_path()?, name)
 }
 
+/// The models a profile's provider offers, from its OpenAI-style `GET /models`,
+/// sorted by id. `name` defaults to the active profile.
+pub(crate) fn list_models(name: Option<&str>) -> Result<Vec<String>> {
+    let mut stored = read_stored_config(&config_path()?)?.unwrap_or_default();
+    if let Some(name) = name {
+        validate_name(name)?;
+        stored.active_profile = Some(name.into());
+    }
+    let settings = resolve_settings(|key| env::var(key).ok(), Some(stored))?;
+    let config = DeepSeekConfig::with_timeout(settings, Duration::from_secs(20))?;
+    let url = format!("{}/models", config.base_url.trim_end_matches('/'));
+    let response = config
+        .client
+        .get(&url)
+        .send()
+        .map_err(|error| anyhow::anyhow!("model list: connection failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("model list: provider returned HTTP {status}");
+    }
+    let body: serde_json::Value = response
+        .json()
+        .context("model list: response is not JSON")?;
+    let mut ids: Vec<String> = body["data"]
+        .as_array()
+        .context("model list: response has no `data` array")?
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Point the active profile at another model. A protocol that matched what
+/// detection picks for the old model was effectively automatic, so it follows
+/// the new model; a deliberately pinned protocol is kept.
+pub(crate) fn set_model(model: &str) -> Result<String> {
+    set_model_in(&config_path()?, model)
+}
+
+fn set_model_in(path: &Path, model: &str) -> Result<String> {
+    let model = model.trim();
+    if model.is_empty()
+        || model.len() > 128
+        || model.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("model name must be 1-128 characters without spaces");
+    }
+    let mut stored = read_stored_config(path)?.context("no provider configuration file")?;
+    let name = stored
+        .active_profile
+        .clone()
+        .context("no active profile; create one before switching models")?;
+    let profile = stored
+        .profiles
+        .get_mut(&name)
+        .context("selected provider profile does not exist")?;
+    let detected = |model: &str| {
+        detect_protocol(&profile.base_url, model)
+            .as_str()
+            .to_owned()
+    };
+    if profile.protocol.trim().is_empty() || profile.protocol == detected(&profile.model) {
+        profile.protocol = detected(model);
+    }
+    profile.model = model.into();
+    save_config(path, &stored)?;
+    Ok(name)
+}
+
 /// The model the next run will ask for, resolved without loading a credential
 /// so the TUI can show it even before a key is configured.
 pub(crate) fn current_model() -> String {
@@ -334,6 +405,40 @@ mod tests {
                     "auth":{"source":"config","api_key":"saved-secret"}}
             }
         })).unwrap()
+    }
+
+    #[test]
+    fn set_model_updates_the_active_profile_and_follows_detected_protocols() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = stored();
+        config.profiles.insert(
+            "go".into(),
+            serde_json::from_value(
+                json!({"protocol":"chat","base_url":"https://opencode.ai/zen/go/v1",
+                "model":"deepseek-v4-flash","auth":{"source":"env","variable":"GO_KEY"}}),
+            )
+            .unwrap(),
+        );
+        config.active_profile = Some("go".into());
+        save_config(&path, &config).unwrap();
+        // chat was what detection picks for deepseek, so it follows the model.
+        assert_eq!(set_model_in(&path, "minimax-m3").unwrap(), "go");
+        let saved = read_stored_config(&path).unwrap().unwrap();
+        assert_eq!(saved.profiles["go"].model, "minimax-m3");
+        assert_eq!(saved.profiles["go"].protocol, "messages");
+        // A pinned protocol that detection would not pick is kept.
+        let mut pinned = saved.clone();
+        pinned.profiles.get_mut("go").unwrap().protocol = "responses".into();
+        save_config(&path, &pinned).unwrap();
+        set_model_in(&path, "deepseek-v4-pro").unwrap();
+        let saved = read_stored_config(&path).unwrap().unwrap();
+        assert_eq!(saved.profiles["go"].protocol, "responses");
+        assert_eq!(
+            saved.profiles["local"].model, "stub",
+            "other profiles are untouched"
+        );
+        assert!(set_model_in(&path, "two words").is_err());
     }
 
     #[test]

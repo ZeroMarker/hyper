@@ -164,6 +164,14 @@ enum ProfileCommands {
     Use {
         name: String,
     },
+    /// List the models a profile's provider offers (default: active profile)
+    Models {
+        name: Option<String>,
+    },
+    /// Switch the active profile to another model
+    Model {
+        model: String,
+    },
     Test {
         name: Option<String>,
         #[arg(long, default_value_t = 10_000)]
@@ -287,6 +295,21 @@ pub fn run() -> Result<()> {
             ProfileCommands::Use { name } => {
                 crate::deepseek::profiles::use_profile(&name)?;
                 println!("active profile: {name}");
+            }
+            ProfileCommands::Models { name } => {
+                let current = crate::deepseek::profiles::current_model();
+                for id in crate::deepseek::profiles::list_models(name.as_deref())? {
+                    let marker = if name.is_none() && id == current {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{marker} {id}");
+                }
+            }
+            ProfileCommands::Model { model } => {
+                let profile = crate::deepseek::profiles::set_model(&model)?;
+                println!("profile {profile} now uses model {}", model.trim());
             }
             ProfileCommands::Test { name, timeout_ms } => println!(
                 "{}",

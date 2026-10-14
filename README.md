@@ -143,7 +143,16 @@ ha profile use work
 ha profile test              # active profile, or legacy settings
 ha profile test backup       # test without changing the active profile
 ha profile test work --timeout-ms 2000
+ha profile models            # models the active profile's provider offers
+ha profile models backup     # another profile's provider
+ha profile model glm-5.3     # switch the active profile's model
 ```
+
+`models` reads the provider's OpenAI-style `GET /models` and marks the current
+model. `model` rewrites only the active profile's model; a protocol that was the
+one detected for the old model follows the new one, and a pinned protocol is
+kept. In the TUI, `/model` lists models and `/model <name>` switches, and
+`/profile` / `/profile <name>` list and switch profiles.
 
 `list` shows configuration and authentication sources without loading or printing
 keys. `use` only saves the selection. `test` sends one small request with no tools
