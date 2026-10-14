@@ -22,6 +22,9 @@ pub enum PickerKind {
     Model,
     Profile,
     Preset,
+    Session,
+    /// A yes/no question; the chosen value is `yes` or `no`.
+    ConfirmUndo,
 }
 
 pub struct Picker {

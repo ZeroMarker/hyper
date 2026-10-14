@@ -54,6 +54,11 @@ pub struct App {
     pub session_allows: HashSet<String>,
     /// When an idle Ctrl-C on an empty input asked for a second press to quit.
     pub quit_armed: Option<Instant>,
+    /// The latest run started from this TUI, for `/diff` and `/undo`.
+    pub last_run: Option<String>,
+    /// Token use in this conversation: the last request's input is how full the
+    /// context is; input/output are running totals.
+    pub usage: crate::RunUsage,
     /// The conversation this TUI is continuing. `None` until the first message,
     /// which opens one; `/new` drops it so the next message starts fresh.
     pub session: Option<String>,
@@ -69,8 +74,15 @@ pub struct App {
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
+/// What a finished task reports back to the UI thread.
+struct TaskDone {
+    run_id: String,
+    text: String,
+    usage: crate::RunUsage,
+}
+
 enum Message {
-    Task(Result<String, String>),
+    Task(Result<TaskDone, String>),
     Models(Result<Vec<String>, String>),
 }
 
@@ -114,6 +126,8 @@ impl App {
             approvals: VecDeque::new(),
             session_allows: HashSet::new(),
             quit_armed: None,
+            last_run: None,
+            usage: crate::RunUsage::default(),
             session_id: session.clone(),
             session,
             gate: None,
@@ -154,6 +168,7 @@ impl App {
                 self.rendered_count = 0;
                 self.event_tail.clear();
                 self.live_text.clear();
+                self.usage = crate::RunUsage::default();
                 if let Some(previous) = self.session.take() {
                     self.output.push(format!(
                         "Hyper\n{} `{previous}`. {} `hyper session {previous}`.",
@@ -209,6 +224,9 @@ impl App {
                 )));
             }
             "/profile" => self.open_profile_picker(),
+            "/resume" => self.open_session_picker(),
+            "/diff" => self.show_last_diff(),
+            "/undo" => self.confirm_undo(),
             "/model" => self.open_model_picker(),
             _ if value.starts_with("/model ") => {
                 let model = value["/model ".len()..].trim();
@@ -288,8 +306,11 @@ impl App {
                         }
                     )
                     .and_then(|summary| {
-                        Ok(latest_display_output(&root, &summary.run_id)?
-                            .unwrap_or_else(|| format!("{} {}.", i18n::text("Task", "任务已"), summary.status)))
+                        let text = latest_display_output(&root, &summary.run_id)?
+                            .unwrap_or_else(|| format!("{} {}.", i18n::text("Task", "任务已"), summary.status));
+                        // Usage is a display nicety; a read failure shows none.
+                        let usage = crate::run_usage(&root, &summary.run_id).unwrap_or_default();
+                        Ok(TaskDone { run_id: summary.run_id, text, usage })
                     })
                     .map_err(|e| e.to_string());
                     let _ = tx.send(Message::Task(result));
@@ -402,6 +423,16 @@ impl App {
                     )),
                 }
             }
+            Some(Action::Choose(PickerKind::Session, id)) => {
+                self.overlay = None;
+                self.resume_session(&id);
+            }
+            Some(Action::Choose(PickerKind::ConfirmUndo, answer)) => {
+                self.overlay = None;
+                if answer == "yes" {
+                    self.undo_last_run();
+                }
+            }
             Some(Action::Choose(PickerKind::Preset, preset)) => {
                 self.overlay = Some(Overlay::Form(ProviderForm::for_preset(&preset)));
             }
@@ -429,6 +460,207 @@ impl App {
                 }
             }
         }
+    }
+
+    fn open_session_picker(&mut self) {
+        let sessions = workspace::Workspace::open(&self.root).and_then(|ws| ws.list_sessions(50));
+        let items: Vec<PickerItem> = match sessions {
+            Ok(sessions) => sessions
+                .into_iter()
+                .map(|session| PickerItem {
+                    current: self.session.as_deref() == Some(session.session_id.as_str()),
+                    label: session
+                        .title
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(60)
+                        .collect(),
+                    detail: format!(
+                        "{} {}  {}",
+                        session.messages,
+                        i18n::text("messages", "条消息"),
+                        session
+                            .updated_at
+                            .get(..16)
+                            .unwrap_or(&session.updated_at)
+                            .replace('T', " ")
+                    ),
+                    value: session.session_id,
+                })
+                .collect(),
+            Err(error) => {
+                self.output.push(format!(
+                    "Hyper\n{} {error:#}",
+                    i18n::text("Could not list conversations:", "无法读取对话列表：")
+                ));
+                return;
+            }
+        };
+        if items.is_empty() {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nNo earlier conversations in this workspace.",
+                    "Hyper\n这个工作区还没有之前的对话。",
+                )
+                .into(),
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::Picker(Picker::new(
+            PickerKind::Session,
+            i18n::text(" Resume conversation ", " 恢复对话 "),
+            items,
+        )));
+    }
+
+    /// Continue `id`: later messages join it, and its transcript is shown so
+    /// the user sees what the model will remember.
+    fn resume_session(&mut self, id: &str) {
+        let messages =
+            match workspace::Workspace::open(&self.root).and_then(|ws| ws.session_messages(id)) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    self.output.push(format!(
+                        "Hyper\n{} {error:#}",
+                        i18n::text("Could not open conversation:", "无法打开对话：")
+                    ));
+                    return;
+                }
+            };
+        self.output.clear();
+        self.rendered.clear();
+        self.rendered_count = 0;
+        self.event_tail.clear();
+        self.usage = crate::RunUsage::default();
+        self.session = Some(id.to_owned());
+        self.session_id = Some(id.to_owned());
+        for message in messages {
+            let role = if message.role == "user" {
+                "You"
+            } else {
+                "Hyper"
+            };
+            self.output.push(format!("{role}\n{}", message.content));
+        }
+        self.output.push(format!(
+            "Hyper\n{} `{id}`",
+            i18n::text("Resumed conversation", "已恢复对话")
+        ));
+        self.follow_tail = true;
+        self.scroll = 0;
+    }
+
+    fn show_last_diff(&mut self) {
+        let Some(run) = self.last_run.clone() else {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nNo run in this session yet.",
+                    "Hyper\n本次会话还没有运行过任务。",
+                )
+                .into(),
+            );
+            return;
+        };
+        let text = match crate::run_file_diffs(&self.root, &run) {
+            Ok(diffs) if diffs.is_empty() => {
+                i18n::text("The last run changed no files.", "上次运行没有改动文件。").into()
+            }
+            Ok(diffs) => diffs
+                .into_iter()
+                .map(|(path, diff)| format!("**{path}**\n```diff\n{}\n```", diff.trim_end()))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Err(error) => format!(
+                "{} {error:#}",
+                i18n::text("Could not read the diff:", "无法读取改动：")
+            ),
+        };
+        self.output.push(format!("Hyper\n{text}"));
+    }
+
+    /// Undo overwrites files, possibly including edits made since the run, so
+    /// it names the files and asks first.
+    fn confirm_undo(&mut self) {
+        let Some(run) = self.last_run.clone() else {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nNo run in this session to undo.",
+                    "Hyper\n本次会话还没有可撤销的运行。",
+                )
+                .into(),
+            );
+            return;
+        };
+        let mut paths =
+            match workspace::Workspace::open(&self.root).and_then(|ws| ws.list_checkpoints(&run)) {
+                Ok(checkpoints) => checkpoints
+                    .into_iter()
+                    .map(|checkpoint| checkpoint.target_path)
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    self.output.push(format!(
+                        "Hyper\n{} {error:#}",
+                        i18n::text("Could not read checkpoints:", "无法读取检查点：")
+                    ));
+                    return;
+                }
+            };
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nThe last run changed no files.",
+                    "Hyper\n上次运行没有改动文件。",
+                )
+                .into(),
+            );
+            return;
+        }
+        let item = |label: String, value: &str| PickerItem {
+            label,
+            detail: String::new(),
+            value: value.into(),
+            current: false,
+        };
+        self.overlay = Some(Overlay::Picker(Picker::new(
+            PickerKind::ConfirmUndo,
+            i18n::text(" Undo the last run? ", " 撤销上次运行？ "),
+            vec![
+                item(
+                    format!(
+                        "{} {}: {}",
+                        i18n::text("Revert", "还原"),
+                        paths.len(),
+                        paths.join(", ")
+                    ),
+                    "yes",
+                ),
+                item(i18n::text("Cancel", "取消").into(), "no"),
+            ],
+        )));
+    }
+
+    fn undo_last_run(&mut self) {
+        let Some(run) = self.last_run.take() else {
+            return;
+        };
+        self.output.push(match crate::undo_run(&self.root, &run) {
+            Ok(paths) => format!(
+                "Hyper\n{} {}",
+                i18n::text("Reverted:", "已还原："),
+                paths.join(", ")
+            ),
+            Err(error) => {
+                self.last_run = Some(run);
+                format!(
+                    "Hyper\n{} {error:#}",
+                    i18n::text("Undo failed:", "撤销失败：")
+                )
+            }
+        });
     }
 
     fn warn_env_model_override(&mut self) {
@@ -524,6 +756,21 @@ impl App {
             (
                 "/runs",
                 i18n::text("Show recent runs", "提示如何查看运行历史"),
+            ),
+            (
+                "/resume",
+                i18n::text("Resume an earlier conversation", "恢复之前的对话"),
+            ),
+            (
+                "/diff",
+                i18n::text("Show the last run's file changes", "查看上次运行的文件改动"),
+            ),
+            (
+                "/undo",
+                i18n::text(
+                    "Revert the last run's file changes",
+                    "撤销上次运行的文件改动",
+                ),
             ),
             ("/model", i18n::text("Select a model", "选择模型")),
             ("/profile", i18n::text("Select a provider", "选择服务商")),
@@ -677,13 +924,19 @@ impl App {
                     self.live_text.clear();
                     self.follow_tail = true;
                     self.scroll = 0;
-                    self.output.push(format!(
-                        "Hyper\n{}",
-                        r.unwrap_or_else(|e| format!(
-                            "{} {e}",
-                            i18n::text("Failed:", "执行失败：")
-                        ))
-                    ));
+                    let text = match r {
+                        Ok(done) => {
+                            self.last_run = Some(done.run_id);
+                            if done.usage.input > 0 {
+                                self.usage.last_input = done.usage.last_input;
+                            }
+                            self.usage.input += done.usage.input;
+                            self.usage.output += done.usage.output;
+                            done.text
+                        }
+                        Err(e) => format!("{} {e}", i18n::text("Failed:", "执行失败：")),
+                    };
+                    self.output.push(format!("Hyper\n{text}"));
                 }
             }
         }
@@ -846,13 +1099,38 @@ pub fn run_with_permissions(
     execution_mode: ExecutionMode,
     permissions: crate::ToolPermissions,
 ) -> Result<()> {
+    run_with_onboarding(root, session, execution_mode, permissions, false)
+}
+
+/// `onboarding` opens the provider setup first, for a first run with no key.
+pub fn run_with_onboarding(
+    root: PathBuf,
+    session: Option<String>,
+    execution_mode: ExecutionMode,
+    permissions: crate::ToolPermissions,
+    onboarding: bool,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     // Bracketed paste delivers a paste as one event, so its newlines land in
     // the message instead of each one sending it.
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = (|| {
-        let mut app = App::new(root, session, execution_mode);
+        let mut app = App::new(root, session.clone(), execution_mode);
         app.permissions = permissions;
+        if let Some(id) = &session {
+            app.resume_session(id);
+        }
+        if onboarding {
+            app.output.push(i18n::text(
+                "Hyper\nNo model provider is configured yet. Pick one to start; you can add more later with `/connect`.",
+                "Hyper\n还没有配置模型服务商。先选一个开始，之后可用 `/connect` 继续添加。",
+            ).into());
+            app.overlay = Some(Overlay::Picker(Picker::new(
+                PickerKind::Preset,
+                i18n::text(" Add provider ", " 添加服务商 "),
+                overlay::presets(),
+            )));
+        }
         let _signals = cancellation::signals(&app.process_cancellation)?;
         while !app.quit {
             app.tick = app.tick.wrapping_add(1);
@@ -923,6 +1201,103 @@ pub fn run_with_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_and_approve(app: &mut App, instruction: &str) {
+        app.input.set(instruction);
+        app.submit();
+        let started = std::time::Instant::now();
+        while app.busy {
+            app.poll();
+            if !app.approvals.is_empty() {
+                app.approve_first();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "run never finished"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn diff_and_undo_act_on_the_last_run_after_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        app.input.set("/undo");
+        app.submit();
+        assert!(app.overlay.is_none(), "nothing to undo yet");
+        run_and_approve(&mut app, "write:a.txt\nafter\n");
+        assert!(app.last_run.is_some());
+        app.input.set("/diff");
+        app.submit();
+        let shown = app.output.last().unwrap();
+        assert!(
+            shown.contains("-before") && shown.contains("+after"),
+            "{shown}"
+        );
+
+        app.input.set("/undo");
+        app.submit();
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Picker(p)) if p.kind == PickerKind::ConfirmUndo)
+        );
+        app.overlay_key(KeyCode::Down);
+        app.overlay_key(KeyCode::Enter);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "after",
+            "cancel keeps the file"
+        );
+        app.input.set("/undo");
+        app.submit();
+        app.overlay_key(KeyCode::Enter);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(app.last_run.is_none());
+    }
+
+    #[test]
+    fn resume_picker_loads_an_earlier_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace::Workspace::open(dir.path()).unwrap();
+        for (role, content) in [("user", "fix the parser"), ("assistant", "Fixed it.")] {
+            workspace
+                .append_session_message(
+                    "earlier-chat",
+                    &crate::SessionMessage {
+                        role: role.into(),
+                        content: content.into(),
+                        timestamp: "2026-10-14T01:00:00Z".into(),
+                        run_id: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        app.input.set("/resume");
+        app.submit();
+        match &app.overlay {
+            Some(Overlay::Picker(picker)) => {
+                assert_eq!(picker.visible()[0].label, "fix the parser")
+            }
+            _ => panic!("expected the conversation picker"),
+        }
+        app.overlay_key(KeyCode::Enter);
+        assert_eq!(app.session.as_deref(), Some("earlier-chat"));
+        assert!(
+            app.output
+                .iter()
+                .any(|message| message == "You\nfix the parser")
+        );
+        assert!(
+            app.output
+                .iter()
+                .any(|message| message == "Hyper\nFixed it.")
+        );
+    }
 
     #[test]
     fn cancel_command_unblocks_modal_and_conversation_can_continue() {

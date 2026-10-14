@@ -420,6 +420,21 @@ pub fn endpoint(base_url: &str, protocol: Protocol) -> String {
 /// Interactively collect the provider settings, or check the ones already in
 /// place. The key stays hidden while it is typed; the base URL and the model are
 /// shown with the defaults a bare Enter accepts.
+/// Whether a provider is configured: `Ok(false)` when no key is set anywhere,
+/// an error when settings exist but are malformed.
+pub fn provider_configured() -> Result<bool> {
+    let stored = read_stored_config(&config_path()?)?.unwrap_or_default();
+    let has_key = env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .is_some_and(|key| !key.trim().is_empty())
+        || !stored.deepseek_api_key.trim().is_empty()
+        || stored.active_profile.is_some();
+    if has_key {
+        resolve_settings(|key| env::var(key).ok(), Some(stored))?;
+    }
+    Ok(has_key)
+}
+
 pub fn ensure_api_key(force: bool) -> Result<()> {
     let path = config_path()?;
     let stored = read_stored_config(&path)?.unwrap_or_default();

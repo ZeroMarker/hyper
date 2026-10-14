@@ -3011,6 +3011,79 @@ pub fn get_run_details(
     Ok((ws.get_run(id)?, ws.events(id)?))
 }
 
+/// The file diffs a run recorded, as `(path, unified diff)` in order.
+pub fn run_file_diffs(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<(String, String)>> {
+    let workspace = Workspace::open(root)?;
+    if workspace.get_run(run_id)?.is_none() {
+        bail!("run not found: {run_id}")
+    }
+    Ok(workspace
+        .events(run_id)?
+        .iter()
+        .filter(|event| event.event_type == "tool.finished")
+        .filter_map(|event| {
+            let diff = event.payload.get("diff")?.as_str()?;
+            let path = event
+                .payload
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            Some((path.to_owned(), diff.to_owned()))
+        })
+        .collect())
+}
+
+/// Revert every file a run changed to how it was before the run: the earliest
+/// checkpoint of each path, so later edits in the same run are undone too. A
+/// file the run created is removed. Returns the restored paths.
+pub fn undo_run(root: impl AsRef<Path>, run_id: &str) -> Result<Vec<String>> {
+    let root = root.as_ref();
+    let checkpoints = Workspace::open(root)?.list_checkpoints(run_id)?;
+    let mut seen = std::collections::HashSet::new();
+    // Oldest first, so the first per path is its state before the run.
+    let earliest: Vec<_> = checkpoints
+        .into_iter()
+        .filter(|checkpoint| seen.insert(checkpoint.target_path.clone()))
+        .collect();
+    for checkpoint in &earliest {
+        crate::workspace::restore_checkpoint(root, checkpoint)?;
+    }
+    Ok(earliest
+        .into_iter()
+        .map(|checkpoint| checkpoint.target_path)
+        .collect())
+}
+
+/// Token use a run reported: the last request's input (how full the context
+/// was) and the totals across its model calls. Missing usage counts as zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunUsage {
+    pub last_input: u64,
+    pub input: u64,
+    pub output: u64,
+}
+
+pub fn run_usage(root: impl AsRef<Path>, run_id: &str) -> Result<RunUsage> {
+    let mut usage = RunUsage::default();
+    for event in Workspace::open(root)?.events(run_id)? {
+        if event.event_type != "model.iteration" {
+            continue;
+        }
+        let reported = &event.payload["usage"];
+        // Chat reports prompt/completion tokens; Responses and Messages input/output.
+        let count = |keys: [&str; 2]| {
+            keys.iter()
+                .find_map(|key| reported[*key].as_u64())
+                .unwrap_or(0)
+        };
+        let input = count(["prompt_tokens", "input_tokens"]);
+        usage.last_input = input;
+        usage.input += input;
+        usage.output += count(["completion_tokens", "output_tokens"]);
+    }
+    Ok(usage)
+}
+
 pub fn latest_model_reply(root: impl AsRef<Path>, run_id: &str) -> Result<Option<String>> {
     let workspace = Workspace::open(root)?;
     let events = workspace.events(run_id)?;

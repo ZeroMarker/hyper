@@ -898,6 +898,35 @@ fn approval_gate_allows_the_tool() {
     assert_eq!(summary.status, "finished");
 }
 
+/// Undoing a run restores each file to its state before the run, through
+/// several edits of the same file, and removes files the run created.
+#[test]
+fn undo_run_restores_each_file_to_before_the_run() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "v0").unwrap();
+    let mut spec = task("multi", AgentMode::Build, "write:a.txt\nv1");
+    for (id, instruction) in [("s2", "edit:a.txt\nv1\nv2"), ("s3", "write:new.txt\nfresh")] {
+        let mut step = spec.steps[0].clone();
+        step.id = id.into();
+        step.instruction = instruction.into();
+        spec.steps.push(step);
+    }
+    let summary = run_task(&spec, dir.path()).unwrap();
+    assert_eq!(summary.status, "finished", "{:?}", summary.failure);
+    assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "v2");
+    assert_eq!(
+        harness::run_file_diffs(dir.path(), &summary.run_id)
+            .unwrap()
+            .len(),
+        3
+    );
+    let mut restored = harness::undo_run(dir.path(), &summary.run_id).unwrap();
+    restored.sort();
+    assert_eq!(restored, ["a.txt", "new.txt"]);
+    assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "v0");
+    assert!(!dir.path().join("new.txt").exists());
+}
+
 /// The approver sees what an edit or write would change, as a diff, while the
 /// file stays untouched until approved.
 #[test]

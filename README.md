@@ -442,7 +442,17 @@ input first, and on an empty input exits only when pressed twice within two
 seconds (or use `/quit`). In an approval modal, `Esc` denies that action and
 `Ctrl-C` cancels the run. Slash commands:
 `/help`, `/runs`, `/session`, `/mode plan|build`, `/model`, `/profile`,
-`/connect`, `/new`, `/cancel`, and `/quit`. `/runs`
+`/connect`, `/resume`, `/diff`, `/undo`, `/new`, `/cancel`, and `/quit`.
+
+`/resume` lists this workspace's conversations and continues the chosen one,
+showing its transcript; `ha -c` (`--continue`) does the same for the most
+recent one, and `ha -c "prompt"` continues it from the command line. `/diff`
+shows the file changes of the last run started in this TUI, and `/undo`, after
+naming the files and asking, restores each to its state before that run (files
+the run created are removed). The header shows context use (`ctx`, the last
+request's input tokens) and the conversation's input/output token totals. On a
+first start with no provider configured, the TUI opens on provider setup
+instead of a line-by-line prompt. `/runs`
 lists recent runs inline; `/session` shows the conversation the next message
 will join.
 

@@ -41,6 +41,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bracketed paste so pasted newlines never send the message; and `↑`/`↓`
   history of earlier messages, saved per workspace.
 
+- **Conversations and changes from the TUI.** `/resume` picks an earlier
+  conversation and shows its transcript, and `hyper -c` continues the most
+  recent one. `/diff` shows the last run's file changes and `/undo` reverts
+  them after confirmation, restoring each file to its pre-run state.
+- **Token use in the header**: context size of the last request and the
+  conversation's input/output totals.
+- **First start opens provider setup in the TUI** instead of prompting line by
+  line in the terminal.
+
 ### Changed
 
 - `↑`/`↓` recall input history instead of scrolling the chat; scroll with

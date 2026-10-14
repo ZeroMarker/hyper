@@ -73,6 +73,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::styled(
+            if app.usage.input > 0 {
+                format!(
+                    "  •  ctx {} · ↑{} ↓{}",
+                    tokens(app.usage.last_input),
+                    tokens(app.usage.input),
+                    tokens(app.usage.output)
+                )
+            } else {
+                String::new()
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
         // Which conversation the next message joins, so a follow-up is never
         // silently answered by a fresh context.
         Span::styled(
@@ -322,6 +335,15 @@ fn render_approval(frame: &mut Frame, app: &App, input_area: Rect) {
         ),
         area,
     );
+}
+
+/// A token count in thousands once it is large: 950, 12.3k, 215k.
+fn tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..100_000 => format!("{:.1}k", count as f64 / 1_000.0),
+        _ => format!("{}k", count / 1_000),
+    }
 }
 
 /// Split the message into display rows of at most `width` columns, wrapping at

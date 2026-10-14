@@ -2,7 +2,6 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use serde_json::Value;
 
 use crate::{
     AgentMode, CancellationToken, Checkpoint, EventSink, ExecutionMode, Permission, RunOptions,
@@ -45,6 +44,9 @@ struct Cli {
     /// Continue a conversation: same as `--session`, for a direct prompt
     #[arg(long, value_name = "SESSION_ID")]
     session: Option<String>,
+    /// Continue the most recent conversation in this workspace (TUI or prompt)
+    #[arg(short = 'c', long = "continue", conflicts_with = "session")]
+    continue_last: bool,
 }
 
 #[derive(Subcommand)]
@@ -262,11 +264,32 @@ pub fn run() -> Result<()> {
     }
     if cli.command.is_none() {
         reject_mistyped_command(&cli.prompt)?;
+        let session = if cli.continue_last {
+            let latest = Workspace::open(&root)?.list_sessions(1)?;
+            Some(
+                latest
+                    .into_iter()
+                    .next()
+                    .context("no earlier conversation in this workspace to continue")?
+                    .session_id,
+            )
+        } else {
+            cli.session.clone()
+        };
+        if cli.prompt.is_empty() {
+            // A first run opens the TUI on provider setup instead of a
+            // line-by-line prompt.
+            let onboarding = !crate::deepseek::provider_configured()?;
+            return tui::run_with_onboarding(
+                root,
+                session,
+                execution_mode,
+                permissions.clone(),
+                onboarding,
+            );
+        }
         if !cli.jsonl {
             ensure_api_key(false)?;
-        }
-        if cli.prompt.is_empty() {
-            return tui::run_with_permissions(root, None, execution_mode, permissions.clone());
         }
         let prompt = cli.prompt.join(" ");
         let mode = if cli.plan {
@@ -278,7 +301,7 @@ pub fn run() -> Result<()> {
             &root,
             &prompt,
             mode,
-            cli.session.as_deref(),
+            session.as_deref(),
             execution_mode,
             cli.jsonl,
             permissions.clone(),
@@ -551,29 +574,13 @@ pub fn main() -> std::process::ExitCode {
 }
 
 fn diff(root: &std::path::Path, run_id: &str) -> Result<()> {
-    let (run, events) = get_run_details(root, run_id)?;
-    if run.is_none() {
-        bail!("run not found: {run_id}")
+    let diffs = crate::run_file_diffs(root, run_id)?;
+    if diffs.is_empty() {
+        println!("(no file diffs recorded for run {run_id})");
     }
-    let mut printed = 0;
-    for event in &events {
-        if event.event_type != "tool.finished" {
-            continue;
-        }
-        let Some(diff) = event.payload.get("diff").and_then(Value::as_str) else {
-            continue;
-        };
-        let path = event
-            .payload
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
+    for (path, diff) in diffs {
         println!("--- {path} ---");
         println!("{diff}");
-        printed += 1;
-    }
-    if printed == 0 {
-        println!("(no file diffs recorded for run {run_id})");
     }
     Ok(())
 }
@@ -788,6 +795,17 @@ mod tests {
             Some(Commands::Plan { prompt, .. }) => assert_eq!(prompt.join(" "), "fix the bug"),
             _ => panic!("expected the plan subcommand"),
         }
+    }
+
+    #[test]
+    fn continue_flag_parses_and_excludes_an_explicit_session() {
+        assert!(Cli::try_parse_from(["ha", "-c"]).unwrap().continue_last);
+        assert!(
+            Cli::try_parse_from(["ha", "--continue", "fix", "it"])
+                .unwrap()
+                .continue_last
+        );
+        assert!(Cli::try_parse_from(["ha", "-c", "--session", "x", "fix"]).is_err());
     }
 
     #[test]
