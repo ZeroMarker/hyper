@@ -50,6 +50,12 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **First start opens provider setup in the TUI** instead of prompting line by
   line in the terminal.
 
+- **`@` file mentions**: type `@` and part of a path to pick a workspace file.
+- **`/compact`** summarizes older turns from the TUI, and **`/permissions`**
+  switches approval between ask, allow and read-only for the session.
+- **Readable progress**: tool activity shows as `▸ bash cargo test`,
+  `✗ bash exit 101 (12.3s)` and `✓ read src/a.rs` instead of raw event names.
+
 ### Changed
 
 - `↑`/`↓` recall input history instead of scrolling the chat; scroll with

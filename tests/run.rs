@@ -620,7 +620,8 @@ fn session_run_publishes_persisted_events_to_the_tui_sink() {
     assert_eq!(summary.status, "finished");
     let updates = sink.drain();
     assert!(updates.iter().any(|line| line.contains("run.started")));
-    assert!(updates.iter().any(|line| line.contains("tool.finished")));
+    assert!(updates.iter().any(|line| line == "▸ read note.txt"), "{updates:?}");
+    assert!(updates.iter().any(|line| line == "✓ read note.txt"), "{updates:?}");
     assert!(updates.iter().any(|line| line.contains("run.finished")));
 }
 

@@ -25,6 +25,7 @@ pub enum PickerKind {
     Session,
     /// A yes/no question; the chosen value is `yes` or `no`.
     ConfirmUndo,
+    Permissions,
 }
 
 pub struct Picker {

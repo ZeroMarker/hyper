@@ -32,6 +32,8 @@ pub struct App {
     pub mode: AgentMode,
     pub execution_mode: ExecutionMode,
     pub permissions: crate::ToolPermissions,
+    /// The permissions the TUI started with; `/permissions` applies on top.
+    pub launch_permissions: crate::ToolPermissions,
     pub model: String,
     /// The active provider profile, shown next to the model.
     pub profile: Option<String>,
@@ -59,6 +61,9 @@ pub struct App {
     /// Token use in this conversation: the last request's input is how full the
     /// context is; input/output are running totals.
     pub usage: crate::RunUsage,
+    /// Workspace files for `@` mentions, refreshed when stale.
+    files: Option<(Instant, Vec<String>)>,
+    pub mention_index: usize,
     /// The conversation this TUI is continuing. `None` until the first message,
     /// which opens one; `/new` drops it so the next message starts fresh.
     pub session: Option<String>,
@@ -84,6 +89,7 @@ struct TaskDone {
 enum Message {
     Task(Result<TaskDone, String>),
     Models(Result<Vec<String>, String>),
+    Compacted(Result<crate::Compaction, String>),
 }
 
 impl App {
@@ -103,6 +109,7 @@ impl App {
             mode: AgentMode::Build,
             execution_mode,
             permissions: crate::ToolPermissions::default(),
+            launch_permissions: crate::ToolPermissions::default(),
             model,
             profile: profiles::current_profile(),
             overlay: None,
@@ -128,6 +135,8 @@ impl App {
             quit_armed: None,
             last_run: None,
             usage: crate::RunUsage::default(),
+            files: None,
+            mention_index: 0,
             session_id: session.clone(),
             session,
             gate: None,
@@ -226,6 +235,8 @@ impl App {
             "/profile" => self.open_profile_picker(),
             "/resume" => self.open_session_picker(),
             "/diff" => self.show_last_diff(),
+            "/permissions" => self.open_permissions_picker(),
+            "/compact" => self.start_compaction(),
             "/undo" => self.confirm_undo(),
             "/model" => self.open_model_picker(),
             _ if value.starts_with("/model ") => {
@@ -433,6 +444,41 @@ impl App {
                     self.undo_last_run();
                 }
             }
+            Some(Action::Choose(PickerKind::Permissions, choice)) => {
+                self.overlay = None;
+                let text = match choice.as_str() {
+                    "clear" => {
+                        self.session_allows.clear();
+                        i18n::text(
+                            "Cleared this session's \"always allow\" answers.",
+                            "已清除本会话的「总是允许」。",
+                        )
+                        .to_owned()
+                    }
+                    choice => {
+                        let permission = match choice {
+                            "allow" => crate::Permission::Allow,
+                            "deny" => crate::Permission::Deny,
+                            _ => crate::Permission::Ask,
+                        };
+                        // Rebuilt from the launch settings so a looser choice
+                        // can be undone by a stricter one later.
+                        let mut permissions = self.launch_permissions.clone();
+                        permissions.apply_approval(permission);
+                        permissions.source.push_str(" + /permissions");
+                        self.permissions = permissions;
+                        format!(
+                            "{} write {:?} / edit {:?} / bash {:?} {}",
+                            i18n::text("Permissions:", "权限："),
+                            self.permissions.write,
+                            self.permissions.edit,
+                            self.permissions.bash,
+                            i18n::text("(this session only)", "（仅本次会话）")
+                        )
+                    }
+                };
+                self.output.push(format!("Hyper\n{text}"));
+            }
             Some(Action::Choose(PickerKind::Preset, preset)) => {
                 self.overlay = Some(Overlay::Form(ProviderForm::for_preset(&preset)));
             }
@@ -550,6 +596,93 @@ impl App {
         ));
         self.follow_tail = true;
         self.scroll = 0;
+    }
+
+    fn open_permissions_picker(&mut self) {
+        let current = self.permissions.write;
+        let item = |label: &str, detail: &str, value: &str, current: bool| PickerItem {
+            label: label.into(),
+            detail: detail.into(),
+            value: value.into(),
+            current,
+        };
+        let mut items = vec![
+            item(
+                i18n::text("Ask each time", "每次询问"),
+                i18n::text(
+                    "write / edit / bash ask first",
+                    "write / edit / bash 执行前确认",
+                ),
+                "ask",
+                current == crate::Permission::Ask,
+            ),
+            item(
+                i18n::text("Allow all", "全部允许"),
+                i18n::text(
+                    "write / edit / bash run without asking",
+                    "write / edit / bash 直接执行",
+                ),
+                "allow",
+                current == crate::Permission::Allow,
+            ),
+            item(
+                i18n::text("Read only", "只读"),
+                i18n::text(
+                    "write / edit / bash are refused",
+                    "拒绝 write / edit / bash",
+                ),
+                "deny",
+                current == crate::Permission::Deny,
+            ),
+        ];
+        if !self.session_allows.is_empty() {
+            items.push(item(
+                &format!(
+                    "{} ({})",
+                    i18n::text("Forget \"always allow\" answers", "清除「总是允许」"),
+                    self.session_allows.len()
+                ),
+                "",
+                "clear",
+                false,
+            ));
+        }
+        self.overlay = Some(Overlay::Picker(Picker::new(
+            PickerKind::Permissions,
+            i18n::text(" Permissions (this session) ", " 权限（仅本次会话） "),
+            items,
+        )));
+    }
+
+    /// Summarize the conversation's older turns with the model, keeping the
+    /// latest turn verbatim. Runs off the UI thread and can be cancelled.
+    fn start_compaction(&mut self) {
+        let Some(session) = self.session.clone() else {
+            self.output.push(
+                i18n::text(
+                    "Hyper\nNo conversation to compact yet.",
+                    "Hyper\n还没有可压缩的对话。",
+                )
+                .into(),
+            );
+            return;
+        };
+        self.busy = true;
+        let cancellation = self.process_cancellation.child();
+        self.cancellation = Some(cancellation.clone());
+        let (root, tx) = (self.root.clone(), self.tx.clone());
+        self.output.push(
+            i18n::text(
+                "Hyper\nCompacting older turns…",
+                "Hyper\n正在压缩较早的对话…",
+            )
+            .into(),
+        );
+        self.worker = Some(std::thread::spawn(move || {
+            let result = crate::compact_session(&root, &session, 1, cancellation)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(Message::Compacted(result));
+        }));
     }
 
     fn show_last_diff(&mut self) {
@@ -772,6 +905,17 @@ impl App {
                     "撤销上次运行的文件改动",
                 ),
             ),
+            (
+                "/compact",
+                i18n::text(
+                    "Summarize older turns to free context",
+                    "压缩较早的对话以释放上下文",
+                ),
+            ),
+            (
+                "/permissions",
+                i18n::text("Change what needs approval", "调整需要确认的操作"),
+            ),
             ("/model", i18n::text("Select a model", "选择模型")),
             ("/profile", i18n::text("Select a provider", "选择服务商")),
             (
@@ -802,6 +946,67 @@ impl App {
         if count > 0 {
             self.command_index = (self.command_index + 1) % count;
         }
+    }
+
+    /// The `@query` being typed: an `@` at the start or after whitespace, with
+    /// no whitespace between it and the cursor. Returns its byte offset.
+    fn mention(&self) -> Option<(usize, String)> {
+        let before = &self.input.text[..self.input.cursor.min(self.input.text.len())];
+        let at = before.rfind('@')?;
+        let query = &before[at + 1..];
+        let starts_word = before[..at].chars().last().is_none_or(char::is_whitespace);
+        (starts_word && !query.contains(char::is_whitespace)).then(|| (at, query.to_owned()))
+    }
+
+    /// Up to eight workspace files matching the `@` query: file names starting
+    /// with it first, then any path containing it, shorter paths first.
+    pub fn mention_suggestions(&mut self) -> Vec<String> {
+        let Some((_, query)) = self.mention() else {
+            return Vec::new();
+        };
+        if self
+            .files
+            .as_ref()
+            .is_none_or(|(loaded, _)| loaded.elapsed() > Duration::from_secs(10))
+        {
+            let files = crate::engine::workspace_files(&self.root, false, 20_000);
+            self.files = Some((Instant::now(), files));
+        }
+        let query = query.to_lowercase();
+        let files = &self.files.as_ref().expect("loaded above").1;
+        let mut matches: Vec<(bool, usize, &String)> = files
+            .iter()
+            .filter_map(|path| {
+                let lower = path.to_lowercase();
+                let name = lower.rsplit('/').next().unwrap_or(&lower);
+                lower
+                    .contains(&query)
+                    .then(|| (!name.starts_with(&query), path.len(), path))
+            })
+            .collect();
+        matches.sort();
+        matches
+            .into_iter()
+            .take(8)
+            .map(|(_, _, path)| path.clone())
+            .collect()
+    }
+
+    /// Replace the `@query` with the chosen path.
+    fn complete_mention(&mut self) -> bool {
+        let suggestions = self.mention_suggestions();
+        let (Some((at, _)), Some(path)) = (
+            self.mention(),
+            suggestions.get(self.mention_index.min(suggestions.len().saturating_sub(1))),
+        ) else {
+            return false;
+        };
+        let end = self.input.cursor.min(self.input.text.len());
+        let path = path.clone();
+        self.input.text.replace_range(at..end, &format!("@{path} "));
+        self.input.cursor = at + path.len() + 2;
+        self.mention_index = 0;
+        true
     }
 
     fn complete_command(&mut self) -> bool {
@@ -907,6 +1112,40 @@ impl App {
                         }
                     }
                 }
+                Message::Compacted(result) => {
+                    self.busy = false;
+                    self.cancellation = None;
+                    if let Some(worker) = self.worker.take() {
+                        let _ = worker.join();
+                    }
+                    if self.quit_requested {
+                        self.quit = true;
+                    }
+                    self.output.push(match result {
+                        Ok(record) if record.status == "finished" => {
+                            // The next request starts from the summary.
+                            self.usage.last_input = 0;
+                            format!(
+                                "Hyper\n{} {} {} (~{} → ~{} tokens)",
+                                i18n::text("Compacted", "已压缩"),
+                                record.covered_messages,
+                                i18n::text("messages", "条消息"),
+                                record.covered_estimated_tokens,
+                                record.summary_estimated_tokens
+                            )
+                        }
+                        Ok(record) => format!(
+                            "Hyper\n{} {}: {}",
+                            i18n::text("Compaction", "压缩"),
+                            record.status,
+                            record.error.unwrap_or_default()
+                        ),
+                        Err(error) => format!(
+                            "Hyper\n{} {error}",
+                            i18n::text("Could not compact:", "无法压缩：")
+                        ),
+                    });
+                }
                 Message::Task(r) => {
                     // A first run creates the workspace storage history waits on.
                     self.history.flush();
@@ -950,6 +1189,24 @@ impl App {
         if !matches!(code, KeyCode::Up | KeyCode::Down) && !matches!(code, KeyCode::Char(_) if ctrl)
         {
             self.command_index = 0;
+        }
+        if !self.mention_suggestions().is_empty() {
+            let count = self.mention_suggestions().len();
+            match code {
+                KeyCode::Up => {
+                    self.mention_index = self.mention_index.checked_sub(1).unwrap_or(count - 1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.mention_index = (self.mention_index + 1) % count;
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter if modifiers.is_empty() => {
+                    self.complete_mention();
+                    return;
+                }
+                _ => self.mention_index = 0,
+            }
         }
         match code {
             // Esc never quits: it cancels a run or clears the draft.
@@ -1116,6 +1373,7 @@ pub fn run_with_onboarding(
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = (|| {
         let mut app = App::new(root, session.clone(), execution_mode);
+        app.launch_permissions = permissions.clone();
         app.permissions = permissions;
         if let Some(id) = &session {
             app.resume_session(id);
@@ -1297,6 +1555,58 @@ mod tests {
                 .iter()
                 .any(|message| message == "Hyper\nFixed it.")
         );
+    }
+
+    #[test]
+    fn at_mentions_complete_workspace_paths_without_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        for file in ["src/main.rs", "src/domain.rs", "README.md"] {
+            std::fs::write(dir.path().join(file), "").unwrap();
+        }
+        let mut app = App::new(dir.path().to_owned(), None, ExecutionMode::default());
+        type_text(&mut app, "mail me@main.rs");
+        assert!(
+            app.mention_suggestions().is_empty(),
+            "an email address is not a mention"
+        );
+        app.input.clear();
+        type_text(&mut app, "look at @MAI");
+        assert_eq!(
+            app.mention_suggestions(),
+            ["src/main.rs", "src/domain.rs"],
+            "file names starting with it come first"
+        );
+        app.key(KeyCode::Down, KeyModifiers::NONE);
+        app.key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.input.text, "look at @src/domain.rs ");
+        assert_eq!(
+            app.output.len(),
+            1,
+            "Enter inserted the path instead of sending"
+        );
+        assert!(app.mention_suggestions().is_empty());
+    }
+
+    #[test]
+    fn permissions_picker_loosens_and_tightens_for_the_session() {
+        let mut app = App::new(PathBuf::from("."), None, ExecutionMode::default());
+        assert_eq!(app.permissions.write, crate::Permission::Ask);
+        app.input.set("/permissions");
+        app.submit();
+        app.overlay_key(KeyCode::Down);
+        app.overlay_key(KeyCode::Enter);
+        assert_eq!(app.permissions.bash, crate::Permission::Allow);
+        app.input.set("/permissions");
+        app.submit();
+        app.overlay_key(KeyCode::Up);
+        app.overlay_key(KeyCode::Enter);
+        assert_eq!(
+            app.permissions.bash,
+            crate::Permission::Ask,
+            "a stricter choice undoes a looser one"
+        );
+        assert!(app.permissions.source.ends_with("+ /permissions"));
     }
 
     #[test]

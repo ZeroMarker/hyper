@@ -190,39 +190,148 @@ impl Drop for CancellableStdout {
 }
 
 fn event_line(event: &HarnessEvent) -> String {
-    if event.event_type == "model.context_budget" {
-        return format!(
-            "context {}/{} +{} output{}",
-            event.payload["estimatedInputTokens"],
-            event.payload["maxInputTokens"],
-            event.payload["outputTokens"],
-            if event.payload["fits"] == false {
-                " exceeded"
+    let payload = &event.payload;
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or("").replace('\n', " ");
+    // What a tool acts on, from short fields only; outputs and file contents
+    // never reach the UI queue.
+    let target = || -> String {
+        let input = &payload["input"];
+        match payload["tool"].as_str().unwrap_or("") {
+            "bash" => text(&payload["command"]),
+            "read" => {
+                let path = text(&input["path"]);
+                match input["line"].as_u64() {
+                    Some(line) => format!("{path}:{line}"),
+                    None => path,
+                }
+            }
+            "search" => format!("\"{}\"", text(&input["query"]).trim_matches('"')),
+            _ => text(&payload["path"]),
+        }
+    };
+    let line = match event.event_type.as_str() {
+        "model.context_budget" => format!(
+            "· {} {}/{}{}",
+            crate::i18n::text("context", "上下文"),
+            payload["estimatedInputTokens"],
+            payload["maxInputTokens"],
+            if payload["fits"] == false {
+                crate::i18n::text(" exceeded", " 超出")
             } else {
                 ""
             }
-        );
-    }
-    let detail = match event.event_type.as_str() {
-        "model.started" => event.payload.get("model"),
-        "tool.started" | "tool.finished" | "tool.cancelled" => event.payload.get("tool"),
-        "step.failed" | "run.failed" => event.payload.get("message"),
-        _ => None,
-    }
-    .and_then(serde_json::Value::as_str)
-    .unwrap_or("");
-    let step = event.step_id.as_deref().unwrap_or("");
-    format!("{} {} {}", event.event_type, step, detail)
-        .trim()
-        .chars()
-        .take(120)
-        .collect()
+        ),
+        "model.started" => format!(
+            "· {} {}",
+            crate::i18n::text("asking", "请求"),
+            text(&payload["model"])
+        ),
+        "tool.started" => format!("▸ {} {}", text(&payload["tool"]), target()),
+        "tool.finished" => {
+            let code = payload["exitCode"].as_i64();
+            let mark = if code.is_some_and(|code| code != 0) && payload["tool"] != "search" {
+                "✗"
+            } else {
+                "✓"
+            };
+            let mut line = format!("{mark} {}", text(&payload["tool"]));
+            let target = match payload["tool"].as_str() {
+                Some("search") => format!(
+                    "\"{}\" → {}",
+                    text(&payload["query"]),
+                    payload["lines"].as_array().map_or(0, Vec::len)
+                ),
+                Some("bash") => match code {
+                    Some(code) if code != 0 => format!("exit {code}"),
+                    _ => String::new(),
+                },
+                _ => text(&payload["path"]),
+            };
+            if !target.is_empty() {
+                line.push(' ');
+                line.push_str(&target);
+            }
+            if let Some(ms) = payload["durationMs"].as_u64() {
+                line.push_str(&format!(" ({:.1}s)", ms as f64 / 1000.0));
+            }
+            line
+        }
+        "tool.denied" => format!(
+            "⊘ {} {}: {}",
+            text(&payload["tool"]),
+            crate::i18n::text("denied", "被拒绝"),
+            text(&payload["reason"])
+        ),
+        "tool.failed" | "step.failed" | "run.failed" => format!(
+            "✗ {}",
+            text(&payload["failure"]["message"])
+                .chars()
+                .take(100)
+                .collect::<String>()
+        ),
+        other => {
+            let step = event.step_id.as_deref().unwrap_or("");
+            format!("· {other} {step}")
+        }
+    };
+    line.trim().chars().take(120).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn progress_lines_say_what_ran_how_long_and_whether_it_worked() {
+        let line = |event_type: &str, payload: serde_json::Value| {
+            event_line(&HarnessEvent {
+                event_id: "e".into(),
+                run_id: "run".into(),
+                task_id: "task".into(),
+                event_type: event_type.into(),
+                timestamp: "now".into(),
+                step_id: Some("build".into()),
+                step_index: Some(0),
+                payload,
+            })
+        };
+        assert_eq!(
+            line(
+                "tool.started",
+                json!({"tool":"bash","command":"cargo test"})
+            ),
+            "▸ bash cargo test"
+        );
+        assert_eq!(
+            line(
+                "tool.finished",
+                json!({"tool":"bash","exitCode":101,"durationMs":12300,"stdout":"secret"})
+            ),
+            "✗ bash exit 101 (12.3s)"
+        );
+        assert_eq!(
+            line(
+                "tool.started",
+                json!({"tool":"read","input":{"path":"src/a.rs","line":40}})
+            ),
+            "▸ read src/a.rs:40"
+        );
+        assert_eq!(
+            line(
+                "tool.finished",
+                json!({"tool":"search","query":"fn main","lines":["a","b"],"exitCode":0})
+            ),
+            "✓ search \"fn main\" → 2"
+        );
+        assert!(
+            line(
+                "tool.denied",
+                json!({"tool":"bash","reason":"user denied approval"})
+            )
+            .starts_with("⊘ bash")
+        );
+    }
 
     #[test]
     fn queue_is_bounded_and_does_not_copy_large_payloads() {
@@ -236,12 +345,12 @@ mod tests {
                 timestamp: "now".into(),
                 step_id: Some(index.to_string()),
                 step_index: Some(index),
-                payload: json!({"tool":"read","content":"private output"}),
+                payload: json!({"tool":"read","path":format!("f{index}.rs"),"content":"private output"}),
             });
         }
         let lines = sink.drain();
         assert_eq!(lines.len(), MAX_PENDING);
-        assert!(lines[0].contains("10"));
+        assert_eq!(lines[0], "✓ read f10.rs");
         assert!(lines.iter().all(|line| !line.contains("private output")));
         assert!(sink.drain().is_empty());
 

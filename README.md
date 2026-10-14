@@ -442,7 +442,16 @@ input first, and on an empty input exits only when pressed twice within two
 seconds (or use `/quit`). In an approval modal, `Esc` denies that action and
 `Ctrl-C` cancels the run. Slash commands:
 `/help`, `/runs`, `/session`, `/mode plan|build`, `/model`, `/profile`,
-`/connect`, `/resume`, `/diff`, `/undo`, `/new`, `/cancel`, and `/quit`.
+`/connect`, `/resume`, `/diff`, `/undo`, `/compact`, `/permissions`, `/new`,
+`/cancel`, and `/quit`.
+
+Type `@` and part of a path to pick a workspace file (ignored files are left
+out); `Tab` or `Enter` inserts `@path`, which the model is told to read when it
+matters. `/compact` summarizes the conversation's older turns (keeping the
+latest) to free context, as `ha compact` does. `/permissions` switches
+write/edit/bash between asking, allowing and refusing for the rest of the TUI
+session, and forgets "always allow" answers. While a task runs, its progress
+reads as `▸ bash cargo test` / `✗ bash exit 101 (12.3s)` / `✓ read src/a.rs`.
 
 `/resume` lists this workspace's conversations and continues the chosen one,
 showing its transcript; `ha -c` (`--continue`) does the same for the most

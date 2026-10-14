@@ -116,7 +116,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if !app.event_tail.is_empty() {
         chat.push(Line::styled(
-            "Events",
+            i18n::text("Progress", "进度"),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -206,6 +206,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     render_approval(frame, app, areas[2]);
     render_command_palette(frame, app, areas[2]);
+    render_mentions(frame, app, areas[2]);
     match &app.overlay {
         Some(Overlay::Picker(picker)) => render_picker(frame, picker),
         Some(Overlay::Form(form)) => render_form(frame, form),
@@ -585,6 +586,52 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect) {
             .block(
                 Block::default()
                     .title(" Commands ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            ),
+        area,
+        &mut state,
+    );
+}
+
+fn render_mentions(frame: &mut Frame, app: &mut App, input_area: Rect) {
+    if !app.approvals.is_empty() || app.overlay.is_some() {
+        return;
+    }
+    let files = app.mention_suggestions();
+    if files.is_empty() {
+        return;
+    }
+    let height = files.len() as u16 + 2;
+    let area = Rect::new(
+        input_area.x,
+        input_area.y.saturating_sub(height),
+        input_area.width,
+        height,
+    );
+    let items = files.iter().map(|path| {
+        ListItem::new(Line::styled(
+            format!(" {path}"),
+            Style::default().fg(Color::White),
+        ))
+    });
+    let mut state =
+        ListState::default().with_selected(Some(app.mention_index.min(files.len() - 1)));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("›")
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(
+                Block::default()
+                    .title(i18n::text(
+                        " Files — Tab/Enter insert ",
+                        " 文件 — Tab/Enter 插入 ",
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             ),
