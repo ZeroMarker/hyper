@@ -9,6 +9,8 @@ import tempfile
 
 def check(task_id, root, reply):
     root = Path(root).resolve()
+    if task_id == 'python-boundary-verify':
+        task_id = 'python-boundary'
     if task_id == 'readonly-plan':
         assert all(word in reply for word in ['src/settings.cjs', 'DELAY_MS', '9000'])
         return

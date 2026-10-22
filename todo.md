@@ -12,7 +12,7 @@
 
 ### P1：提高任务完成率
 
-- [ ] **真实模型基线后续**：`1125252` 已按既有口径跑通 30/30（见 [报告](evals/baselines/2026-10-14-tui-usability/report.md)）。剩余：runner 已支持 `--autocompact`/`--loop-compact` 与 turn 级 `verify` 及对应指标，但尚无带 `verify` 的任务，也未用真实模型跑过开启压缩的基线；long-session 最后一轮请求数与 token 波动需更多重复次数判断；成本仍未知。
+- [ ] **真实模型基线后续**：`1125252` 已按既有口径跑通 30/30（见 [报告](evals/baselines/2026-10-14-tui-usability/report.md)）。剩余：runner 已支持 `--autocompact`/`--loop-compact`、turn 级 `verify` 及对应指标，并有可选任务 `python-boundary-verify`（离线 stub 已端到端覆盖），但开启压缩和 verify 的真实模型基线尚未跑；long-session 最后一轮请求数与 token 波动需更多重复次数判断；成本仍未知。
 - [ ] **P1-2 相关上下文**：剩余按 prompt/路径/语言的相关性摘录选择、Python/JS 覆盖与 repo map/语法索引，以固定任务集比较收益。（行/字节范围读取已交付。）
 - [ ] **P1-3 编辑和验证闭环**：剩余 Hashline/patch 选型；原子写入、重复块、并发变更、快照与 Unicode 已验证。（唯一匹配、陈旧 hash、verify 有限重试与评测指标已交付。）
 - [ ] **P1-4 项目说明**：剩余目录 override 合并语义（当前只按固定顺序拼接）与按需 skills。（根与目录 `AGENTS.md` 加载已交付。）

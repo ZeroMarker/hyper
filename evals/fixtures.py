@@ -23,6 +23,8 @@ def files(task_id):
         'long-session': {'bounds.py': 'def clamp(n, lo, hi):\n    return n\n'},
         'checkpoint-recovery': {'bounds.py': 'def clamp(n, lo, hi):\n    return n\n'},
     }
+    # Same repository as python-boundary; this variant adds a verify gate.
+    repositories['python-boundary-verify'] = repositories['python-boundary']
     result = repositories[task_id].copy()
     result['README.md'] = 'Offline evaluation fixture. No packages or network needed.\n'
     if task_id.startswith('rust-'):

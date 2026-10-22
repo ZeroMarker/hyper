@@ -1,4 +1,5 @@
 """Exercise independent graders and the real CLI against an offline provider."""
+import argparse
 import contextlib
 import http.server
 import json
@@ -15,7 +16,7 @@ from grade import check
 from run import (audit_directory, invoke, recover, snapshot, write_report, usage_metrics,
                  edit_metrics, verification_metrics, attempt_edit_metrics,
                  attempt_verification_metrics, toolchain_environment, constraint_metrics,
-                 compaction_metrics, attempt_compaction_metrics)
+                 compaction_metrics, attempt_compaction_metrics, attempt)
 
 HERE = Path(__file__).resolve().parent
 
@@ -33,6 +34,7 @@ class Graders(unittest.TestCase):
             'rust-clamp': {'src/lib.rs': 'pub fn clamp(n:i32,lo:i32,hi:i32)->i32 { n.max(lo).min(hi) }'},
             'rust-cross-file': {'src/lib.rs': 'mod rates; pub fn shipping(w:u32)->u32 {5+w*rates::RATE}', 'src/rates.rs': 'pub const RATE:u32=4;'},
             'python-boundary': {'bounds.py': 'def inside(n,lo,hi): return lo <= n <= hi\n'},
+            'python-boundary-verify': {'bounds.py': 'def inside(n,lo,hi): return lo <= n <= hi\n'},
             'python-cross-file': {'catalog.py': 'PRICES={"book":1000,"pen":150}\n', 'checkout.py': 'from catalog import PRICES\ndef total(items,discount_percent=0): return sum(PRICES[i] for i in items)*(100-discount_percent)//100\n'},
             'js-empty': {'stats.cjs': 'exports.mean = xs => xs.length ? xs.reduce((a,b)=>a+b,0)/xs.length : null;'},
             'js-repeated-block': {'routes.cjs': 'exports.routes=[{name:"public",timeout:30},{name:"admin",timeout:120},{name:"health",timeout:30}];'},
@@ -41,8 +43,9 @@ class Graders(unittest.TestCase):
             'checkpoint-recovery': {'bounds.py': 'def clamp(n,lo,hi): return min(max(n,lo),hi)\n'},
         }
         tasks = json.loads((HERE/'suite.json').read_text())['tasks']
-        self.assertEqual(len(tasks), 10)
-        self.assertEqual(len({t['id'] for t in tasks}), 10)
+        self.assertEqual(len(tasks), 11)
+        self.assertEqual(len({t['id'] for t in tasks}), 11)
+        self.assertEqual([t['id'] for t in tasks if t.get('optional')], ['python-boundary-verify'])
         for task in tasks:
             with self.subTest(task=task['id']), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -272,6 +275,32 @@ class OfflineCLI(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join()
+
+    def test_verify_turn_runs_the_gate_through_a_task_file(self):
+        task = next(t for t in json.loads((HERE/'suite.json').read_text())['tasks'] if t['id'] == 'python-boundary-verify')
+        with tempfile.TemporaryDirectory() as temp, self.provider() as server:
+            args = argparse.Namespace(output=Path(temp), hyper=self.binary, timeout=30)
+            env = os.environ.copy()
+            env.update({'DEEPSEEK_API_KEY':'stub','DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1',
+                        'DEEPSEEK_MODEL':'stub','DEEPSEEK_PROTOCOL':'chat'})
+            result = attempt(task, 1, args, env)
+            spec = json.loads((Path(temp)/'python-boundary-verify-1/task-1.json').read_text())
+            self.assertEqual(spec['steps'][0]['verify'], task['turns'][0]['verify'])
+            # The stub never edits, so the unfixed repo fails every gate attempt.
+            verification = result['verification']
+            self.assertEqual((verification['attempts'], verification['failures'], verification['retries']), (3, 3, 2))
+            self.assertFalse(verification['passed'])
+            self.assertFalse(result['passed'])
+
+    def test_optional_tasks_are_excluded_from_the_default_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for extra, expected in [([], 10), (['--task', 'python-boundary-verify'], 1)]:
+                result = subprocess.run([sys.executable, str(HERE/'run.py'), '--hyper', str(self.binary), '--output', str(Path(temp)/f'o{expected}'),
+                                         '--model', 'stub', '--base-url', 'http://127.0.0.1:9/v1', '--protocol', 'chat',
+                                         '--repetitions', '1', '--timeout', '5', *extra],
+                                        env={**os.environ, 'DEEPSEEK_API_KEY': 'stub'}, capture_output=True, text=True, timeout=120)
+                names = [line.split(' #')[0] for line in result.stdout.splitlines() if ' #1:' in line]
+                self.assertEqual(len(set(names)), expected, result.stdout + result.stderr)
 
     def test_full_runner_pins_config_and_writes_report(self):
         with tempfile.TemporaryDirectory() as temp, self.provider() as server:

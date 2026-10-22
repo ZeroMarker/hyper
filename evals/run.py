@@ -484,7 +484,8 @@ def main():
     ids = {t['id'] for t in tasks}
     if args.task and not set(args.task) <= ids:
         parser.error('Unknown task ID')
-    tasks = [t for t in tasks if not args.task or t['id'] in args.task]
+    # Optional tasks stay out of the pinned default set unless named.
+    tasks = [t for t in tasks if (t['id'] in args.task if args.task else not t.get('optional'))]
     key = os.environ.get('DEEPSEEK_API_KEY', '').strip()
     if not key and args.config.exists():
         key = json.loads(args.config.read_text()).get('deepseek_api_key', '').strip()

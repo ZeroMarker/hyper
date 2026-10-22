@@ -157,6 +157,25 @@
           "prompt": "The evaluator confirmed your intentionally incorrect edit failed its behavior checks, then restored the checkpoint and verified the original file. Reinspect bounds.py and fix clamp using edit: return lo below range, hi above range, n otherwise, assuming lo <= hi. Validate offline."
         }
       ]
+    },
+    {
+      "id": "python-boundary-verify",
+      "optional": true,
+      "allowed_changes": [
+        "bounds.py"
+      ],
+      "turns": [
+        {
+          "mode": "build",
+          "prompt": "Fix bounds.py so test_bounds.py passes: inside must include both lo and hi. Do not modify tests. Preserve the API.",
+          "verify": {
+            "commands": [
+              "python3 test_bounds.py"
+            ],
+            "retries": 2
+          }
+        }
+      ]
     }
   ]
 }
