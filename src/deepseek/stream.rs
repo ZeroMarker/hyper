@@ -97,11 +97,15 @@ fn open(config: &DeepSeekConfig, body: &Value) -> Result<Response> {
                 .wait(retry_delay(attempt, retry_after))?;
             continue;
         }
-        bail!(
+        let message = format!(
             "{} API returned {status} ({})",
             config.provider,
             super::profiles::status_category(status, &response_body)
         );
+        if super::needs_reasoning_content(status, &response_body) {
+            return Err(super::ReasoningContentRequired(message).into());
+        }
+        bail!("{message}");
     }
     bail!("{} API request exhausted all attempts", config.provider)
 }

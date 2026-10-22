@@ -798,6 +798,59 @@ fn chat_body(
     body
 }
 
+/// The provider answered 400 because an assistant tool-call turn lacked
+/// `reasoning_content`. Only the status line is kept, never the provider text.
+#[derive(Debug)]
+pub(crate) struct ReasoningContentRequired(String);
+
+impl std::fmt::Display for ReasoningContentRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReasoningContentRequired {}
+
+/// A thinking-mode provider's 400 that names the missing `reasoning_content`.
+pub(crate) fn needs_reasoning_content(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::BAD_REQUEST && body.contains("reasoning_content")
+}
+
+/// The same request with an empty `reasoning_content` on every tool-call turn
+/// that has none, or `None` when there is nothing to add. A gateway can route a
+/// round to an upstream that thinks but streams no reasoning text; the next
+/// request must still carry the field.
+fn with_empty_reasoning(body: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut patched = body.clone();
+    let mut changed = false;
+    for message in patched["messages"].as_array_mut()? {
+        if message["role"] == "assistant"
+            && message["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty())
+            && message.get("reasoning_content").is_none()
+        {
+            message["reasoning_content"] = json!("");
+            changed = true;
+        }
+    }
+    changed.then_some(patched)
+}
+
+fn stream_or_patch(
+    config: &DeepSeekConfig,
+    body: &serde_json::Value,
+    on_text: &mut TextCallback<'_>,
+) -> Result<ModelReply> {
+    match stream_chat(config, body, on_text) {
+        Err(error) if error.is::<ReasoningContentRequired>() => match with_empty_reasoning(body) {
+            Some(patched) => stream_chat(config, &patched, on_text),
+            None => Err(error),
+        },
+        other => other,
+    }
+}
+
 fn openai_chat(
     config: &DeepSeekConfig,
     messages: &[serde_json::Value],
@@ -806,10 +859,17 @@ fn openai_chat(
 ) -> Result<ModelReply> {
     let body = chat_body(config, messages, tools, on_text.is_some());
     config.budget.check(serde_json::to_vec(&body)?.len())?;
-    if let Some(on_text) = on_text {
-        return stream_chat(config, &body, on_text);
-    }
-    let response = post(config, &body)?;
+    let first = match on_text {
+        Some(on_text) => return stream_or_patch(config, &body, on_text),
+        None => post(config, &body),
+    };
+    let response = match first {
+        Err(error) if error.is::<ReasoningContentRequired>() => match with_empty_reasoning(&body) {
+            Some(patched) => post(config, &patched)?,
+            None => return Err(error),
+        },
+        other => other?,
+    };
     let parsed: ChatResponse = serde_json::from_str(&response)
         .with_context(|| format!("invalid {} response JSON", config.provider))?;
     let message = parsed
@@ -1139,11 +1199,15 @@ fn post(config: &DeepSeekConfig, body: &serde_json::Value) -> Result<String> {
             std::thread::sleep(retry_delay(attempt, retry_after));
             continue;
         }
-        bail!(
+        let message = format!(
             "{} API returned {status} ({})",
             config.provider,
             profiles::status_category(status, &response_body)
-        )
+        );
+        if needs_reasoning_content(status, &response_body) {
+            return Err(ReasoningContentRequired(message).into());
+        }
+        bail!("{message}")
     }
     successful_body
         .with_context(|| format!("{} API request exhausted all attempts", config.provider))

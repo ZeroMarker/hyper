@@ -1446,6 +1446,17 @@ fn stub_model(
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     std::thread::JoinHandle<()>,
 ) {
+    stub_model_with_status(replies.into_iter().map(|reply| (200, reply)).collect())
+}
+
+/// Like `stub_model`, but each reply carries its HTTP status.
+fn stub_model_with_status(
+    replies: Vec<(u16, &'static str)>,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -1455,7 +1466,7 @@ fn stub_model(
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&bodies);
     let handle = std::thread::spawn(move || {
-        for reply in replies {
+        for (code, reply) in replies {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = Vec::new();
             let mut buffer = [0_u8; 8192];
@@ -1484,7 +1495,7 @@ fn stub_model(
             }
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
+                "HTTP/1.1 {code} Stub\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
                 reply.len()
             )
             .unwrap();
@@ -1917,6 +1928,52 @@ fn a_round_without_reasoning_keeps_the_field_once_the_run_has_thought() {
     assert_eq!(assistants.len(), 2);
     assert_eq!(assistants[0]["reasoning_content"], "plan");
     assert_eq!(assistants[1]["reasoning_content"], "");
+}
+
+/// A provider that rejects a tool-call turn for lacking `reasoning_content`
+/// gets the request once more with the field added (empty), and the run goes on.
+#[test]
+fn a_reasoning_content_rejection_is_retried_with_the_field() {
+    let tool_round = r#"{"model":"stub","choices":[{"message":{"content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\"notes.txt\"}"}}]}}]}"#;
+    let rejection = r#"{"error":{"type":"invalid_request_error","message":"The `reasoning_content` in the thinking mode must be passed back to the API."}}"#;
+    let final_reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model_with_status(vec![
+        (200, tool_round),
+        (400, rejection),
+        (200, final_reply),
+    ]);
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("notes.txt"), "one\n").unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "inspect", "notes"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let bodies = bodies.lock().unwrap();
+    let assistant = |index: usize| -> serde_json::Value {
+        let body: serde_json::Value = serde_json::from_str(&bodies[index]).unwrap();
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap()
+            .clone()
+    };
+    assert!(assistant(1).get("reasoning_content").is_none());
+    assert_eq!(assistant(2)["reasoning_content"], "");
 }
 
 /// A failing `verify` command is handed back to the model, which fixes it and
