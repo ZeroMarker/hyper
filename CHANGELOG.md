@@ -66,6 +66,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Thinking-mode models no longer fail with HTTP 400 mid-task.** Providers such
+  as `deepseek-v4.1-flash` require the reasoning behind a tool call to be sent
+  back with it. Hyper now does, keeps the field on later tool rounds once a run
+  has thought, and, if a provider still rejects a tool turn for lacking
+  `reasoning_content`, retries once with the field added.
+- **Automatic compaction no longer loses the summary.** The summary is the
+  oldest message, so the history budget dropped it first and the compacted turns
+  vanished. A leading summary is now always kept; the budget trims only the
+  verbatim turns after it.
 - **Deeply nested commands are refused.** The dangerous-command check inspects
   wrappers and interpreters (`env`, `xargs`, `bash -c`, ...) up to 8 levels
   deep; beyond that it used to let the command through unchecked, so a
