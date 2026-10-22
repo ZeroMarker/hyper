@@ -187,6 +187,30 @@ pub(crate) fn estimated_tokens(message: &SessionMessage) -> usize {
 
 /// Keep a contiguous suffix of whole user-led turns. Never split a large turn
 /// or skip it to fill the budget with older (and less relevant) conversation.
+/// Whether `message` is the projected conversation summary.
+pub(crate) fn is_summary_message(message: &SessionMessage) -> bool {
+    message.role == "user" && message.content.starts_with(SUMMARY_OPEN)
+}
+
+/// `bounded_history`, except a leading summary is always kept and only the
+/// turns after it compete for what is left of the budget. The summary stands
+/// in for turns that no longer exist anywhere else, so dropping it would lose
+/// them silently; dropping a recent verbatim turn loses less.
+pub(crate) fn bounded_history_keeping_summary(
+    history: &[SessionMessage],
+    budget: usize,
+) -> Vec<SessionMessage> {
+    match history.split_first() {
+        Some((summary, rest)) if is_summary_message(summary) => {
+            let remaining = budget.saturating_sub(estimated_tokens(summary));
+            let mut kept = vec![summary.clone()];
+            kept.extend_from_slice(bounded_history(rest, remaining));
+            kept
+        }
+        _ => bounded_history(history, budget).to_vec(),
+    }
+}
+
 pub(crate) fn bounded_history(history: &[SessionMessage], budget: usize) -> &[SessionMessage] {
     let mut start = history.len();
     let mut end = history.len();
@@ -361,6 +385,36 @@ mod tests {
         ];
         assert_eq!(bounded_history(&history, usize::MAX).len(), 2);
         assert!(bounded_history(&[], 100).is_empty());
+    }
+
+    #[test]
+    fn a_leading_summary_survives_the_history_budget() {
+        let summary = summary_message(&"x".repeat(400), "t");
+        let old = SessionMessage {
+            role: "user".into(),
+            content: "old question".into(),
+            timestamp: "t".into(),
+            run_id: None,
+        };
+        let reply = SessionMessage {
+            role: "assistant".into(),
+            content: "old answer".into(),
+            timestamp: "t".into(),
+            run_id: None,
+        };
+        let history = vec![summary.clone(), old.clone(), reply.clone()];
+        let cost = estimated_tokens(&summary);
+        // The summary alone fills the budget; the plain bound would drop it.
+        assert!(bounded_history(&history, cost).len() < history.len());
+        let kept = bounded_history_keeping_summary(&history, cost);
+        assert_eq!(kept.len(), 1);
+        assert!(is_summary_message(&kept[0]));
+        // With room to spare the recent turn is kept after it.
+        let all = bounded_history_keeping_summary(&history, usize::MAX);
+        assert_eq!(all.len(), 3);
+        // Without a summary this is the plain bound.
+        let plain = bounded_history_keeping_summary(&[old, reply], 0);
+        assert!(plain.is_empty());
     }
 
     #[test]

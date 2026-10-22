@@ -3411,6 +3411,51 @@ fn an_over_budget_conversation_is_summarized_automatically() {
     assert!(stdout.contains("compaction.finished"), "{stdout}");
 }
 
+/// A summary as large as the whole history budget is still sent: it stands in
+/// for turns that exist nowhere else, so the budget trims verbatim turns
+/// instead of dropping it.
+#[test]
+fn a_summary_larger_than_the_history_budget_is_not_dropped() {
+    let long = "a".repeat(500);
+    let big_summary = leaked(&format!(
+        r#"{{"model":"stub","choices":[{{"message":{{"content":"KEEP-ME-731 {}"}}}}],"usage":{{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}}}}"#,
+        "s".repeat(3200)
+    ));
+    let replies = vec![
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer one {long}"}}}}]}}"#
+        )),
+        leaked(&format!(
+            r#"{{"model":"stub","choices":[{{"message":{{"content":"answer two {long}"}}}}]}}"#
+        )),
+        big_summary,
+        r#"{"model":"stub","choices":[{"message":{"content":"answer three"}}]}"#,
+    ];
+    let (url, bodies, server) = stub_model(replies);
+    let dir = tempdir().unwrap();
+    let config_home = stub_config(dir.path(), &url);
+    let envs = [("HYPER_HISTORY_TOKENS", "800"), ("HYPER_AUTOCOMPACT", "1")];
+    for prompt in ["first question", "second question", "third question"] {
+        let output = cli_env(
+            dir.path(),
+            &config_home,
+            &envs,
+            &["build", "--session", "chat", prompt],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    server.join().unwrap();
+    let requests = bodies.lock().unwrap();
+    let last: serde_json::Value = serde_json::from_str(&requests[3]).unwrap();
+    let joined = serde_json::to_string(last["messages"].as_array().unwrap()).unwrap();
+    assert!(joined.contains("KEEP-ME-731"), "summary was dropped");
+    assert!(joined.contains("third question"));
+}
+
 /// `HYPER_AUTOCOMPACT=1` enables the automatic summary; with it off (the
 /// default) an over-budget history is bounded by dropping old turns, as before.
 #[test]

@@ -21,9 +21,10 @@ use crate::{
     approval::ApprovalGate,
     cancellation::{CancellationToken, Cancelled, POLL_INTERVAL},
     context::{
-        auto_compaction_enabled, auto_compaction_keep_turns, bounded_history, estimated_tokens,
-        history_budget, keep_suffix_start, loop_compaction_enabled, loop_compaction_keep_groups,
-        loop_summary_content, project_history, summary_message,
+        auto_compaction_enabled, auto_compaction_keep_turns, bounded_history_keeping_summary,
+        estimated_tokens, history_budget, is_summary_message, keep_suffix_start,
+        loop_compaction_enabled, loop_compaction_keep_groups, loop_summary_content,
+        project_history, summary_message,
     },
     deepseek::{
         CompletionError, DeepSeekConfig, ModelReply, ToolSpec, chat_messages, chat_messages_stream,
@@ -502,7 +503,7 @@ fn agent(
     let mut config = events.model_config()?;
     config.cancellation = events.cancellation.clone();
     let history_budget = history_budget()?;
-    let mut history = bounded_history(&events.history, history_budget);
+    let mut history = bounded_history_keeping_summary(&events.history, history_budget);
     let system = system_prompt(step.mode);
     let context = workspace_context(root, &events.permissions)?;
     // Project instructions are guidance, not authority: they are read as data
@@ -534,8 +535,10 @@ fn agent(
                 .map(|message| json!({"role":message.role,"content":message.content})),
         );
         messages.push(json!({"role":"user","content":input}));
+        // A leading summary stands in for dropped turns, so it goes last.
+        let pinned = usize::from(history.first().is_some_and(is_summary_message));
         if config.estimated_request_tokens(&messages, Some(&specs))? <= config.budget.input_tokens()
-            || history.is_empty()
+            || history.len() <= pinned
         {
             break;
         }
@@ -543,10 +546,10 @@ fn agent(
         // agent tool calls/results intact; oversized required context fails.
         let next = history
             .iter()
-            .skip(1)
+            .skip(pinned + 1)
             .position(|message| message.role == "user")
-            .map_or(history.len(), |index| index + 1);
-        history = &history[next..];
+            .map_or(history.len(), |index| pinned + 1 + index);
+        history.drain(pinned..next);
     }
     let history_messages: Vec<Value> = history
         .iter()
