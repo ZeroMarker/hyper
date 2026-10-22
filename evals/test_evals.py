@@ -14,7 +14,8 @@ from fixtures import files, materialize
 from grade import check
 from run import (audit_directory, invoke, recover, snapshot, write_report, usage_metrics,
                  edit_metrics, verification_metrics, attempt_edit_metrics,
-                 attempt_verification_metrics, toolchain_environment, constraint_metrics)
+                 attempt_verification_metrics, toolchain_environment, constraint_metrics,
+                 compaction_metrics, attempt_compaction_metrics)
 
 HERE = Path(__file__).resolve().parent
 
@@ -130,6 +131,17 @@ class EditAndVerificationMetrics(unittest.TestCase):
         attempt = attempt_verification_metrics([{'verification': metrics}])
         self.assertTrue(attempt['passed'])
         self.assertEqual(attempt['retries'], 1)
+
+    def test_compaction_metrics_count_session_and_loop_events(self):
+        events = [{'type': kind, 'payload': {}} for kind in [
+            'compaction.started', 'compaction.finished', 'compaction.started', 'compaction.failed',
+            'model.loop_summary', 'model.loop_summary_failed', 'model.loop_summary']]
+        metrics = compaction_metrics(events)
+        self.assertEqual(metrics, {'started': 2, 'finished': 1, 'failed': 1, 'loop_finished': 2, 'loop_failed': 1})
+        total = attempt_compaction_metrics([{'compaction': metrics}, {}, {'compaction': metrics}])
+        self.assertEqual(total['started'], 4)
+        self.assertEqual(total['loop_finished'], 4)
+        self.assertEqual(compaction_metrics([])['started'], 0)
 
     def test_absent_verification_is_unknown_not_passed(self):
         self.assertIsNone(verification_metrics([])['passed'])

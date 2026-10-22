@@ -49,6 +49,8 @@ python3 evals/run.py \
 
 API Key 来自 `DEEPSEEK_API_KEY` 或 `--config` 指定的 Hyper 配置；默认 Linux 配置路径为 `$XDG_CONFIG_HOME/hyper/config.json` 或 `~/.config/hyper/config.json`。runner 将读取到的凭据固定到子进程环境，显式模型/端点/协议覆盖用户配置和旧环境值，不启动配置向导。Windows/macOS 可显式传入 `--config`。
 
+`--autocompact` 与 `--loop-compact` 分别打开会话压缩（`HYPER_AUTOCOMPACT`）和循环内压缩（`HYPER_LOOP_COMPACT`）；默认关闭，与产品一致，且 runner 总是显式写入 0/1，不继承外部值，开关记录在 `metadata.json`。每轮和每次 attempt 记录 `compaction`（会话压缩 started/finished/failed，循环内摘要 loop_finished/loop_failed），报告有一行汇总。suite 的 turn 可带 `verify`（`commands`、`retries`），此时该轮改用 `hyper run <任务文件>` 以启用验证闭环；现有任务都未配置，因此既有基线口径不变。这两项只有离线指标测试，真实模型下是否改善任务完成率仍需跑基线。
+
 `--task` 可重复指定子集。默认每项 3 次；`--jobs` 只控制相互独立的评测进程数量，不代表 Hyper 支持并行工具/Agent。吞吐与延迟对比需保持该参数一致。每一轮都有外部 wall deadline；Linux 超时清理包括 shell 单独创建的进程组。正常构建轮使用 workspace-write，规划轮使用 read-only，显式指定 `--approval allow` 授权 bash/write/edit，不扩展到 unrestricted；这与旧基线的 CLI 自动放行范围相同，但新版本默认 ask 的交互行为需要单独验证。首轮恢复任务明确要求 direct edit，因为 shell 改动没有同等快照保证。
 
 报告记录代码 revision/dirty、二进制和评测文件 SHA-256、工具版本、模型配置、预算与并发参数；宿主编译环境尚未固定为可复现镜像，因此另记录继承的 `PATH`、Cargo 配置路径与 `SHA-256`、`RUSTC_WRAPPER`、`RUSTFLAGS` 与 `CARGO_BUILD_TARGET`，并在 `report.md` 注明工具链是继承而非固定。无法固定远端模型权重、采样随机性、provider 缓存或服务负载。每轮最多 12 次模型请求，沿用当前产品行为。长会话场景检查约束保留，不声称穷尽了上下文溢出或自动压缩。

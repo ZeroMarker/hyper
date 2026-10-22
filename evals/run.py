@@ -117,6 +117,19 @@ def verification_metrics(events):
             'passed': (finished[-1]['payload'].get('passed') is True) if started else None}
 
 
+def compaction_metrics(events):
+    """Session and in-loop compaction activity; zeros when both are off."""
+    count = lambda kind: sum(e.get('type') == kind for e in events)
+    return {'started': count('compaction.started'), 'finished': count('compaction.finished'),
+            'failed': count('compaction.failed'),
+            'loop_finished': count('model.loop_summary'), 'loop_failed': count('model.loop_summary_failed')}
+
+
+def attempt_compaction_metrics(turns):
+    keys = ['started', 'finished', 'failed', 'loop_finished', 'loop_failed']
+    return {k: sum(turn.get('compaction', {}).get(k, 0) for turn in turns) for k in keys}
+
+
 def constraint_metrics(task, root):
     """Where a task's required constraint ended up in its target file.
 
@@ -285,6 +298,7 @@ def invoke(command, root, env, output, timeout):
         'finished': any(e['type'] == 'run.finished' for e in events),
         'run_ids': sorted({e['runId'] for e in events}),
         'edit': edit_metrics(events), 'verification': verification_metrics(events),
+        'compaction': compaction_metrics(events),
         'repeated_failures': sum(e['type'] == 'agent.repeated_failure' for e in events),
     }
     return metrics, '\n'.join(replies)
@@ -344,7 +358,14 @@ def attempt(task, repetition, args, env):
     started = time.monotonic()
     for index, turn in enumerate(task['turns']):
         mode = 'read-only' if turn['mode'] == 'plan' else 'workspace-write'
-        command = [str(args.hyper), '--jsonl', '--approval', 'allow', '--sandbox', mode, turn['mode'], '--session', 'eval', prompt(turn)]
+        if turn.get('verify'):
+            # A verify gate lives in the task file; `run` has no prompt form.
+            spec = destination/f'task-{index+1}.json'
+            spec.write_text(json.dumps({'name': task['id'], 'steps': [{
+                'id': 'step', 'mode': turn['mode'], 'instruction': prompt(turn), 'verify': turn['verify']}]}))
+            command = [str(args.hyper), '--jsonl', '--approval', 'allow', '--sandbox', mode, 'run', str(spec)]
+        else:
+            command = [str(args.hyper), '--jsonl', '--approval', 'allow', '--sandbox', mode, turn['mode'], '--session', 'eval', prompt(turn)]
         metrics, reply = invoke(command, root, env, destination/f'turn-{index+1}.jsonl', args.timeout)
         metrics['mode'] = turn['mode']
         turns.append(metrics)
@@ -382,6 +403,7 @@ def attempt(task, repetition, args, env):
               'recovery_invalid_edit_confirmed': recovery_invalid_edit,
               'constraint': constraint_metrics(task, root),
               'edit': attempt_edit_metrics(turns), 'verification': attempt_verification_metrics(turns),
+              'compaction': attempt_compaction_metrics(turns),
               'repeated_failures': sum(turn.get('repeated_failures', 0) for turn in turns),
               'duration_seconds': round(time.monotonic() - started, 4), 'turns': turns,
               'usage': usage, 'cost': None, 'storage_before_prune': before_prune,
@@ -400,6 +422,8 @@ def write_report(output, metadata, results):
     verify_attempts = sum(r.get('verification', {}).get('attempts', 0) for r in results)
     verify_retries = sum(r.get('verification', {}).get('retries', 0) for r in results)
     repeated = sum(r.get('repeated_failures', 0) for r in results)
+    compaction = {k: sum(r.get('compaction', {}).get(k, 0) for r in results)
+                  for k in ['started', 'finished', 'failed', 'loop_finished', 'loop_failed']}
     constraints = [r['constraint'] for r in results if r.get('constraint')]
     constraint_ok = sum(c['first_line_ok'] for c in constraints)
     constraint_misplaced = sum(c['misplaced'] for c in constraints)
@@ -413,6 +437,7 @@ def write_report(output, metadata, results):
              f"Passed: **{passed}/{len(results)}**. This is a Hyper/model baseline, not a competitor comparison.",
              f"First-pass edit success: **{first_pass}** files; edit retries: {edit_retries}.",
              f"Verification attempts: {verify_attempts}; verification retries: {verify_retries}; repeated-failure stops: {repeated}.",
+             f"Compaction (off unless enabled): session {compaction['finished']}/{compaction['started']} finished, {compaction['failed']} failed; in-loop {compaction['loop_finished']} summaries, {compaction['loop_failed']} failed.",
              f"Long-session constraint placement: {constraint_ok}/{len(constraints)} as the required first line; {constraint_misplaced} misplaced.",
              '', 'Usage is unknown if any iteration omits usage. Costs are unknown; no price assumptions are made.',
              'Latencies are measured at the JSONL consumer, including persistence overhead. Raw traces are private.',
@@ -441,6 +466,8 @@ def main():
     parser.add_argument('--context-tokens', type=int, default=128000)
     parser.add_argument('--output-tokens', type=int, default=8192)
     parser.add_argument('--history-tokens', type=int, default=16000)
+    parser.add_argument('--autocompact', action='store_true', help='Enable HYPER_AUTOCOMPACT (session compaction); off by default like the product')
+    parser.add_argument('--loop-compact', action='store_true', help='Enable HYPER_LOOP_COMPACT (in-loop compaction); off by default like the product')
     parser.add_argument('--task', action='append', help='Subset of task IDs; repeatable')
     parser.add_argument('--config', type=Path, default=Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home()/'.config')))/'hyper/config.json', help='Credential source only; model and endpoint are explicit')
     args = parser.parse_args()
@@ -472,6 +499,9 @@ def main():
     env.update({'DEEPSEEK_API_KEY': key, 'DEEPSEEK_MODEL': args.model, 'DEEPSEEK_BASE_URL': args.base_url,
                 'DEEPSEEK_PROTOCOL': args.protocol, 'HYPER_CONTEXT_TOKENS': str(args.context_tokens),
                 'HYPER_OUTPUT_TOKENS': str(args.output_tokens), 'HYPER_HISTORY_TOKENS': str(args.history_tokens)})
+    # Explicit either way, so an inherited value never changes what is measured.
+    env['HYPER_AUTOCOMPACT'] = '1' if args.autocompact else '0'
+    env['HYPER_LOOP_COMPACT'] = '1' if args.loop_compact else '0'
     git = lambda *cmd: subprocess.check_output(['git', *cmd], cwd=HERE.parent, text=True).strip()
     metadata = {'schema_version': 1, 'suite_version': suite['version'], 'started_at': datetime.now(timezone.utc).isoformat(),
                 'revision': git('rev-parse', 'HEAD'), 'dirty': bool(git('status', '--porcelain')),
@@ -480,7 +510,7 @@ def main():
                 'runner_sha256': digest(HERE/'run.py'),
                 'model': args.model, 'base_url': args.base_url, 'protocol': args.protocol,
                 'context_tokens': args.context_tokens, 'output_tokens': args.output_tokens,
-                'history_tokens': args.history_tokens, 'max_model_turns': 12, 'repetitions': args.repetitions,
+                'history_tokens': args.history_tokens, 'autocompact': args.autocompact, 'loop_compact': args.loop_compact, 'max_model_turns': 12, 'repetitions': args.repetitions,
                 'jobs': args.jobs, 'turn_timeout_seconds': args.timeout, 'platform': sys.platform,
                 'approval_policy': 'explicit --approval allow for bash/write/edit; tool whitelist and execution boundaries still apply',
                 'audit_storage': 'layout 1; explicit per-attempt external state; workspace .hyper-tmp excluded from audit storage metrics',
