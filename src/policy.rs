@@ -83,8 +83,10 @@ pub fn check_command(command: &str, workspace_root: &Path) -> Result<()> {
 /// Reject a path the file tools must not touch, on top of the workspace escape
 /// check they already do.
 fn check_pipeline(segments: &[Segment], workspace_root: &Path, depth: usize) -> Result<()> {
+    // Past the limit the rest is unchecked, so refuse it rather than let a deep
+    // nest hide a destructive command.
     if depth > MAX_DEPTH {
-        return Ok(());
+        bail!("command matches dangerous pattern: nested more than {MAX_DEPTH} levels")
     }
     let programs: Vec<String> = segments
         .iter()
@@ -432,6 +434,13 @@ mod tests {
             "expected {command:?} to be allowed: {:?}",
             check(command)
         );
+    }
+
+    #[test]
+    fn commands_nested_past_the_limit_are_rejected() {
+        assert_allowed(&format!("{}ls", "env ".repeat(MAX_DEPTH)));
+        assert_blocked(&format!("{}ls", "env ".repeat(MAX_DEPTH + 2)));
+        assert_blocked(&format!("{}rm -rf /", "env ".repeat(MAX_DEPTH + 2)));
     }
 
     #[test]

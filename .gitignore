@@ -7,3 +7,4 @@ dist/
 # Staging directory for the npm packages built by npm/scripts/publish.mjs
 npm-dist/
 *.tgz
+__pycache__/
