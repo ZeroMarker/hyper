@@ -770,14 +770,20 @@ fn agent(
 /// the model produced only tool calls, which is the shape the APIs expect for
 /// a message that goes on to list its `tool_calls`.
 fn assistant_message(reply: &ModelReply) -> Value {
-    json!({
+    let mut message = json!({
         "role":"assistant",
         "content": if reply.content.is_empty() { Value::Null } else { json!(reply.content) },
         "tool_calls": reply.tool_calls.iter().map(|call| json!({
             "id":call.id,"type":"function",
             "function":{"name":call.function.name,"arguments":call.function.arguments}
         })).collect::<Vec<_>>(),
-    })
+    });
+    // Thinking-mode models reject the next request of a tool round (HTTP 400)
+    // unless the reasoning that produced the calls is sent back with them.
+    if let Some(reasoning) = reply.reasoning_content.as_deref().filter(|r| !r.is_empty()) {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    message
 }
 
 fn tool_specs_for(step: &StepSpec) -> Vec<ToolSpec> {
