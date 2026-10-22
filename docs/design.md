@@ -29,6 +29,7 @@ flowchart LR
 | [`cli.rs`](../src/cli.rs)、[`tui/`](../src/tui/) | 命令解析、交互界面、任务入口、结果展示 |
 | [`model.rs`](../src/model.rs) | 任务、步骤、事件、摘要及会话的数据结构和校验 |
 | [`engine.rs`](../src/engine.rs) | 步骤调度、工具调用、代理循环、事件写入与 replay |
+| [`engine/compaction.rs`](../src/engine/compaction.rs) | 手动、自动与循环内压缩：摘要请求、轮次边界、终结记录 |
 | [`deepseek.rs`](../src/deepseek.rs)、[`deepseek/stream.rs`](../src/deepseek/stream.rs) | API 配置、协议选择、请求与响应转换、SSE 解析 |
 | [`state.rs`](../src/state.rs)、[`workspace.rs`](../src/workspace.rs)、[`tool_file.rs`](../src/tool_file.rs)、[`restore_file.rs`](../src/restore_file.rs)、[`checkpoint_file.rs`](../src/checkpoint_file.rs) | 文件布局、运行锁、SQLite 索引、会话、清理与检查点 |
 | [`permissions.rs`](../src/permissions.rs)、[`policy.rs`](../src/policy.rs)、[`sandbox.rs`](../src/sandbox.rs)、[`syscall_sandbox.rs`](../src/syscall_sandbox.rs)、[`resource.rs`](../src/resource.rs) | 共用工具权限、命令检查、Linux Landlock/read-only seccomp、子进程资源限制 |

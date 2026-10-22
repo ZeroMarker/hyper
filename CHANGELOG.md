@@ -66,6 +66,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Deeply nested commands are refused.** The dangerous-command check inspects
+  wrappers and interpreters (`env`, `xargs`, `bash -c`, ...) up to 8 levels
+  deep; beyond that it used to let the command through unchecked, so a
+  destructive command could hide under enough nesting. It is now rejected.
+
 - A lone command-like word such as `hyper paths` is no longer sent to the model
   as a build task; it is rejected with the closest subcommand. Send one-word
   tasks with `hyper build <word>`.
