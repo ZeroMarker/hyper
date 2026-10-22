@@ -679,7 +679,19 @@ fn agent(
             }
             return Ok((true, payload));
         }
-        let message = assistant_message(&reply);
+        let mut message = assistant_message(&reply);
+        // A gateway may route one round to an upstream that thinks but streams
+        // no reasoning text. Once the run has shown thinking, the next request
+        // is still rejected unless every tool-call turn carries the field.
+        if message.get("reasoning_content").is_none()
+            && messages.iter().any(|earlier| {
+                earlier["reasoning_content"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+            })
+        {
+            message["reasoning_content"] = json!("");
+        }
         events.write(
             "model.tool_calls",
             json!({

@@ -1880,6 +1880,45 @@ fn reasoning_is_sent_back_with_its_tool_calls() {
     assert_eq!(assistant["tool_calls"][0]["id"], "c1");
 }
 
+/// A round that streams no reasoning, in a run that already showed thinking,
+/// still sends the field (empty) so a thinking-mode provider accepts the request.
+#[test]
+fn a_round_without_reasoning_keeps_the_field_once_the_run_has_thought() {
+    let first = r#"{"model":"stub","choices":[{"message":{"content":"","reasoning_content":"plan","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\"notes.txt\"}"}}]}}]}"#;
+    let second = r#"{"model":"stub","choices":[{"message":{"content":"","tool_calls":[{"id":"c2","type":"function","function":{"name":"read","arguments":"{\"path\":\"notes.txt\"}"}}]}}]}"#;
+    let final_reply = r#"{"model":"stub","choices":[{"message":{"content":"done"}}]}"#;
+    let (url, bodies, server) = stub_model(vec![first, second, final_reply]);
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("notes.txt"), "one\n").unwrap();
+    let config_home = stub_config(root.path(), &url);
+    let output = Command::new(env!("CARGO_BIN_EXE_hyper"))
+        .args(["--jsonl", "--approval", "allow", "inspect", "notes"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .env_remove("DEEPSEEK_MODEL")
+        .env_remove("DEEPSEEK_PROTOCOL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let last: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[2]).unwrap();
+    let assistants: Vec<_> = last["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 2);
+    assert_eq!(assistants[0]["reasoning_content"], "plan");
+    assert_eq!(assistants[1]["reasoning_content"], "");
+}
+
 /// A failing `verify` command is handed back to the model, which fixes it and
 /// passes on the retry. The retry request carries the failure text.
 #[test]
