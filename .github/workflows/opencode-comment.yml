@@ -34,10 +34,10 @@ jobs:
       - name: Check model configuration
         env:
           MODEL: ${{ vars.OPENCODE_MODEL }}
-          API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           test -n "$MODEL" || { echo 'Missing OPENCODE_MODEL variable'; exit 1; }
-          test -n "$API_KEY" || { echo 'Missing OPENROUTER_API_KEY secret'; exit 1; }
+          test -n "$API_KEY" || { echo 'Missing OPENCODE_API_KEY secret'; exit 1; }
 
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -63,7 +63,7 @@ jobs:
         # Official Action wrapper snapshot; see README for runtime version caveat.
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: ${{ vars.OPENCODE_MODEL }}
           use_github_token: 'false'

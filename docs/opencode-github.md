@@ -1,7 +1,7 @@
 # OpenCode Issue 自动开发
 
 本仓库提供两个 GitHub Actions 入口，使用 OpenCode 官方 GitHub 集成和
-OpenRouter 模型，在 GitHub 托管 Runner 上修改代码并创建 PR。人工检查 Diff、
+OpenCode Go 的 `deepseek-v4.1-flash` 模型，在 GitHub 托管 Runner 上修改代码并创建 PR。人工检查 Diff、
 测试结果和 CI 后再合并。无需本机或 VPS 常驻 Agent。
 
 ## 一次性配置
@@ -10,18 +10,20 @@ OpenRouter 模型，在 GitHub 托管 Runner 上修改代码并创建 PR。人�
    [OpenCode Agent GitHub App](https://github.com/apps/opencode-agent)，确认 App
    获得创建分支、提交、Issue 回复和 PR 所需的权限。
 2. 在 [Actions Secrets](https://github.com/ZeroMarker/hyper/settings/secrets/actions)
-   添加 `OPENROUTER_API_KEY`，使用单独限制预算的 Key。
+   添加 `OPENCODE_API_KEY`，使用 OpenCode Go 的 Key，按需限制预算。
 3. 在 [Actions Variables](https://github.com/ZeroMarker/hyper/settings/variables/actions)
-   添加 `OPENCODE_MODEL`，值为 `openrouter/<供应商>/<模型ID>`。先在供应商目录确认
-   模型可用、支持工具调用且有足够额度；仓库不提供过时模型默认值。
+   添加 `OPENCODE_MODEL`，当前值为 `opencode-go/deepseek-v4.1-flash`。更换模型时
+   先在供应商目录确认模型可用、支持工具调用且有足够额度。
 4. 个人仓库的标签入口默认只接受仓库所有者；其他可信账号需加入可选变量
    `OPENCODE_ALLOWED_ACTORS`，例如 `["trusted-login"]`。组织仓库必须配置账号
    白名单；组织名不代表真人账号。账号仍需具有仓库写权限。
 5. 确认工作流已进入默认分支、Actions 允许执行依赖的 Action，并按需要配置默认
    分支规则：要求 PR、人工审批、实际 CI 检查通过，Agent/App 不得绕过。
 
-项目自身的 DeepSeek 配置与 OpenCode 的 Provider 配置独立；本机 Hyper 的模型
-设置不会自动传到 GitHub Runner。不要在 Issue 或日志中粘贴模型密钥。
+项目自身的模型配置与 OpenCode 的 Provider 配置独立；本机 Hyper 的模型设置不会
+自动传到 GitHub Runner。本次从本机已保存的 OpenCode Go 凭据通过标准输入写入
+仓库 Secret，并单独设置模型变量；工作流通过环境变量 `OPENCODE_API_KEY` 使用它，
+不依赖 Runner 上的登录文件。不要在 Issue 或日志中粘贴模型密钥。
 
 ## 使用
 
@@ -69,5 +71,7 @@ Key 或模型变量时，任务在调用 Agent 前明确失败，不输出密钥
 运行期间能访问注入的凭据；应限制派单者、密钥权限与预算。
 
 参考：[官方 GitHub 集成](https://opencode.ai/docs/github/)、
+[OpenCode Go Provider 定义](https://github.com/anomalyco/models.dev/blob/dev/providers/opencode-go/provider.toml)、
+[DeepSeek v4.1 Flash 模型定义](https://github.com/anomalyco/models.dev/blob/dev/providers/opencode-go/models/deepseek-v4.1-flash.toml)、
 [Action 实现](https://github.com/anomalyco/opencode/blob/77fc88c8ade8e5a620ebbe1197f3a572d29ae91a/github/action.yml)、
 [GitHub 并发说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)。
