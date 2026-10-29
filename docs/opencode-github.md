@@ -14,7 +14,7 @@ OpenCode Go 的 `deepseek-v4.1-flash` 模型，在 GitHub 托管 Runner 上修�
 3. 在 [Actions Variables](https://github.com/ZeroMarker/hyper/settings/variables/actions)
    添加 `OPENCODE_MODEL`，当前值为 `opencode-go/deepseek-v4.1-flash`。更换模型时
    先在供应商目录确认模型可用、支持工具调用且有足够额度。
-4. 个人仓库的标签入口默认只接受仓库所有者；其他可信账号需加入可选变量
+4. 个人仓库的新建 Issue 入口默认只接受仓库所有者；其他可信账号需加入可选变量
    `OPENCODE_ALLOWED_ACTORS`，例如 `["trusted-login"]`。组织仓库必须配置账号
    白名单；组织名不代表真人账号。账号仍需具有仓库写权限。
 5. 确认工作流已进入默认分支、Actions 允许执行依赖的 Action，并按需要配置默认
@@ -27,7 +27,17 @@ OpenCode Go 的 `deepseek-v4.1-flash` 模型，在 GitHub 托管 Runner 上修�
 
 ## 使用
 
-在未关闭的普通 Issue 中发表评论，命令从正文开头开始，后接空格和任务内容：
+由仓库所有者或白名单账号新建普通 Issue，即自动启动 OpenCode。直接在标题和
+正文中写明需求、复现步骤、预期行为和验收条件，无需评论命令或添加标签。
+入口为 `issues: opened`，只接受真人账号，OpenCode 还会检查实际仓库写权限；
+非授权账号创建的 Issue 会跳过 Agent 任务。
+
+现有 Issue 不会补跑；编辑正文、重新打开 Issue 或添加 `ai-task` 标签均不会
+自动触发。需求不明确时，Agent 会先询问而不修改文件。
+
+评论入口保留，供已有 Issue 手动派单或重试。请先检查运行记录和已有 PR，避免
+与新建 Issue 的自动任务重复。在未关闭的普通 Issue 中发表评论，命令从正文
+开头开始，后接空格和任务内容：
 
 ```text
 /oc 先复现这个 Bug，再修复并补充回归测试，创建 PR。
@@ -36,9 +46,6 @@ OpenCode Go 的 `deepseek-v4.1-flash` 模型，在 GitHub 托管 Runner 上修�
 也支持 `/opencode`。只发命令没有任务正文时，Agent 会总结并询问具体任务。
 入口只接受真人 `OWNER`、`MEMBER`、`COLLABORATOR`，OpenCode 还会检查实际仓库
 权限；组织成员身份本身不保证拥有写权限。PR 评论和编辑已有评论不会触发。
-
-另一种方式是由仓库所有者或白名单账号给 Issue 添加 `ai-task` 标签。移除再添加
-会重复触发，因此派单前先检查是否已有相关运行、分支或 PR。修改正文不会自动重跑。
 
 两个入口对同一 Issue 使用共同并发组，保留正在执行的任务，默认仅保留一个等待
 任务；连续派单可能替换先前等待任务。它不提供去重或可靠任务队列。
@@ -54,12 +61,13 @@ Runner 安装 Rust 1.94.0、rustfmt、Clippy、Node.js 22 和 ripgrep，Agent �
 `contents: read`；检出不保存凭据，并关闭 OpenCode 会话分享。CI 和人工 Review
 才决定是否合并，不能把“Action 成功”或“有 PR”当成全部测试通过。
 
-首次验收应使用一个小型 Issue，逐项确认：
+首次验收由可信账号新建一个需求明确的小型 Issue，无需追加命令或标签，逐项确认：
 
 1. 配置预检查、App OIDC 换令牌、模型调用均成功。
 2. 生成独立分支和含预期修改的 PR，没有直接更新默认分支。
 3. PR 记录真实检查命令与结果，现有 CI 成功，人工 Review Diff。
-4. 非授权评论、PR 评论、错误标签均跳过任务。
+4. 非授权账号创建的 Issue、非授权评论、PR 评论均跳过任务；编辑、重新打开和
+   标签变更不会启动自动任务。
 
 需要排障时查看 [Actions](https://github.com/ZeroMarker/hyper/actions)，按入口条件、
 Secret/Variable、App 授权、模型认证、测试、推送、PR、CI 的顺序检查。没有配置

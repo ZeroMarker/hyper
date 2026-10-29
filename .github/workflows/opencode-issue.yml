@@ -2,7 +2,7 @@ name: OpenCode Issue Task
 
 on:
   issues:
-    types: [labeled]
+    types: [opened]
 
 permissions:
   id-token: write
@@ -12,7 +12,6 @@ jobs:
   implement:
     # Optional repository variable: OPENCODE_ALLOWED_ACTORS = ["trusted-login"]
     if: >-
-      github.event.label.name == 'ai-task' &&
       github.event.issue.state == 'open' &&
       github.event.sender.type == 'User' &&
       (
