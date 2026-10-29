@@ -20,6 +20,39 @@ from run import (audit_directory, invoke, recover, snapshot, write_report, usage
 
 HERE = Path(__file__).resolve().parent
 
+
+def messages_reply(content_type, stop_reason, calls=(), text=None):
+    content = []
+    if text is not None:
+        content.append({'type': 'text', 'text': text})
+    content.extend({'type': 'tool_use', 'id': call['id'], 'name': call['name'],
+                    'input': call['input']} for call in calls)
+    if content_type == 'application/json':
+        return json.dumps({'model': 'stub', 'stop_reason': stop_reason, 'content': content,
+                           'usage': {'input_tokens': 11, 'output_tokens': 7}}).encode()
+    frames = []
+    def frame(event, data):
+        frames.append(f'event: {event}\ndata: {json.dumps(data)}\n\n'.encode())
+    frame('message_start', {'type': 'message_start',
+                            'message': {'model': 'stub', 'usage': {'input_tokens': 11}}})
+    for index, block in enumerate(content):
+        if block['type'] == 'tool_use':
+            frame('content_block_start', {'type': 'content_block_start', 'index': index,
+                                          'content_block': {'type': 'tool_use', 'id': block['id'],
+                                                            'name': block['name'], 'input': {}}})
+            frame('content_block_delta', {'type': 'content_block_delta', 'index': index,
+                                          'delta': {'type': 'input_json_delta',
+                                                    'partial_json': json.dumps(block['input'])}})
+        else:
+            frame('content_block_start', {'type': 'content_block_start', 'index': index,
+                                          'content_block': {'type': 'text', 'text': block['text']}})
+        frame('content_block_stop', {'type': 'content_block_stop', 'index': index})
+    frame('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': stop_reason},
+                            'usage': {'output_tokens': 7}})
+    frame('message_stop', {'type': 'message_stop'})
+    return b''.join(frames)
+
+
 # The CLI runs this suite makes are throwaway, so they must not land in the
 # developer's real state directory: it accumulates one workspace per temporary
 # repository, and it is not writable in every container or sandbox. Tests that
@@ -276,6 +309,39 @@ class OfflineCLI(unittest.TestCase):
             server.server_close()
             worker.join()
 
+    @contextlib.contextmanager
+    def stub_provider(self, respond):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get('Content-Length', 0)) or 0)
+                self.server.bodies.append(json.loads(raw) if raw else {})
+                content_type, body = respond(len(self.server.bodies), self.server.bodies[-1])
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.bodies = []
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+    def messages_env(self, server, state):
+        env = os.environ.copy()
+        env.update({'DEEPSEEK_API_KEY': 'stub',
+                    'DEEPSEEK_BASE_URL': f'http://127.0.0.1:{server.server_port}/v1',
+                    'DEEPSEEK_MODEL': 'stub', 'DEEPSEEK_PROTOCOL': 'messages',
+                    'HYPER_STATE_DIR': state})
+        return env
+
     def test_verify_turn_runs_the_gate_through_a_task_file(self):
         task = next(t for t in json.loads((HERE/'suite.json').read_text())['tasks'] if t['id'] == 'python-boundary-verify')
         with tempfile.TemporaryDirectory() as temp, self.provider() as server:
@@ -409,6 +475,88 @@ class OfflineCLI(unittest.TestCase):
                     server.shutdown()
                     thread.join()
                     server.server_close()
+
+    def test_messages_stop_reasons_reject_valid_write_batch_without_side_effects(self):
+        calls = [
+            {'id': 'write-new', 'name': 'write',
+             'input': {'path': 'out.txt', 'content': 'must not execute'}},
+            {'id': 'write-existing', 'name': 'write',
+             'input': {'path': 'README.md', 'content': 'also must not execute'}},
+        ]
+        reasons = [('max_tokens', 'output_truncated'),
+                   ('model_context_window_exceeded', 'output_truncated'),
+                   ('refusal', 'content_filtered')]
+        for content_type in ['application/json', 'text/event-stream']:
+            transport = 'json' if content_type == 'application/json' else 'sse'
+            for reason, kind in reasons:
+                respond = lambda _index, _body, ct=content_type, r=reason: (
+                    ct, messages_reply(ct, r, calls))
+                with self.subTest(transport=transport, reason=reason), \
+                     tempfile.TemporaryDirectory() as temp, \
+                     tempfile.TemporaryDirectory() as state_temp, \
+                     self.stub_provider(respond) as server:
+                    root = Path(temp)
+                    original = 'Messages completion guard fixture\n'
+                    (root/'README.md').write_text(original)
+                    metrics, _ = invoke([str(self.binary), '--jsonl', '--approval', 'allow',
+                                         'build', 'write out.txt'], root,
+                                        self.messages_env(server, state_temp), root/'trace.jsonl', 10)
+                    self.assertEqual(metrics['exit_code'], 1)
+                    self.assertFalse(metrics['finished'])
+                    self.assertEqual(metrics['errors'], ['ModelCompletionError'])
+                    self.assertEqual(len(server.bodies), 1,
+                                     (root/'trace.jsonl').read_text() + (root/'trace.stderr').read_text())
+                    self.assertEqual(metrics['tool_results'], 0)
+                    self.assertEqual(metrics['model_iterations'], 0)
+                    self.assertFalse((root/'out.txt').exists())
+                    self.assertEqual((root/'README.md').read_text(), original)
+                    self.assertTrue(metrics['persisted_stream_matches'])
+                    events = [json.loads(line) for line in (root/'trace.jsonl').read_text().splitlines()]
+                    self.assertFalse(any(e['type'] in ('tool.started', 'tool.finished') for e in events))
+                    self.assertFalse(any(e['type'] == 'model.iteration' for e in events))
+                    failed = next(e for e in events if e['type'] == 'model.failed')['payload']
+                    completion = failed['completion']
+                    self.assertEqual(failed['kind'], kind)
+                    self.assertEqual(completion['protocol'], 'messages')
+                    self.assertEqual(completion['transport'], transport)
+                    self.assertTrue(completion['terminalReceived'])
+                    self.assertEqual(completion['finishReason'], reason)
+                    self.assertEqual(completion['toolCallCount'], len(calls))
+                    terminal = next(e for e in events if e['type'] == 'run.failed')['payload']['failure']
+                    self.assertEqual(terminal['errorType'], 'ModelCompletionError')
+                    self.assertFalse(terminal['retryable'])
+                    self.assertEqual(terminal['details']['completionFailureKind'], kind)
+                    self.assertEqual(terminal['details']['completion'], completion)
+                    serialized = json.dumps([failed, terminal])
+                    for secret in ['must not execute', 'also must not execute']:
+                        self.assertNotIn(secret, serialized)
+
+    def test_messages_success_control_executes_write_and_finishes(self):
+        call = {'id': 'write-ok', 'name': 'write',
+                'input': {'path': 'out.txt', 'content': 'created by model'}}
+        for content_type in ['application/json', 'text/event-stream']:
+            transport = 'json' if content_type == 'application/json' else 'sse'
+            def respond(index, _body, ct=content_type):
+                if index == 1:
+                    return ct, messages_reply(ct, 'tool_use', [call])
+                return ct, messages_reply(ct, 'end_turn', text='done')
+            with self.subTest(transport=transport), \
+                 tempfile.TemporaryDirectory() as temp, \
+                 tempfile.TemporaryDirectory() as state_temp, \
+                 self.stub_provider(respond) as server:
+                root = Path(temp)
+                (root/'README.md').write_text('Messages completion success fixture\n')
+                metrics, _ = invoke([str(self.binary), '--jsonl', '--approval', 'allow',
+                                     'build', 'write out.txt'], root,
+                                    self.messages_env(server, state_temp), root/'trace.jsonl', 10)
+                self.assertEqual(metrics['exit_code'], 0, (root/'trace.stderr').read_text())
+                self.assertEqual(len(server.bodies), 2)
+                self.assertEqual((root/'out.txt').read_text(), 'created by model')
+                self.assertTrue(metrics['finished'])
+                self.assertEqual(metrics['tool_results'], 1)
+                self.assertEqual(metrics['model_iterations'], 2)
+                self.assertEqual(metrics['errors'], [])
+                self.assertTrue(metrics['persisted_stream_matches'])
 
     def test_timeout_stops_cli_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as temp:
